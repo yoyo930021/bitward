@@ -14,14 +14,34 @@
 | 伺服器 | Bitwarden Cloud 與 Vaultwarden 皆一級目標；欄位寬容 + raw mirror | client API 無官方 spec；vaultwarden#6729 漂移事故 |
 | 隱私主軸 | 機密預設不進 LLM context；metadata-only + 單一受審計 reveal + 執行期注入出口淨化 | arXiv 2604.03070（73.5% 洩漏經 stdout、89.6% 立即可利用）；官方 MCP 反彈（`research/agent-ecosystem.md`） |
 | 記憶體保護 | 明文只存在 mlock、MADV_DONTDUMP 的專用 arena，drop 即清零；不可變字串不跨 FFI；argv/env 無密碼（操作者要求 2026-10-29） | Keyguard 的 memfd_secret/kernel keyring 先例（`research/prior-art.md` §4.5）；1Password 同級風險取捨 |
+| 安裝形態 | Full/Thin 以執行體劃分：中樞是 runtime，GUI 只是其中一個介面。thin client 一律可獨立安裝使用：本機首開自動註冊 headless 中樞，或配對遠端中樞 | 操作者決定 2026-10-29 |
 | 名稱 | 工作名 `bitward`，文件一律寫「Bitwarden-compatible client」，出貨前查商標 | Bitwarden Trademark Guidelines |
+
+### 0.1 技術線（逐 concern 選定）
+
+| Concern | 選定 | 備註 |
+|---|---|---|
+| 核心語言 | Rust（stable，tokio 非同步 runtime） | 一顆核心複用：daemon、CLI、MCP shim、crypto、sync；Android 經 UniFFI，macOS 經 FFI |
+| 加密原語 | rustcrypto 系：`pbkdf2`、`argon2`、`aes`+`hmac`（信封 type 2）、`hkdf`、`rsa`、`sha2`、`rand_core` | 信封/KDF 編排**自寫**（授權），底層算子用 MIT/Apache crate，組合為 GPL 著作沒有障礙 |
+| 傳輸加密 | per-conn：`x25519-dalek` + `chacha20poly1305`；跨機：`rustls`（TLS1.3）+ 上層再疊一層 | KeePassXC crypto_box 教訓：不單信通道 |
+| 序列化 | BTP wire 用 `postcard`（除錯模式走 JSON）；型別 schema 單一來源，產生 Rust/Swift/Kotlin/TS bindings | thin 端零業務邏輯的結構保證 |
+| 本地儲存 | SQLite（WAL，`rusqlite`）+ FTS5 索引；附件 content-addressed blob | 檔權限 0600；鏡像存密文原樣 |
+| 金鑰封存 | macOS `security-framework`（Keychain biometric ACL）；Android Keystore Class 3/StrongBox（JNI） | §1 落盤形態 |
+| 記憶體 | `zeroize` + 自寫 secret arena（`mlock`、`MADV_DONTDUMP`、Linux `memfd_secret`） | §2.7 |
+| macOS | SwiftUI GUI；provider extension 為 Swift + XPC（MachServices 按需啟動）；常駐用 `SMAppService`；auto-type 用 CGEvent | 簽章/公證走 Developer ID |
+| Android | Kotlin + Compose；`androidx.autofill`（inline，API 30+）＋ `androidx.credentials` provider（API 34）；foreground service 跑 in-process 中樞 | Keyguard 全棧先例 |
+| CLI／MCP | `clap`；MCP 用 `rmcp`（Rust SDK），shim 只做 MCP↔BTP 轉譯 | shim 不含政策邏輯 |
+| 可觀察性 | `tracing`，secret 出口經 Redactor 層 | 日誌零明文由 A8 守 |
+| 測試 | `cargo nextest` + `proptest`（raw mirror 無損往返）+ 錄製 fixtures + docker Vaultwarden 釘版矩陣 + macOS runner + Android compile-only | A1..A12 |
+| 打包 | macOS `.pkg`（公證）、Android AAB、Linux tarball + systemd user unit、後續 brew tap | `cargo deny` 守授權 |
+| 授權 | GPL-3.0-or-later 全 repo | §0 授權列 |
 
 ## 1. 進程拓撲
 
 | 進程 | 生命週期 | 角色 | 持長期金鑰 |
 |---|---|---|---|
 | `bitwarderd` | 常駐，**每裝置一個**（macOS LaunchAgent/SMAppService KeepAlive；Linux systemd user；Android 為 app 內 in-process 等位物，foreground service） | 本裝置的金鑰狀態機、sync+outbox、agent 治理、審計、identity store 維護、auto-type 排程 | 本裝置唯一持有者 |
-| `bitward`（CLI） | 一次性短命 | 人與腳本介面；無 daemon 時提示啟動，不自行降格持鑰 | 否 |
+| `bitward`（CLI） | 一次性短命 | 人與腳本介面；無本機中樞時自動註冊 headless hub（首開）或走已配對的遠端中樞，永不自行降格持鑰 | 否 |
 | `bitward-mcp` | 由 agent host spawn，stdio | MCP ↔ BTP 轉譯，唯一對 LLM 說話的進程 | 否（持 scoped session token） |
 | `Bitward.app`（macOS GUI） | 可開可關，關閉不影響服務 | 瀏覽/編輯、enrollment 與衝突核准 UI、TCC 入口、審計瀏覽 | 否 |
 | `BitwardProvider.appex` | 系統按需啟動、隨時回收 | passwords（macOS 14+）、passkeys、OTP（15+）、text-to-insert | 否 |
@@ -43,6 +63,23 @@ Full client = 中樞 = 持鑰者 + sync 寫入者 + 該裝置 agent 治理域。
 - **金鑰輪播傳播：** 他台改主密碼 → 本裝置 sync 發現 Keys 指紋變動 → `Stale` → 要求重新解鎖（§2.2）。
 - **TDE 審批：** 任何 Full 都能當批准裝置（auth-request answer），手機批桌面登入與官方行為同構。
 - **Thin Android 保留**為配對模式：手機純當批准/輸入面、讀寫全部代理給桌面中樞。建立時選模式，資料模型與協議訊息完全相同（§2.5 同構規則）。
+
+### 1.2 安裝形態（thin client 獨立安裝）
+
+Full/Thin 的分界在執行體，不在套件。中樞（持鑰 runtime）與 GUI（介面）解耦，所以「獨立安裝 thin」不需要把金鑰下放給 surface，需要的是讓每台機器都能取得一個中樞：本機長出來，或遠端配對回來。
+
+| 安裝包 | 內容 | 場景 |
+|---|---|---|
+| `bitward`（Full 套件） | 中樞 + 平台 GUI（macOS app／Android app） | 主力裝置 |
+| `bitwardd`（headless） | 只有中樞，systemd user/LaunchAgent 註冊 | Linux 伺服器、CI、無 GUI 機器 |
+| `bitward-surface`（單一介面） | 純 thin：CLI、provider extension、MCP shim、瀏覽器 NM shim 各自成包 | 只要 autofill 或只要 agent 面的裝置 |
+
+surface 安裝的兩條使用路徑（協議同構，BTP 訊息不變）：
+
+1. **本機 provision**：首次啟動自動註冊 headless 中樞（macOS 用 LaunchAgent、Linux 用 systemd user、無權限時前景跑同顆 bin 並在 UI 明示）。這是 §10-Q1 的裁決：不存在「無中樞的 standalone 持鑰模式」，不變量 1 不動。
+2. **遠端配對**：`bitward pair` 顯示 QR/9 位配對碼，Full 端掃描確認 → 該裝置拿到綁定 `DeviceId` 的短期 token + 獨立 grant 集，走 TLS1.3 + per-conn AEAD。典型場景：伺服器上的 coding agent（`bitward-mcp`）配對回你的桌面中樞；共用電腦上的瀏覽器 extension 連回自己手機或桌面。這是 vaultgate/1Password Connect 已驗證的「一台持鑰、多台取用」形態。
+
+安全語意：遠端 surface 掛掉或被入侵，洩漏面是 token + 該裝置 grant 集，不是金鑰；撤銷在 Full 端一鍵（`revoke device`），鎖世代級聯照常適用。
 
 ## 2. 核心型別（偽代碼）
 
@@ -268,8 +305,8 @@ Transport 總表：
 | P2 | 寫入路徑：outbox+欄位級三方合併+衝突佇列、離線解鎖與離線寫入收斂、附件 blob 佇列、**多裝置收斂**（cipherId targeted pull、雙裝置併發 e2e A12） | A7/A8 型斷言 + A12（見 §6 附註） |
 | P3 | agent 面：session/grant/approval/budget/audit 鏈、`bitward-mcp`、`Run`+Redactor、事件訂閱 | grep 明文==0 端到端斷言 |
 | P4 | 資料管理（tags/排序/去重/merge/bulk/unshare/值搜尋）+ auto-type（CGEvent）+ 瀏覽器 NM shim；**Android track 自此起平行**（UniFFI 核心 + AutofillService + API 34 CredentialProviderService；Full＝預設形態的 in-process 中樞） | 各缺口有專屬 e2e |
-| P5 | macOS credential provider（先 passkey 骨架、再 passwords/OTP）+ identity store 維護 + MachServices 按需啟動 | 真機填充延遲量測 |
-| P6 | 跨機 thin（TLS 配對）、多帳號打磨、Linux | 待定 |
+| P5 | macOS credential provider（先 passkey 骨架、再 passwords/OTP）+ identity store 維護 + MachServices 按需啟動 + **remote thin 配對伺服**（`pair`/撤銷/跨機 grant，thin 獨立安裝的前置，操作者要求 2026-10-29） | 真機填充延遲量測；跨機 reveal 延遲與撤銷 e2e |
+| P6 | 跨機 thin 進階（多 hub 編組、Tailscale 場景）、多帳號打磨、Linux 正式支援 | 待定 |
 
 ## 6. P1 驗收斷言（可執行，不是「看起來對」）
 
@@ -333,13 +370,14 @@ P1 是最早失敗點：自寫 crypto 正確性與無 spec 互通性是風險最
 - **驗證狀態**：設計包內部自洽性已對照 grounding 事實逐條檢查；尚未跑程式碼（repo 尚無實作）。P1 斷言即下一階段的驗證計劃。
 - **跨候選未解分歧**：macOS extension 走純 thin（兩候選同）對上 grounding 報告建議的混合式 fat fast-path（`research/macos-provider.md` §4）。裁決：先 thin，理由是金鑰進第二進程會迫使 grant/audit 模型重寫一遍；若 P5 實測冷啟延遲不可接受，升級路徑是優化 daemon 快速路徑，不是把金鑰搬進 extension。
 - **操作者修訂（2026-10-29，兩項）**：(1) 多 Full client。按 first-principles 重設計而非打補丁：「唯一」從 day-one 前提改寫為「裝置內唯一」，跨裝置收斂升級為一級機制（§1.1、不變量 11、A12），Android 預設 Full。(2) 明文記憶體保護。新增 §2.7（arena/mlock/清零/FFI 字串紀律/出口登記表）、不變量 9-10、斷言 A10-A11。兩份設計候選保留原樣，其「機器上唯一」措辭以本檔為準。
+- **操作者修訂（2026-10-29，第二批）**：(3) thin client 獨立安裝。Full/Thin 分界改掛在執行體而非套件（§1.2、§0 安裝形態列），Q1 隨之關閉，remote 配對伺服提前到 P5。(4) 技術線逐 concern 明細化（§0.1）。
 
 ## 10. 開放問題
 
-1. `bitward` 是否支援無 daemon 降級模式（`--standalone`＝前景跑 daemon）？傾向不支援以守不變量 1，CI/容器場景再議。
+1. （已裁決 2026-10-29，見 §1.2）無 `--standalone` 降級持鑰模式：thin 獨立安裝靠本機自動註冊 headless 中樞或遠端配對，不變量 1 不動。
 2. 多帳號：單 daemon 多 profile（各自 KeyBundle/epoch/outbox，共用 socket）vs per-profile socket。
 3. tags overlay 跨裝置同步（隱藏 SecureNote 載體方案）是否推遲到真實使用確認之後。
 4. 本地 metadata 索引是否需加密（先量測再決定）。
 5. 瀏覽器 extension 完整化與 iOS 版是否列 P6 後獨立設計包。
 6. 產品最終名稱與商標查證。
-7. 跨裝置體驗：remote thin（手機配對當桌面中樞的批准面）是否預設開啟，或一律各自 Full、跨裝置只經伺服器。
+7. 跨裝置預設體驗：新裝置建立時預設走配對（remote thin）還是預設各自 Full、跨裝置只經伺服器收斂。協議兩者同構，這是 setup 流程的取捨，P5 前定案。
