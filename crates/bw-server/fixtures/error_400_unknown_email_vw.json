@@ -1,0 +1,18 @@
+{
+  "error": "",
+  "errorModel": {
+    "message": "Username or password is incorrect. Try again",
+    "object": "error"
+  },
+  "error_description": "",
+  "exceptionMessage": null,
+  "exceptionStackTrace": null,
+  "innerExceptionMessage": null,
+  "message": "Username or password is incorrect. Try again",
+  "object": "error",
+  "validationErrors": {
+    "": [
+      "Username or password is incorrect. Try again"
+    ]
+  }
+}

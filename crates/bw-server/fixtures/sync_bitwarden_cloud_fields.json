@@ -1,0 +1,115 @@
+{
+  "ciphers": [
+    {
+      "archivedDate": null,
+      "attachments": {
+        "b1a2c3d4-0000-4000-8000-000000000001": {
+          "fileName": "doc.pdf",
+          "fileSize": "1.2 KB",
+          "fileSizeInt": 1200,
+          "id": "b1a2c3d4-0000-4000-8000-000000000001",
+          "key": "2.Zm9vYmFyYmF6cXV1eDE2|Q2lwaGVyVGV4dEJsb2NrMzJCeXRlc0xvbmdFbm91Z2g=|aG1hY21hY21hY21hY21hY21hY21hYQ==",
+          "url": "https://cdn.bitwarden.net/attachments/x"
+        }
+      },
+      "bankAccount": null,
+      "card": null,
+      "collectionIds": [],
+      "creationDate": "2026-10-01T10:00:00Z",
+      "data": null,
+      "deletedDate": null,
+      "driversLicense": null,
+      "edit": true,
+      "favorite": false,
+      "fields": [],
+      "folderId": null,
+      "id": "66b31944-ec07-485e-9716-2b0632299dd7",
+      "identity": null,
+      "key": null,
+      "login": {
+        "fido2Credentials": [],
+        "password": "2.Zm9vYmFyYmF6cXV1eDE2|Q2lwaGVyVGV4dEJsb2NrMzJCeXRlc0xvbmdFbm91Z2g=|aG1hY21hY21hY21hY21hY21hY21hYQ==",
+        "passwordRevisionDate": null,
+        "totp": null,
+        "uris": [
+          {
+            "match": null,
+            "uri": "2.Zm9vYmFyYmF6cXV1eDE2|Q2lwaGVyVGV4dEJsb2NrMzJCeXRlc0xvbmdFbm91Z2g=|aG1hY21hY21hY21hY21hY21hY21hYQ=="
+          }
+        ],
+        "username": "2.Zm9vYmFyYmF6cXV1eDE2|Q2lwaGVyVGV4dEJsb2NrMzJCeXRlc0xvbmdFbm91Z2g=|aG1hY21hY21hY21hY21hY21hY21hYQ=="
+      },
+      "name": "2.Zm9vYmFyYmF6cXV1eDE2|Q2lwaGVyVGV4dEJsb2NrMzJCeXRlc0xvbmdFbm91Z2g=|aG1hY21hY21hY21hY21hY21hY21hYQ==",
+      "notes": "2.Zm9vYmFyYmF6cXV1eDE2|Q2lwaGVyVGV4dEJsb2NrMzJCeXRlc0xvbmdFbm91Z2g=|aG1hY21hY21hY21hY21hY21hY21hYQ==",
+      "object": "cipherDetails",
+      "organizationId": null,
+      "organizationUseTotp": true,
+      "passport": null,
+      "passwordHistory": [],
+      "permissions": {
+        "delete": true,
+        "restore": true
+      },
+      "reprompt": 0,
+      "revisionDate": "2026-10-28T18:15:44.9261315Z",
+      "secureNote": null,
+      "sshKey": null,
+      "type": 1,
+      "viewPassword": true
+    }
+  ],
+  "collections": [],
+  "domains": {
+    "equivalentDomains": [],
+    "globalEquivalentDomains": []
+  },
+  "folders": [],
+  "object": "sync",
+  "policies": [],
+  "policiesNew": [],
+  "profile": {
+    "accountKeys": {
+      "object": "privateKeys",
+      "publicKeyEncryptionKeyPair": null,
+      "securityState": null,
+      "signatureKeyPair": null
+    },
+    "avatarColor": null,
+    "creationDate": "2024-05-01T10:00:00Z",
+    "culture": "en-US",
+    "defaultVaultTimeoutAction": null,
+    "email": "cloud@example.com",
+    "emailVerified": true,
+    "forcePasswordReset": false,
+    "id": "7f1c0f9a-9a3d-4d5c-9cbb-1f1a2b3c4d5e",
+    "key": "2.Zm9vYmFyYmF6cXV1eDE2|Q2lwaGVyVGV4dEJsb2NrMzJCeXRlc0xvbmdFbm91Z2g=|aG1hY21hY21hY21hY21hY21hY21hYQ==",
+    "name": "Cloud User",
+    "object": "profile",
+    "organizations": [],
+    "organizationsNew": [],
+    "premium": true,
+    "premiumFromOrganization": false,
+    "privateKey": "2.Zm9vYmFyYmF6cXV1eDE2|Q2lwaGVyVGV4dEJsb2NrMzJCeXRlc0xvbmdFbm91Z2g=|aG1hY21hY21hY21hY21hY21hY21hYQ==",
+    "providerOrganizations": [],
+    "providers": [],
+    "securityStamp": "b1a2c3d4-e5f6-4a5b-8c7d-9e0f1a2b3c4d",
+    "twoFactorEnabled": true,
+    "usesKeyConnector": false,
+    "verifyDevices": false
+  },
+  "sends": [],
+  "userDecryption": {
+    "masterPasswordUnlock": {
+      "kdf": {
+        "iterations": 600000,
+        "kdfType": 0,
+        "memory": null,
+        "parallelism": null
+      },
+      "masterKeyEncryptedUserKey": "2.Zm9vYmFyYmF6cXV1eDE2|Q2lwaGVyVGV4dEJsb2NrMzJCeXRlc0xvbmdFbm91Z2g=|aG1hY21hY21hY21hY21hY21hY21hYQ==",
+      "salt": "cloud@example.com"
+    },
+    "v2UpgradeToken": null,
+    "webAuthnPrfOptions": null
+  }
+}

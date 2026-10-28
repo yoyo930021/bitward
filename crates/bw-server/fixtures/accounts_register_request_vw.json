@@ -1,0 +1,13 @@
+{
+  "email": "fixture@bitward.test",
+  "kdf": 0,
+  "kdfIterations": 600000,
+  "key": "2.Zm9vYmFyYmF6cXV1eDE2|Q2lwaGVyVGV4dEJsb2NrMzJCeXRlc0xvbmdFbm91Z2g=|aG1hY21hY21hY21hY21hY21hY21hY21hYQ==",
+  "keys": {
+    "encryptedPrivateKey": "2.Zm9vYmFyYmF6cXV1eDE2|Q2lwaGVyVGV4dEJsb2NrMzJCeXRlc0xvbmdFbm91Z2g=|aG1hY21hY21hY21hY21hY21hY21hYQ==",
+    "publicKey": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAx6oK6wq6wOP4o9l1z2Vf\n-----END PUBLIC KEY-----"
+  },
+  "masterPasswordHash": "KaWB5R8ZdpUhYTnZcd1aFPd05wnl1VhvZIRM2vwaOJw=",
+  "masterPasswordHint": "hint",
+  "name": "Fixture User"
+}

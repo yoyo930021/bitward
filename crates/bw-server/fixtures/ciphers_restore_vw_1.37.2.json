@@ -1,0 +1,46 @@
+{
+  "archivedDate": null,
+  "attachments": null,
+  "bankAccount": null,
+  "card": null,
+  "collectionIds": [],
+  "creationDate": "2026-10-28T19:26:37.738093Z",
+  "deletedDate": null,
+  "driversLicense": null,
+  "edit": true,
+  "favorite": false,
+  "fields": [],
+  "folderId": null,
+  "id": "c4e827cb-2cb3-426c-a582-1bc843cbb52d",
+  "identity": null,
+  "key": null,
+  "login": {
+    "password": "Mi5hfGJ8Yw==",
+    "totp": null,
+    "uri": "Mi5hfGJ8Yw==",
+    "uris": [
+      {
+        "match": null,
+        "uri": "Mi5hfGJ8Yw=="
+      }
+    ],
+    "username": "Mi5hfGJ8Yw=="
+  },
+  "name": "2.Zm9vYmFyYmF6cXV1eDE2|Q2lwaGVyVGV4dEJsb2NrMzJCeXRlc0xvbmdFbm91Z2g=|aG1hY21hY21hY21hY21hY21hY21hYQ==",
+  "notes": null,
+  "object": "cipherDetails",
+  "organizationId": null,
+  "organizationUseTotp": true,
+  "passport": null,
+  "passwordHistory": [],
+  "permissions": {
+    "delete": true,
+    "restore": true
+  },
+  "reprompt": 0,
+  "revisionDate": "2026-10-28T19:26:37.755740Z",
+  "secureNote": null,
+  "sshKey": null,
+  "type": 1,
+  "viewPassword": true
+}

@@ -1,0 +1,29 @@
+{
+  "communication": null,
+  "environment": {
+    "api": "http://localhost/api",
+    "cloudRegion": null,
+    "identity": "http://localhost/identity",
+    "notifications": "http://localhost/notifications",
+    "sso": "",
+    "vault": "http://localhost"
+  },
+  "featureStates": {
+    "pm-19148-innovation-archive": true
+  },
+  "gitHash": "46d71107",
+  "object": "config",
+  "push": {
+    "pushTechnology": 0,
+    "vapidPublicKey": null
+  },
+  "server": {
+    "name": "Vaultwarden",
+    "url": "https://github.com/dani-garcia/vaultwarden"
+  },
+  "settings": {
+    "disableUserRegistration": false,
+    "suppressOnboardingInterstitials": false
+  },
+  "version": "2026.6.0"
+}

@@ -1,0 +1,39 @@
+{
+  "archivedDate": null,
+  "attachments": null,
+  "bankAccount": null,
+  "card": null,
+  "collectionIds": [],
+  "creationDate": "2026-10-28T19:29:40.637883Z",
+  "deletedDate": null,
+  "driversLicense": null,
+  "edit": true,
+  "favorite": true,
+  "fields": [],
+  "folderId": null,
+  "id": "84793d5f-1ad1-4fd4-b702-e0ad33459c82",
+  "identity": null,
+  "key": null,
+  "login": {
+    "uri": null,
+    "uris": null,
+    "username": "2.a|b|c"
+  },
+  "name": "2.a|b|c",
+  "notes": null,
+  "object": "cipherDetails",
+  "organizationId": null,
+  "organizationUseTotp": true,
+  "passport": null,
+  "passwordHistory": [],
+  "permissions": {
+    "delete": true,
+    "restore": true
+  },
+  "reprompt": 0,
+  "revisionDate": "2026-10-28T19:29:40.637912Z",
+  "secureNote": null,
+  "sshKey": null,
+  "type": 1,
+  "viewPassword": true
+}

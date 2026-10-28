@@ -1,0 +1,23 @@
+{
+  "MasterPasswordPolicy": {
+    "InPolicy": false,
+    "MasterPassMinLength": 12,
+    "Object": "masterPasswordPolicy",
+    "RequireLower": true,
+    "RequireNumbers": true,
+    "RequireSpecial": true,
+    "RequireUpper": true
+  },
+  "TwoFactorProviders": {
+    "0": "Authenticator",
+    "1": "Email"
+  },
+  "TwoFactorProviders2": {
+    "0": null,
+    "1": {
+      "Email": "t***a@bitward.test"
+    }
+  },
+  "error": "invalid_grant",
+  "error_description": "Two factor required."
+}

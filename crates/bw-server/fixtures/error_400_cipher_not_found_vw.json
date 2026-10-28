@@ -1,0 +1,18 @@
+{
+  "error": "",
+  "errorModel": {
+    "message": "Cipher doesn't exist",
+    "object": "error"
+  },
+  "error_description": "",
+  "exceptionMessage": null,
+  "exceptionStackTrace": null,
+  "innerExceptionMessage": null,
+  "message": "Cipher doesn't exist",
+  "object": "error",
+  "validationErrors": {
+    "": [
+      "Cipher doesn't exist"
+    ]
+  }
+}

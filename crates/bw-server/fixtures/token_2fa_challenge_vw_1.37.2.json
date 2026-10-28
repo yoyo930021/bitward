@@ -1,0 +1,13 @@
+{
+  "MasterPasswordPolicy": {
+    "Object": "masterPasswordPolicy"
+  },
+  "TwoFactorProviders": [
+    "0"
+  ],
+  "TwoFactorProviders2": {
+    "0": null
+  },
+  "error": "invalid_grant",
+  "error_description": "Two factor required."
+}

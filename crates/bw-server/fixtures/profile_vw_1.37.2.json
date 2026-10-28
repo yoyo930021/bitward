@@ -1,0 +1,33 @@
+{
+  "_status": 0,
+  "accountKeys": {
+    "object": "privateKeys",
+    "publicKeyEncryptionKeyPair": {
+      "object": "publicKeyEncryptionKeyPair",
+      "publicKey": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAx6oK6wq6wOP4o9l1z2Vf\n-----END PUBLIC KEY-----",
+      "signedPublicKey": null,
+      "wrappedPrivateKey": "2.Zm9vYmFyYmF6cXV1eDE2|Q2lwaGVyVGV4dEJsb2NrMzJCeXRlc0xvbmdFbm91Z2g=|aG1hY21hY21hY21hY21hY21hY21hYQ=="
+    },
+    "securityState": null,
+    "signatureKeyPair": null
+  },
+  "avatarColor": null,
+  "creationDate": "2026-10-28T19:26:37.542745Z",
+  "culture": "en-US",
+  "email": "fixture@bitward.test",
+  "emailVerified": true,
+  "forcePasswordReset": false,
+  "id": "c40f9956-5344-4d54-ab57-4e96f769a6c6",
+  "key": "2.Zm9vYmFyYmF6cXV1eDE2|Q2lwaGVyVGV4dEJsb2NrMzJCeXRlc0xvbmdFbm91Z2g=|aG1hY21hY21hY21hY21hY21hY21hY21hYQ==",
+  "name": "Fixture User",
+  "object": "profile",
+  "organizations": [],
+  "premium": true,
+  "premiumFromOrganization": false,
+  "privateKey": "2.Zm9vYmFyYmF6cXV1eDE2|Q2lwaGVyVGV4dEJsb2NrMzJCeXRlc0xvbmdFbm91Z2g=|aG1hY21hY21hY21hY21hY21hY21hYQ==",
+  "providerOrganizations": [],
+  "providers": [],
+  "securityStamp": "73510840-10b8-47c8-8fd2-287490076aca",
+  "twoFactorEnabled": false,
+  "usesKeyConnector": false
+}

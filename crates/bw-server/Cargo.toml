@@ -13,11 +13,26 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-reqwest.workspace = true
-tokio-tungstenite.workspace = true
 futures-util.workspace = true
 tracing.workspace = true
+base64.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+# 只用於 sync 的金鑰指紋（§2.2 漂移偵測）；金鑰派生本身在 bw-crypto
+sha2 = "0.10"
+# Vaultwarden 的 notifications 走 SignalR messagepack hub protocol（見 NOTES.md）
+rmpv = "1.3"
 
 [dev-dependencies]
 tempfile = "3"
+# e2e 自己發附件上傳與 2FA 設定（那些不在 §3.3 的契約面上），並算 TOTP
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart"] }
+hmac = "0.12"
+sha1 = "0.10"
+base64 = "0.22"
+sha2 = "0.10"
+serde_json.workspace = true
+uuid = { version = "1", features = ["v4", "serde"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

@@ -1,0 +1,62 @@
+{
+  "attachmentId": "8fd01a914baeef9d1efd",
+  "cipherResponse": {
+    "archivedDate": null,
+    "attachments": [
+      {
+        "fileName": "notes.txt",
+        "id": "8fd01a914baeef9d1efd",
+        "key": "2.Zm9vYmFyYmF6cXV1eDE2|Q2lwaGVyVGV4dEJsb2NrMzJCeXRlc0xvbmdFbm91Z2g=|aG1hY21hY21hY21hY21hY21hY21hYQ==",
+        "object": "attachment",
+        "size": "11",
+        "sizeName": "11.00 bytes",
+        "url": "http://127.0.0.1:18080/attachments/c4e827cb-2cb3-426c-a582-1bc843cbb52d/8fd01a914baeef9d1efd?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJuYmYiOjE3OTMyMTU1OTcsImV4cCI6MTc5MzIxNTg5NywiaXNzIjoiaHR0cDovL2xvY2FsaG9zdHxmaWxlX2Rvd25sb2FkIiwic3ViIjoiYzRlODI3Y2ItMmNiMy00MjZjLWE1ODItMWJjODQzY2JiNTJkIiwiZmlsZV9pZCI6IjhmZDAxYTkxNGJhZWVmOWQxZWZkIn0.na2yKN5t18yHFcDGAkWZBviR3Vtceg36D-tf5koDRY3B2LdLjzIehylqZ0AtU2QmAqaJ1OZkMsjUuuM14_o9kuyUnIOZ1mbJWjuboSZD_hYLjSN6-4kzvtCw3YyricXNkvFwwOu4x5VJopfIHTgnaz5G0dfU1xlExxHFhufZVQoLCGlmWwp94boGnGSuMpF9ttcRehOk1hzCuAC92SXyixtsHFEbqRWUj4XNyi1yA06ItBgQVBa64XiliCIZZHhvR_I0OYnjkqCuTnjZSxNBYYcWKaV2zhCt3dkQQqEPAW9MPERvoF8sMGnyoDiLBK0rqq3nES2vWPXPICqdEOiTxQ"
+      }
+    ],
+    "bankAccount": null,
+    "card": null,
+    "collectionIds": [],
+    "creationDate": "2026-10-28T19:26:37.738093Z",
+    "deletedDate": null,
+    "driversLicense": null,
+    "edit": true,
+    "favorite": false,
+    "fields": [],
+    "folderId": null,
+    "id": "c4e827cb-2cb3-426c-a582-1bc843cbb52d",
+    "identity": null,
+    "key": null,
+    "login": {
+      "password": "Mi5hfGJ8Yw==",
+      "totp": null,
+      "uri": "Mi5hfGJ8Yw==",
+      "uris": [
+        {
+          "match": null,
+          "uri": "Mi5hfGJ8Yw=="
+        }
+      ],
+      "username": "Mi5hfGJ8Yw=="
+    },
+    "name": "2.Zm9vYmFyYmF6cXV1eDE2|Q2lwaGVyVGV4dEJsb2NrMzJCeXRlc0xvbmdFbm91Z2g=|aG1hY21hY21hY21hY21hY21hY21hYQ==",
+    "notes": null,
+    "object": "cipherDetails",
+    "organizationId": null,
+    "organizationUseTotp": true,
+    "passport": null,
+    "passwordHistory": [],
+    "permissions": {
+      "delete": true,
+      "restore": true
+    },
+    "reprompt": 0,
+    "revisionDate": "2026-10-28T19:26:37.741901Z",
+    "secureNote": null,
+    "sshKey": null,
+    "type": 1,
+    "viewPassword": true
+  },
+  "fileUploadType": 0,
+  "object": "attachment-fileUpload",
+  "url": "/ciphers/c4e827cb-2cb3-426c-a582-1bc843cbb52d/attachment/8fd01a914baeef9d1efd"
+}

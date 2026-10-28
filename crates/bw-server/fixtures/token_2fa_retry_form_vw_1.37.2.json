@@ -1,0 +1,42 @@
+{
+  "AccountKeys": {
+    "Object": "privateKeys",
+    "publicKeyEncryptionKeyPair": {
+      "Object": "publicKeyEncryptionKeyPair",
+      "publicKey": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAx6oK6wq6wOP4o9l1z2Vf\n-----END PUBLIC KEY-----",
+      "wrappedPrivateKey": "2.Zm9vYmFyYmF6cXV1eDE2|Q2lwaGVyVGV4dEJsb2NrMzJCeXRlc0xvbmdFbm91Z2g=|aG1hY21hY21hY21hY21hY21hY21hYQ=="
+    }
+  },
+  "ForcePasswordReset": false,
+  "Kdf": 0,
+  "KdfIterations": 600000,
+  "KdfMemory": null,
+  "KdfParallelism": null,
+  "Key": "2.Zm9vYmFyYmF6cXV1eDE2|Q2lwaGVyVGV4dEJsb2NrMzJCeXRlc0xvbmdFbm91Z2g=|aG1hY21hY21hY21hY21hY21hY21hY21hYQ==",
+  "MasterPasswordPolicy": {
+    "Object": "masterPasswordPolicy"
+  },
+  "PrivateKey": "2.Zm9vYmFyYmF6cXV1eDE2|Q2lwaGVyVGV4dEJsb2NrMzJCeXRlc0xvbmdFbm91Z2g=|aG1hY21hY21hY21hY21hY21hY21hYQ==",
+  "ResetMasterPassword": false,
+  "TwoFactorToken": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJuYmYiOjE3OTMyMTU2MjksImV4cCI6MTc5NTgwNzYyOSwiaXNzIjoiaHR0cDovL2xvY2FsaG9zdHwyZmFyZW1lbWJlciIsInN1YiI6InU0LWZpeHR1cmUtZGV2aWNlIiwidXNlcl91dWlkIjoiMjI1YmI4OTYtYjVjNy00MDUwLTk1MGQtOTRhOTBkNjU1NGU1In0.H9hdxFNiw4zuMTg2dh49PUC-ASqI_AdAe1YMbuNBf6DCGZmewHh85GeDoKw4FpoxwJg-WB8PB-e1huQcFJErO4ZFVR8paZRfuSpMXyHl2yq1_LZDmaLlXC-P3brXh1d3xWduM-q0oOJC8w4h25VJqP5BR7HqOt19q7unA1jsw9U_kpN7PMIQ4W5ZVUB7r5GB3BfGJmC0sjeV6yjClGgQ8NL54jV6BNvAWOtDFgWtCzGu_bKANUDhUZfYHsVKRb1vL5r7ADYkKp9cfFyIJZcy0-of4KCdfW-DVqqOkZEfkxAp01ODH6JOyTMXpJb-uI6cQF7QidYZqxNlf4-kU84WOA",
+  "UserDecryptionOptions": {
+    "HasMasterPassword": true,
+    "MasterPasswordUnlock": {
+      "Kdf": {
+        "Iterations": 600000,
+        "KdfType": 0,
+        "Memory": null,
+        "Parallelism": null
+      },
+      "MasterKeyEncryptedUserKey": "2.Zm9vYmFyYmF6cXV1eDE2|Q2lwaGVyVGV4dEJsb2NrMzJCeXRlc0xvbmdFbm91Z2g=|aG1hY21hY21hY21hY21hY21hY21hY21hYQ==",
+      "MasterKeyWrappedUserKey": "2.Zm9vYmFyYmF6cXV1eDE2|Q2lwaGVyVGV4dEJsb2NrMzJCeXRlc0xvbmdFbm91Z2g=|aG1hY21hY21hY21hY21hY21hY21hY21hYQ==",
+      "Salt": "twofa@bitward.test"
+    },
+    "Object": "userDecryptionOptions"
+  },
+  "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJuYmYiOjE3OTMyMTU2MjksImV4cCI6MTc5MzIyMjgyOSwiaXNzIjoiaHR0cDovL2xvY2FsaG9zdHxsb2dpbiIsInN1YiI6IjIyNWJiODk2LWI1YzctNDA1MC05NTBkLTk0YTkwZDY1NTRlNSIsInByZW1pdW0iOnRydWUsIm5hbWUiOiJGaXh0dXJlIFVzZXIiLCJlbWFpbCI6InR3b2ZhQGJpdHdhcmQudGVzdCIsImVtYWlsX3ZlcmlmaWVkIjp0cnVlLCJzc3RhbXAiOiJmOWM5OThjNS1mZDQyLTRhYWUtOGIwMS0yNzg2MDE2OWUxZDUiLCJkZXZpY2UiOiJ1NC1maXh0dXJlLWRldmljZSIsImRldmljZXR5cGUiOiJtYWNPUyBDTEkiLCJjbGllbnRfaWQiOiJkZXNrdG9wIiwic2NvcGUiOlsiYXBpIiwib2ZmbGluZV9hY2Nlc3MiXSwiYW1yIjpbIkFwcGxpY2F0aW9uIl19.J97iZZ72qfsarzE1bHrZ4gASyErdlgllemEk0n0p-3o-gByB3m9Sq_VDTqvkcENIfHFZ6ymScyR1PCy9plaClkSB_RyTfcAdFHY7QpasextaxrokSR_4KIsna-PjlWlc5do2CKjoEYaFCp1hdXAsp6SGBch9TqFADihK4H_uW5--DnNdOFs3ckTWV2FjK1SdxIeNLw_6WnyvfUpXj9ofO7PoOV0oWtuGw2E16gt5LhwmGog3NZPHxU-v-t14TYDVC4lHNS8wMlMRaPRv3FL2kIaSP_bZxJWQodOPqDXJJ927No90gdfP_9u8g-yvXagNCYoTmDGGIa8NboUMq85R0Q",
+  "expires_in": 7200,
+  "refresh_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJuYmYiOjE3OTMyMTU2MjksImV4cCI6MTc5NTgwNzYyOSwiaXNzIjoiaHR0cDovL2xvY2FsaG9zdHxsb2dpbiIsInN1YiI6InBhc3N3b3JkIiwiZGV2aWNlX3Rva2VuIjoiU1FwdDJUUUNyS3JnSEJ0bWZBQjBoLVdBRTExYjVzWG1FOE0zdi1Lam9nSFZabXl2NlNmaUgwX2xHTE5vN0xqWU02Zl94clVJdkZfRGdzN09QODZXVkE9PSIsInRva2VuIjpudWxsfQ.d-Dr3sMsWSGd3Eo0gemmqdbZPj5kuJZV7-ZMnLiOS7Dm_dGFHbFagtOuxtiGELznkUz_Bw9X42zu8RSv3CYvqXiwnyDUNNMEYKPM8sbTUS-ehXbViWuarfFU4VgsHv4mqd5OSFGXzr1EB3j_yfRuH1cW99hzr6HVkVGcCCpp9ZQRI8sqP_oU_BHt7kg65jaQJSwBBczGyF4s244UpPpc7MoXe5eUlQJ90lNRmbaFyCTq1hWFLpp7QmabTcqS1EPILDUDrXfz3IFrqYTgauwbIu4l3DgTRxmDeUomsBPQQRm5gzQNm8RLEDMhf13zqwL7uJVOeVddtezxi2zGragJAg",
+  "scope": "api offline_access",
+  "token_type": "Bearer"
+}
