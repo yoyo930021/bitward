@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 bw-proto.workspace = true
-serde.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
 pbkdf2.workspace = true
@@ -16,8 +15,13 @@ sha1.workspace = true
 sha2.workspace = true
 aes.workspace = true
 cbc.workspace = true
-rsa.workspace = true
 hkdf.workspace = true
 rand.workspace = true
 base64.workspace = true
-base32.workspace = true
+# rsa 需 sha1 feature（OAEP-SHA1 是官方 org key 包裝演算法，見 NOTES.md）
+rsa = { version = "0.9", features = ["sha1", "sha2", "std"] }
+
+[dev-dependencies]
+proptest = "1"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
