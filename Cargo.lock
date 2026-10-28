@@ -196,6 +196,7 @@ version = "0.0.1"
 dependencies = [
  "bw-proto",
  "libc",
+ "postcard",
  "serde",
  "serde_json",
  "tempfile",
