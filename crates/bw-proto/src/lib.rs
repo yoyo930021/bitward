@@ -93,10 +93,14 @@ pub struct ItemMeta {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ItemView {
     pub meta: ItemMeta,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
     /// Masked 形態（例：`••••12`）
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub password_masked: Option<String>,
-    /// 僅 Reveal 構造且 grant 通過時為 Some
+    /// 僅 Reveal 構造且 grant 通過時為 Some。skip-if-none 是 A3 的結構保證：
+    /// Metadata 輸出的 JSON 里 `password` 鍵根本不存在，不是 null。
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
     pub totp_available: bool,
 }
@@ -289,6 +293,8 @@ pub enum AgentCall {
         since: Option<String>,
         limit: u32,
     },
+    /// hash 鏈驗證（A8）：回 {count, head, ok}
+    AuditVerify,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -372,6 +378,8 @@ pub enum Response {
     Sessions(Vec<serde_json::Value>),
     Profile(ServerProfile),
     Version(String),
+    /// 狀態/診斷類回應用自由 JSON（P1 起用；欄位契約見 hub.rs）
+    Json(serde_json::Value),
     Ok,
 }
 
@@ -404,18 +412,29 @@ pub enum ServerMsg {
 }
 
 /// 協定級錯誤。serde 表示穩定：JSON 用 externally-tagged，postcard 同。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
 pub enum WtpError {
+    #[error("session 綁定的鎖世代已過期（seen {seen}, now {now}）")]
     StaleEpoch { seen: u64, now: u64 },
+    #[error("vault 未解鎖")]
     Locked,
+    #[error("需要人工核准 {id:?}")]
     NeedsApproval { id: ApprovalId },
+    #[error("核准逾時")]
     ApprovalExpired,
+    #[error("授權不足：{grant_gap}")]
     Denied { grant_gap: String },
+    #[error("not found")]
     NotFound,
+    #[error("中樞離線（last_seen: {last_seen_epoch_ms:?}）")]
     HubOffline { last_seen_epoch_ms: Option<u64> },
+    #[error("寫入衝突 #{id:?}，待裁決")]
     Conflict { id: MutationId },
+    #[error("此功能尚未提供：{feature}")]
     Unsupported { feature: String },
+    #[error("伺服器漂移：{detail}")]
     ServerDrift { detail: String },
+    #[error("{ms}ms 後重試")]
     RetryAfter { ms: u64 },
 }
 

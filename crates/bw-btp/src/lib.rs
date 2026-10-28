@@ -20,6 +20,46 @@ pub enum BtpError {
     Closed,
 }
 
+/// fd 層變體：tokio listener 的 accept 結果直接可用。
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
+pub fn peer_uid_from_fd(fd: std::os::unix::io::RawFd) -> Result<u32, BtpError> {
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    let rc = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
+    if rc == 0 {
+        Ok(uid)
+    } else {
+        Err(BtpError::Io("getpeereid failed".into()))
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn peer_uid_from_fd(fd: std::os::unix::io::RawFd) -> Result<u32, BtpError> {
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if rc == 0 {
+        Ok(cred.uid)
+    } else {
+        Err(BtpError::Io("SO_PEERCRED failed".into()))
+    }
+}
+
 impl From<tokio::io::Error> for BtpError {
     fn from(e: tokio::io::Error) -> Self {
         BtpError::Io(e.to_string())
@@ -59,7 +99,9 @@ where
     W: AsyncWrite + Unpin,
     T: serde::Serialize,
 {
-    let body = postcard::to_allocvec(msg).map_err(|e| BtpError::Codec(e.to_string()))?;
+    // P1 線格式：length-prefix + JSON。Response 仍含 serde_json::Value（status/audit），
+    // postcard 不支援 Value 的 f64；全型別化回應後（P2）再切 postcard 主線。
+    let body = serde_json::to_vec(msg).map_err(|e| BtpError::Codec(e.to_string()))?;
     let len = u32::try_from(body.len()).map_err(|_| BtpError::FrameTooLarge {
         len: u32::MAX,
         max: MAX_FRAME,
@@ -94,7 +136,7 @@ where
     }
     let mut body = vec![0u8; len as usize];
     r.read_exact(&mut body).await?;
-    postcard::from_bytes(&body).map_err(|e| BtpError::Codec(e.to_string()))
+    serde_json::from_slice(&body).map_err(|e| BtpError::Codec(e.to_string()))
 }
 
 /// 同機對端驗證第一層：連線程序 uid。

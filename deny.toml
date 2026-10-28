@@ -1,4 +1,5 @@
-licenses = { deny = ["AGPL-3.0", "GPL-3.0", "LGPL-3.0", "Bitwarden License"] }
+[licenses]
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "ISC", "BSD-3-Clause", "BSD-2-Clause", "CC0-1.0", "Unicode-3.0", "Zlib", "MPL-2.0", "GPL-3.0-or-later", "GPL-3.0-only", "LGPL-3.0-or-later", "OpenSSL", "CDLA-Permissive-2.0"]
 
 [bans]
 multiple-versions = "warn"

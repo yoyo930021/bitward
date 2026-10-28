@@ -136,6 +136,11 @@ impl Drop for OrgKey {
         self.0.zeroize();
     }
 }
+impl Drop for PasswordHash {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
 
 impl MasterKey {
     /// 直接以已派生的 32 bytes 構造（Key Connector / 封存金鑰解包路徑）。

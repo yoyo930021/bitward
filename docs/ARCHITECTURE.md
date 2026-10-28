@@ -24,7 +24,7 @@
 | 核心語言 | Rust（stable，tokio 非同步 runtime） | 一顆核心複用：daemon、CLI、MCP shim、crypto、sync；Android 經 NSH Rust app 形態同檔打包（`libnsh.so` 含本 crate），UniFFI/JNI 只留給 Kotlin 孤島 |
 | 加密原語 | rustcrypto 系：`pbkdf2`、`argon2`、`aes`+`hmac`（信封 type 2）、`hkdf`、`rsa`、`sha2`、`rand_core` | 信封/KDF 編排**自寫**（授權），底層算子用 MIT/Apache crate，組合為 GPL 著作沒有障礙 |
 | 傳輸加密 | per-conn：`x25519-dalek` + `chacha20poly1305`；跨機：`rustls`（TLS1.3）+ 上層再疊一層 | KeePassXC crypto_box 教訓：不單信通道 |
-| 序列化 | BTP wire 用 `postcard`（除錯模式走 JSON）；型別 schema 產生 Rust/Swift/Kotlin bindings，**只服務平台孤島**（provider extension、autofill 外殼）；UI 與核心同為 Rust，不需要綁定層 | thin 端零業務邏輯的結構保證 |
+| 序列化 | BTP wire（P1 實測）：length-prefix + JSON 主線，因 status/audit 回應仍含 `serde_json::Value`，postcard 不支援其 f64；回應全型別化後（P2）切 postcard 主、JSON 退除錯位。型別 schema 產生 Rust/Swift/Kotlin bindings，**只服務平台孤島**（provider extension、autofill 外殼）；UI 與核心同為 Rust，不需要綁定層 | thin 端零業務邏輯的結構保證 |
 | 本地儲存 | SQLite（WAL，`rusqlite`）+ FTS5 索引；附件 content-addressed blob | 檔權限 0600；鏡像存密文原樣 |
 | 金鑰封存 | macOS `security-framework`（Keychain biometric ACL）；Android Keystore Class 3/StrongBox（JNI） | §1 落盤形態 |
 | 記憶體 | `zeroize` + 自寫 secret arena（`mlock`、`MADV_DONTDUMP`、Linux `memfd_secret`） | §2.7 |
@@ -388,7 +388,7 @@ P1 是最早失敗點：自寫 crypto 正確性與無 spec 互通性是風險最
 - **Base**：候選一。不變量機制最完整（`with_keys` 閉包、唯一入口 `call()`、raw mirror、hash 鏈審計、敏感度分級 × `project()`）。
 - **Grafts**（自候選二，逐條手工折入）：(1) P1 收窄為只讀路徑，寫入獨立成 P2；(2) `VaultState::Stale` 金鑰指紋漂移態；(3) outbox `payload_enc` 入列即加密，push 不碰金鑰；(4) 封存 stretched key 的秒級冷啟 + KeepAlive 重生驗收（A7）；(5) Android「同構訊息、無第二套內部 API」規則；(6) `View` 作為讀取簽名的強制參數。
 - **拒絕**：候選二的 app-group unix socket 給 extension（改 XPC+MachServices 換取按需啟動，保留 socket 為實測退路）；候選一原始 P1 含寫入（範圍過大，拆到 P2）。
-- **驗證狀態**：設計包內部自洽性已對照 grounding 事實逐條檢查；尚未跑程式碼（repo 尚無實作）。P1 斷言即下一階段的驗證計劃。
+- **驗證狀態**：設計包內部自洽性已對照 grounding 事實逐條檢查。P1 已落地並實跑（2026-10-29）：workspace 20 測試套件綠、`cargo deny` licenses+bans ok（無 bitwarden-* SDK 依賴）、`dev/e2e/readpath.sh` 對 Vaultwarden 1.37.2 全過，A1-A6、A8-A11 有證據（A5 冷 ls p95=19ms；A10 arena mlock+清零單元過；A11 argv/env 零命中）。A7/A12（離線寫入、雙中樞併發）屬 P2，尚未實作。
 - **跨候選未解分歧**：macOS extension 走純 thin（兩候選同）對上 grounding 報告建議的混合式 fat fast-path（`research/macos-provider.md` §4）。裁決：先 thin，理由是金鑰進第二進程會迫使 grant/audit 模型重寫一遍；若 P5 實測冷啟延遲不可接受，升級路徑是優化 daemon 快速路徑，不是把金鑰搬進 extension。
 - **操作者修訂（2026-10-29，兩項）**：(1) 多 Full client。按 first-principles 重設計而非打補丁：「唯一」從 day-one 前提改寫為「裝置內唯一」，跨裝置收斂升級為一級機制（§1.1、不變量 11、A12），Android 預設 Full。(2) 明文記憶體保護。新增 §2.7（arena/mlock/清零/FFI 字串紀律/出口登記表）、不變量 9-10、斷言 A10-A11。兩份設計候選保留原樣，其「機器上唯一」措辭以本檔為準。
 - **操作者修訂（2026-10-29，第二批）**：(3) thin client 獨立安裝。Full/Thin 分界改掛在執行體而非套件（§1.2、§0 安裝形態列），Q1 隨之關閉，remote 配對伺服提前到 P5。(4) 技術線逐 concern 明細化（§0.1）。
