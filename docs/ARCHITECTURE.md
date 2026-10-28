@@ -2,34 +2,47 @@
 
 日期：2026-10-29。本檔是實作契約，由兩個獨立設計候選綜合而成（過程見 §9），證據來源見 `docs/research/`，兩份原始設計包保留於 `docs/design/` 當附錄。型別與簽名皆為偽代碼層級。
 
-**一句話。** 一台機器上一個常駐 daemon（`bitwarderd`）是唯一的金鑰持有者、唯一的 sync 擁有者、唯一的審計點；CLI、GUI、macOS credential provider extension、MCP shim、跨機裝置、Android 元件全部是同一份協議（BTP）上的 thin client，金鑰永不下放，agent 預設只用不讀。
+**一句話。** 每個裝置跑自己的中樞（`bitwarderd`；Android 是 app 內的 in-process 中樞）：裝置內，它是唯一持鑰者、唯一 sync 寫入者、唯一審計點；裝置間，多個中樞對等，靠伺服器收斂。其餘介面（CLI、GUI、macOS credential provider extension、MCP shim、瀏覽器 shim）都是 thin client，對自己裝置的中樞講同一份協議（BTP）。金鑰永不下放，agent 預設只用不讀，明文只活在受保護的記憶體區。
 
 ## 0. 決策摘要
 
 | 決策 | 內容 | 依據 |
 |---|---|---|
-| 形態 | Daemon-centric hub-and-spoke，金鑰不下放 | 1Password App↔CLI（不下放鑰）、rbw-agent、KeePassXC、Bitwarden passkey provider 五個獨立實作收斂到同一形態（`research/prior-art.md`、`research/macos-provider.md`） |
+| 形態 | 每裝置一個中樞（hub），裝置間多中樞對等、經伺服器收斂；金鑰不下放 | 1Password App↔CLI（不下放鑰）、rbw-agent、KeePassXC、Bitwarden passkey provider 五個獨立實作收斂到同一形態（`research/prior-art.md`、`research/macos-provider.md`）；多 Full client 是操作者決定（2026-10-29） |
 | 授權 | 全 repo GPL-3.0-or-later；自寫 crypto，不鏈接官方 SDK | `LICENSE_SDK.txt` §3.1 禁止對第三方出貨、§3.3 禁止連 Vaultwarden（`research/protocol.md` §2） |
 | 語言 | 核心 Rust；macOS SwiftUI、Android Compose 原生 UI；bindings 由協議 schema 產生 | 官方 CLI Node 啟動 1–5s（clients#2741）；Zeroize 語意；UniFFI 為現成模式 |
 | 伺服器 | Bitwarden Cloud 與 Vaultwarden 皆一級目標；欄位寬容 + raw mirror | client API 無官方 spec；vaultwarden#6729 漂移事故 |
 | 隱私主軸 | 機密預設不進 LLM context；metadata-only + 單一受審計 reveal + 執行期注入出口淨化 | arXiv 2604.03070（73.5% 洩漏經 stdout、89.6% 立即可利用）；官方 MCP 反彈（`research/agent-ecosystem.md`） |
+| 記憶體保護 | 明文只存在 mlock、MADV_DONTDUMP 的專用 arena，drop 即清零；不可變字串不跨 FFI；argv/env 無密碼（操作者要求 2026-10-29） | Keyguard 的 memfd_secret/kernel keyring 先例（`research/prior-art.md` §4.5）；1Password 同級風險取捨 |
 | 名稱 | 工作名 `bitward`，文件一律寫「Bitwarden-compatible client」，出貨前查商標 | Bitwarden Trademark Guidelines |
 
 ## 1. 進程拓撲
 
 | 進程 | 生命週期 | 角色 | 持長期金鑰 |
 |---|---|---|---|
-| `bitwarderd` | 常駐（macOS LaunchAgent/SMAppService KeepAlive；Linux systemd user；Android foreground service） | 金鑰狀態機、sync+outbox、agent 治理、審計、identity store 維護、auto-type 排程 | 唯一持有者 |
+| `bitwarderd` | 常駐，**每裝置一個**（macOS LaunchAgent/SMAppService KeepAlive；Linux systemd user；Android 為 app 內 in-process 等位物，foreground service） | 本裝置的金鑰狀態機、sync+outbox、agent 治理、審計、identity store 維護、auto-type 排程 | 本裝置唯一持有者 |
 | `bitward`（CLI） | 一次性短命 | 人與腳本介面；無 daemon 時提示啟動，不自行降格持鑰 | 否 |
 | `bitward-mcp` | 由 agent host spawn，stdio | MCP ↔ BTP 轉譯，唯一對 LLM 說話的進程 | 否（持 scoped session token） |
 | `Bitward.app`（macOS GUI） | 可開可關，關閉不影響服務 | 瀏覽/編輯、enrollment 與衝突核准 UI、TCC 入口、審計瀏覽 | 否 |
 | `BitwardProvider.appex` | 系統按需啟動、隨時回收 | passwords（macOS 14+）、passkeys、OTP（15+）、text-to-insert | 否 |
-| Android app | Full（核心 in-proc）或 Thin（連遠端 hub） | AutofillService / CredentialProviderService(API 34) / inline IME | Full 時是（Keystore Class 3） |
+| Android app | **Full（預設：in-process 中樞，foreground service）**或 Thin（TLS 配對連遠端中樞） | AutofillService / CredentialProviderService(API 34) / inline IME | Full 時是（Keystore Class 3） |
 | `bitward-nm` | 瀏覽器按需 spawn | native messaging ↔ BTP 純管道，無邏輯無金鑰 | 否 |
 
 明確不存在：第二個 sync 客戶端、GUI 內嵌的第二份金鑰、獨立的 HTTP 服務層（HTTP/TLS 只是 BTP 的一種 transport binding）。
 
 金鑰落盤形態：`vault.db` 存伺服器原樣密文（`2.iv|ct|mac` 不改寫）；user key 以 OS 級封存（macOS Keychain biometric ACL、Android Keystore Class 3-bound/StrongBox）；重啟 daemon 用封存金鑰直接解包，**不重跑 KDF**（冷啟秒級，graft 自候選二）。master password 只在解鎖瞬間存在，無任何常駐環境變數（`BW_SESSION` 概念不存在）。
+
+### 1.1 多中樞拓撲（多個 Full client）
+
+Full client = 中樞 = 持鑰者 + sync 寫入者 + 該裝置 agent 治理域。一台裝置一個，跨裝置 N 個對等。Android app 預設就是 Full（in-process 中樞），不依附桌面在不在；macOS/Linux 的 daemon 同為各裝置的中樞。
+
+- **收斂點是伺服器。** Bitwarden 語意裡 server 就是跨客戶端權威（官方 app 們本來就是多寫者），中樞之間不做 P2P。notifications hub WS 的事件帶 cipherId → 收到就 targeted `GET /ciphers/{id}` 單筆拉（端點缺或不可用才降回全量 sync），把衝突窗口縮到最小。
+- **合併是一級機制，不是離線備援。** 多裝置改同一 item：`base_rev` 比對 → 欄位不相交自動 3-way merge；相交 → 衝突收件匣。離線寫入與跨裝置併發共用同一條 outbox、同一個佇列、同一套裁決。
+- **治理域是 per-device。** session/grant/`LockEpoch` 只約束本裝置的中樞與其 spokes。桌面鎖定不會鎖手機（金鑰在各自安全硬體），這正是正確的安全語意：FR 1635「共享解鎖狀態」的範圍是裝置內。跨裝置共享解鎖＝remote thin 配對（P6），不是預設。
+- **共享寫入目標的結構化序列化。** 裝置內：消除共享（單寫者中樞，不變量 11）。裝置間：共享目標是伺服器 vault，消除不了 → 用 `base_rev` 樂觀併發（CAS 語意）+ outbox `seq` FIFO 結構化序列化，不靠約定。
+- **金鑰輪播傳播：** 他台改主密碼 → 本裝置 sync 發現 Keys 指紋變動 → `Stale` → 要求重新解鎖（§2.2）。
+- **TDE 審批：** 任何 Full 都能當批准裝置（auth-request answer），手機批桌面登入與官方行為同構。
+- **Thin Android 保留**為配對模式：手機純當批准/輸入面、讀寫全部代理給桌面中樞。建立時選模式，資料模型與協議訊息完全相同（§2.5 同構規則）。
 
 ## 2. 核心型別（偽代碼）
 
@@ -94,6 +107,8 @@ pub enum LockReason { User, Timeout, ServerLogout, KeyRotation, Revoked { by }, 
 | 斷網 `EgressChanged(false)` | **狀態不變**，僅 `sync.paused` | 離線不降級為鎖定（官方「離線僅 read-only」是把 sync 失敗誤當鎖定） |
 | token 遭拒 | Unlocked 降級：保留金鑰、暫停 push、要求重新認證 | 官方 CLI 在此直接壞（#12270） |
 | sync 發現金鑰指紋變動 | → Stale | 拒絕拿舊鑰硬解，強制重認證 |
+
+狀態機是 per-device：`LockEpoch` 與其廣播只覆蓋本裝置的中樞與它的 thin clients，他台裝置鎖定不影響本機（§1.1）。
 
 `with_keys` 閉包是金鑰邊界：其他模組永遠拿不到 `KeyBundle` 實值，只能在閉包內用 → 編譯期排除「金鑰被傳進 thin client / 存進 store / 印進 log」。
 
@@ -168,6 +183,40 @@ pub struct ServerProfile { pub kind: ServerKind,     // BitwardenCloud | Vaultwa
 
 每個 response 寬容解析並把原始 JSON 存進 `Item.raw`；`Patch` 由 raw + diff 合成 merge-patch，我們未建模的欄位不會被我們的 PUT 抹掉（property test：`sync → put(unchanged)` 後 server JSON 逐位元組相同）。
 
+### 2.7 記憶體保護（明文的生命週期）
+
+目標兩條：密碼不進 LLM context（§2.3 已給型別層機制），以及密碼在記憶體裡盡可能短命、不可分頁、不可撿。
+
+```rust
+/// 明文只允許存在這個類型；底層是專用 arena 的 owned buffer
+pub struct SecretString(Zeroizing<ArenaBuf>);
+
+pub struct SecretArena;  // 進程啟動時 mmap 的單一區段：
+                         //   mlock() 防分頁；MADV_DONTDUMP 防 core dump；
+                         //   Linux 優先 memfd_secret()（Keyguard 先例），macOS 以
+                         //   RLIMIT_CORE=0 + FileVault 假設退路；
+                         //   drop 即 memset 零；arena 外不得出現明文位元組
+```
+
+規則（逐條可測）：
+
+1. **單一落點。** 所有明文拷貝（parse、concat、serde 中間態）都必須經 arena allocator 配置；Redactor 的 `known` 集合在每次 reveal 時同步登記 → 「離開過进程的明文值」永遠有帳可查。單元測試：fill 已知 pattern → drop → 直讀 arena 原始位元組驗零。
+2. **不可變字串不跨邊界。** Swift `String`、Kotlin `String`、JS `string` 無法清零且會 intern/複製 → bindings 對 secret 欄位一律自訂 FFI 型別（owned bytes buffer + 顯式 `clear()`），API 層 lint 禁止把密碼型別宣告成不可變字串。
+3. **進程邊界不吃 argv/env。** 主密碼輸入走 stdin/pinentry 式 fd；`--password-env` 是唯一明示例外（`ps` 與 `/proc/*/environ` 對同 uid 可見）。IPC 從 arena buffer 直接 `writev`，不經中間 String；per-conn AEAD 已防同機監聽。
+4. **Context 出口登記表。** 每個離開中樞的通道有預設視窗政策，審查與測試都以這張表為準（新增出口必須先登記，否則 CI 的 egress 清單檢查失敗）：
+
+| 出口 | 預設內容 | 明文條件 |
+|---|---|---|
+| MCP tool 結果 | Opaque/Identity + `btw://` ref | Reveal grant，逐次 audit |
+| CLI stdout | 同上 | `--reveal` 且 stdout 為 TTY；pipe 預設拒 |
+| BTP event | 只有 Opaque/Identity | 永不帶明文（協定紀律） |
+| 核准 UI（GUI/手機） | 單欄明文給人眼看 | 只顯示，不回存任何緩存 |
+| `ASCredentialIdentityStore` | metadata | 無明文（Apple 限制即不變量） |
+| audit / 日誌 | 值指紋 + 字節數 | 永不帶明文（A8 斷言） |
+| `Run` 子程環境 | 注入明文 | 只進子程；stdout/stderr 出口淨化後才回 |
+
+5. **威脅模型誠實邊界。** 同使用者 root/`ptrace` 與 cold boot 攻擊不在本層防禦（1Password 明示接受同級風險）；暫停（suspend-to-disk）後的記憶體影像交給平台全盤加密（macOS `hibernatemode 3` + FileVault），文件如實聲明。Android 端 AutofillService 依平台語意必然經手明文，用 `setAuthentication()` PendingIntent 延後暴露＋填充後立即清零（§4 缺口 3）。
+
 ## 3. 模組圖與依賴方向
 
 ```
@@ -204,7 +253,7 @@ Transport 總表：
 |---|---|---|---|
 | 自動化（無 webhooks、CLI 綁主密碼、無 scope/audit、MCP 薄殼） | bw-agent、bw-btp（事件流+Pull）、bitward-mcp | **P3**（基礎共享解鎖在 P1 即成立） | 常駐 daemon 免 env var；事件流取代輪詢；enrollment/grant/budget/audit；`Run` 注入+出口淨化；TOTP 出碼不出 seed |
 | 資料管理（tags 492👍、排序 494👍、去重合併 392👍、unshare/批次 322👍、值搜尋 119👍） | bw-store（overlay+FTS5）、bw-vault、bw-sync | **P4**（overlay 表結構 P1 就在） | `LocalOverlay` tags（協定無此欄位，本地權威；官方上路後雙向合併）；`find_duplicates`/`merge` 在 daemon 內掃描只回 id；`unshare` 避開 bw move bug（#11689）；值搜尋走本地明文索引，不上傳 |
-| auto-type 與共享解鎖狀態（FR 158 719👍、FR 1635） | bw-fill（CGEvent 引擎+lease）、bw-keys（epoch 廣播） | **P4**（共享解鎖=P1 架構紅利） | epoch 訂閱讓桌面解鎖 → CLI/extension 同時可用；auto-type 由獲 TCC 授權的 GUI 執行、daemon 只給 ≤5s 單次 lease；剪貼簿不留痕（治 #2621/#2742） |
+| auto-type 與共享解鎖狀態（FR 158 719👍、FR 1635） | bw-fill（CGEvent 引擎+lease）、bw-keys（epoch 廣播） | **P4**（共享解鎖=P1 架構紅利） | epoch 訂閱讓本裝置解鎖 → 同機 CLI/extension/GUI 同時可用（FR 1635 的範圍就是裝置內；跨裝置各自解鎖，語意見 §1.1）；auto-type 由獲 TCC 授權的 GUI 執行、daemon 只給 ≤5s 單次 lease；剪貼簿不留痕（治 #2621/#2742） |
 | 離線可寫入（FR 107、離線解鎖 #19055） | bw-store.Outbox、bw-sync、bw-keys | **P2** | 寫入 API 從第一天就不設計成可失敗（Queued 語意）；DeviceAssertion 離線解鎖；衝突收件匣 |
 | macOS 系統級密碼（FR 93723；官方只有 passkey provider） | BitwardProvider.appex、identity store 寫入者（daemon 內）、XPC binding | **P5** | 能力宣告齊四項（ProvidesPasswords/Passkeys/OneTimeCodes/TextToInsert，缺項系統不列出）+ entitlement 雙掛；thin 路線避開 extension Argon2 記憶體上限；`invalidate(epoch)` 處理上鎖後系統快取 |
 
@@ -215,10 +264,10 @@ Transport 總表：
 | 階段 | 內容 | 出口條件 |
 |---|---|---|
 | P0 | workspace、`bw-proto` 型別+BTP schema+conformance vectors、CI（Vaultwarden docker 釘版矩陣 + macOS runner + Android compile-only）、GPL+`cargo deny`+商標聲明 | 骨架編譯、CI 綠 |
-| **P1（第一增量，可獨立驗證）** | **read-path daemon**：login（password+TOTP 2FA、API key 旁路）→ 金鑰派生與 Keychain 封存 → `/sync` 全量落 SQLite（密文原樣）→ 狀態機+timeout → UDS+BTP+對端驗證 → CLI `status/list/search/get/reveal/audit/lock` | §6 斷言全過 |
-| P2 | 寫入路徑：outbox+三方合併+衝突佇列、離線解鎖與離線寫入收斂、附件 blob 佇列 | A7/A8 型斷言（見 §6 附註） |
+| **P1（第一增量，可獨立驗證）** | **read-path daemon**：login（password+TOTP 2FA、API key 旁路）→ 金鑰派生與 Keychain 封存 → `/sync` 全量落 SQLite（密文原樣）→ 狀態機+timeout → UDS+BTP+對端驗證 → secret arena（mlock/清零）→ CLI `status/list/search/get/reveal/audit/lock` | §6 斷言全過 |
+| P2 | 寫入路徑：outbox+欄位級三方合併+衝突佇列、離線解鎖與離線寫入收斂、附件 blob 佇列、**多裝置收斂**（cipherId targeted pull、雙裝置併發 e2e A12） | A7/A8 型斷言 + A12（見 §6 附註） |
 | P3 | agent 面：session/grant/approval/budget/audit 鏈、`bitward-mcp`、`Run`+Redactor、事件訂閱 | grep 明文==0 端到端斷言 |
-| P4 | 資料管理（tags/排序/去重/merge/bulk/unshare/值搜尋）+ auto-type（CGEvent）+ 瀏覽器 NM shim；**Android track 自此起平行**（UniFFI 核心 + AutofillService + API 34 CredentialProviderService） | 各缺口有專屬 e2e |
+| P4 | 資料管理（tags/排序/去重/merge/bulk/unshare/值搜尋）+ auto-type（CGEvent）+ 瀏覽器 NM shim；**Android track 自此起平行**（UniFFI 核心 + AutofillService + API 34 CredentialProviderService；Full＝預設形態的 in-process 中樞） | 各缺口有專屬 e2e |
 | P5 | macOS credential provider（先 passkey 骨架、再 passwords/OTP）+ identity store 維護 + MachServices 按需啟動 | 真機填充延遲量測 |
 | P6 | 跨機 thin（TLS 配對）、多帳號打磨、Linux | 待定 |
 
@@ -237,6 +286,12 @@ hyperfine -N 'bitward ls --json'                     # A5 p95 < 50ms（對照官
 # A7 kill -9 daemon → launchctl 5 秒內重生且**不重跑 KDF** 即恢復解鎖態
 # A8 每個 Call 落 audit 一列且 hash 鏈可驗證；trace 日誌搜尋密碼值 0 命中
 # A9 cargo deny：無 bitwarden-* SDK crate 依賴；LICENSE=GPL-3.0；README 含非關聯聲明
+# A10 secret arena：fill→drop 後直讀 arena 原始位元組全零；mlock 生效
+#    （Linux smaps "Locked" >0；macOS 以 rlimit core=0 + malloc zone 檢查替代）
+# A11 ps -axo command,environment 對 $WP 與已知密碼值 0 命中（CLI 與 daemon 皆然）
+# A12（P2 出口）雙中樞併發：兩 client 改同一 item 的不同欄位 → 自動合併；
+#     改同一欄位 → 衝突收件匣並列 ours/theirs，無靜默覆蓋；
+#     notifications 事件到達後 5 秒內本機鏡像更新（targeted pull，非全量 sync）
 ```
 
 P1 是最早失敗點：自寫 crypto 正確性與無 spec 互通性是風險最高且不可回頭的事，若 A1/A2 失敗，整個形態重估（退路見 `design/candidate-1` §6、`design/candidate-2` §6 的替代形態）。
@@ -251,6 +306,9 @@ P1 是最早失敗點：自寫 crypto 正確性與無 spec 互通性是風險最
 6. `LockEpoch` 單調遞增；session/lease/identity-store 皆記 epoch，不符即拒。
 7. 讀路徑只讀本地 store，網路永不阻塞讀取。
 8. 未建模欄位經 raw+merge-patch 無損往返（property test）。
+9. 明文只存在 mlock、MADV_DONTDUMP 的 secret arena，drop 即清零；每個離開過程序的明文值都在 Redactor 帳上（§2.7）。
+10. 明文不經不可變字串跨 FFI，不經 argv/env 跨進程。
+11. 每裝置恰一個中樞（Android Full 的 in-process 核心是等位物）；跨裝置寫入收斂只經伺服器，衝突只經 merge/收件匣一條路。
 
 ## 8. 風險與緩解
 
@@ -263,6 +321,8 @@ P1 是最早失敗點：自寫 crypto 正確性與無 spec 互通性是風險最
 | `Run` 沙箱不足（惡意 argv 外送 secret） | NetPolicy 預設 deny、cwd 限 temporary、出口紅化；文件明說信任前提＝把 secret 交給被執行的程式（與 `op run` 同邊界，不假裝更強） |
 | TDE/無主密碼帳號 | auth-request 流程（暫時 RSA + access code）落地 WrappedUserKey，之後離線可解鎖；這是官方 CLI 完全做不到的 |
 | 商標與授權 | 不用 Bitwarden 當產品名；v1 不鏈接 GPL 元件（僅取測試向量）；出貨前 `cargo deny` + NOTICE + 商標查證 |
+| 多中樞併發寫入（兩台裝置同時編輯） | 伺服器 `revisionDate` CAS + outbox `seq` FIFO；欄位不相交自動合併、相交進收件匣（A12）；notifications 事件帶 cipherId 做 targeted pull，縮小衝突窗口 |
+| 堆記憶體／swap／core dump 殘留明文 | secret arena 是唯一明文落點：mlock 防分頁、MADV_DONTDUMP/RLIMIT_CORE=0 防影像、drop 即清零（不變量 9、斷言 A10/A11）；同 uid root 與 cold boot 為已聲明邊界 |
 
 ## 9. 綜合紀錄（arena synthesis note)
 
@@ -272,6 +332,7 @@ P1 是最早失敗點：自寫 crypto 正確性與無 spec 互通性是風險最
 - **拒絕**：候選二的 app-group unix socket 給 extension（改 XPC+MachServices 換取按需啟動，保留 socket 為實測退路）；候選一原始 P1 含寫入（範圍過大，拆到 P2）。
 - **驗證狀態**：設計包內部自洽性已對照 grounding 事實逐條檢查；尚未跑程式碼（repo 尚無實作）。P1 斷言即下一階段的驗證計劃。
 - **跨候選未解分歧**：macOS extension 走純 thin（兩候選同）對上 grounding 報告建議的混合式 fat fast-path（`research/macos-provider.md` §4）。裁決：先 thin，理由是金鑰進第二進程會迫使 grant/audit 模型重寫一遍；若 P5 實測冷啟延遲不可接受，升級路徑是優化 daemon 快速路徑，不是把金鑰搬進 extension。
+- **操作者修訂（2026-10-29，兩項）**：(1) 多 Full client。按 first-principles 重設計而非打補丁：「唯一」從 day-one 前提改寫為「裝置內唯一」，跨裝置收斂升級為一級機制（§1.1、不變量 11、A12），Android 預設 Full。(2) 明文記憶體保護。新增 §2.7（arena/mlock/清零/FFI 字串紀律/出口登記表）、不變量 9-10、斷言 A10-A11。兩份設計候選保留原樣，其「機器上唯一」措辭以本檔為準。
 
 ## 10. 開放問題
 
@@ -281,3 +342,4 @@ P1 是最早失敗點：自寫 crypto 正確性與無 spec 互通性是風險最
 4. 本地 metadata 索引是否需加密（先量測再決定）。
 5. 瀏覽器 extension 完整化與 iOS 版是否列 P6 後獨立設計包。
 6. 產品最終名稱與商標查證。
+7. 跨裝置體驗：remote thin（手機配對當桌面中樞的批准面）是否預設開啟，或一律各自 Full、跨裝置只經伺服器。
