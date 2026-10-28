@@ -30,8 +30,8 @@
 | 記憶體 | `zeroize` + 自寫 secret arena（`mlock`、`MADV_DONTDUMP`、Linux `memfd_secret`） | §2.7 |
 | UI 框架 | **NSH（Native Shell，longbridge/nsh，Apache-2.0）**，Rust 元件一套碼覆蓋 macOS／Android／Linux／Web；後端是各平台原生 view（AppKit、Android views），不是自繪 | 見 §0.2。v0.2.x 新專案：鎖版本、UI 純介面零業務邏輯，框架抖動波及面只到 view 層 |
 | macOS | NSH GUI（AppKit 後端）；provider extension 為 Swift + XPC 孤島（MachServices 按需啟動）；常駐 `SMAppService`；auto-type CGEvent | 簽章/公證走 Developer ID |
-| Android | NSH UI（Android views 後端）+ Kotlin 整合孤島：`AutofillService`、`androidx.credentials`（API 34）、Keystore、FCM；foreground service 跑 in-process 中樞 | Keyguard 全棧先例 |
-| 推播 | APNs／FCM；自架走 Vaultwarden push relay／UnifiedPush | §1.2 推播路徑；只傳信令不傳明文 |
+| Android | NSH UI（Android views 後端）+ Kotlin 整合孤島：`AutofillService`、`androidx.credentials`（API 34）、Keystore、UnifiedPush distributor 接單；foreground service 跑 in-process 中樞 | Keyguard 全棧先例 |
+| 推播 | Android：**UnifiedPush 第一級**（`unifiedpush` crate，distributor：ntfy/Cone/…，FCM 僅可選 fallback）；macOS：APNs（官方雲）或 Vaultwarden web-push/VAPID（自架） | §1.2 推播路徑；只傳信令不傳明文；endpoint 按能力憑證處理 |
 | CLI／MCP | `clap`；MCP 用 `rmcp`（Rust SDK），shim 只做 MCP↔BTP 轉譯 | shim 不含政策邏輯 |
 | 可觀察性 | `tracing`，secret 出口經 Redactor 層 | 日誌零明文由 A8 守 |
 | 測試 | `cargo nextest` + `proptest`（raw mirror 無損往返）+ 錄製 fixtures + docker Vaultwarden 釘版矩陣 + macOS runner + Android compile-only | A1..A12 |
@@ -91,11 +91,12 @@ surface 的兩條連線路徑（協議同構，BTP 訊息不變）：
 1. **同機中樞**：中樞由 Full 套件註冊（macOS `SMAppService`/LaunchAgent；provider extension 另可由 `MachServices` 按需拉起）。surface 單獨存在時中樞不在，CLI 給明確指令提示，extension 走 `.userInteractionRequired`；surface 永不自行降格持鑰。
 2. **異機配對 + 推播喚醒**：`bitward pair` 顯示 QR/9 位配對碼，Full 端掃描確認 → 該裝置拿到綁定 `DeviceId` 的短期 token + 獨立 grant 集，走 TLS1.3 + per-conn AEAD。典型場景：伺服器上的 coding agent（`bitward-mcp`）配對回你的桌面或手機中樞；共用電腦上的瀏覽器 extension 連回自己裝置。這是 vaultgate/1Password Connect 已驗證的「一台持鑰、多台取用」形態。
 
-**推播路徑**（異機場景的第二條線，操作者要求 2026-10-29）：中樞 App 向平台註冊推播（APNs／FCM；自架走 Vaultwarden 的 push relay／UnifiedPush），處理兩類訊息：
+**推播路徑**（異機場景的第二條線，操作者要求 2026-10-29）：Android **以 UnifiedPush 為第一級**（open standard，distributor 走 ntfy/Cone 等，Rust 端用 `unifiedpush` crate；FCM 降為有 GMS 裝置的可選便利，去 Google 化裝置 CalyxOS/GrapheneOS 原生可用），macOS 走 APNs（官方雲）或 Vaultwarden 的 web-push/VAPID（自架）。推播承載兩類訊息：
 
 - **核准訊息**：agent 的 reveal/寫入超出預授政策 → 推到人機（手機或桌面通知），解鎖狀態下一鍵批准；approval 帶 TTL，過期 agent 收 `ApprovalExpired`。這把 §2.3 的 human-in-the-loop 從「GUI 開著才有效」升級為「手機在口袋裡就有效」。
-- **喚醒訊息**：thin 的連線請求送達時中樞被系統掛起 → data message 喚醒中樞背景任務接單。Android foreground service 喚醒可靠；macOS APNs 喚醒是 best-effort（[推測：受 App Nap 與省電策略制約，P5 實測]）。
-- **失敗語意**：喚醒不成或中樞離線，thin 請求快速失敗 `HubOffline{last_seen}`，收到 `HubOnline` 事件後自動重試一次。**機密操作不排队後補**：幾小時後用戶意外觸發的 reveal 是驚喜不是功能；只有 approval 請求可滯留，且帶 TTL 過期。推播同時補上官方生態的洞：Bitwarden Cloud 推播綁封閉 relay，Vaultwarden 自建 WS 通知（`research/feature-gaps.md` §E）。
+- **喚醒訊息**：thin 的連線請求送達時中樞被系統掛起 → thin 直接 `POST` 中樞的 push endpoint（配對時交換的登記資料，UnifiedPush 規範允許匿名寫入 endpoint）→ distributor 喚醒中樞背景任務重新接單。Android foreground service 喚醒可靠；macOS APNs 喚醒是 best-effort（[推測：受 App Nap 與省電策略制約，P5 實測]）。
+- **endpoint 即能力憑證**：知道 endpoint 就能推，所以 push endpoint 按機密處理：只存在配對元資料與中樞本地（secret arena 旁路，非明文欄位但其洩漏面＝垃圾訊息＋喚醒時序），不進日誌、不進 event payload，可在 App 內一鍵輪換（re-register distributor）。推播內容只放不透明信令（ticket id/epoch），載體一律經中樞拉取；distributor 伺服器（如 ntfy.sh）看得到 endpoint 與訊息字節數，全隱私取向預設建議自架 distributor。
+- **失敗語意**：喚醒不成或中樞離線，thin 請求快速失敗 `HubOffline{last_seen}`，收到 `HubOnline` 事件後自動重試一次。**機密操作不排隊後補**：幾小時後用戶意外觸發的 reveal 是驚喜不是功能；只有 approval 請求可滯留，且帶 TTL 過期。推播同時補上官方生態的洞：Bitwarden Cloud 推播綁封閉 relay，Vaultwarden 自建 WS 通知（`research/feature-gaps.md` §E）。
 
 安全語意：遠端 surface 掛掉或被入侵，洩漏面是 token + 該裝置 grant 集，不是金鑰；撤銷在 Full 端一鍵（`revoke device`），鎖世代級聯照常適用。推播只當「有請求等你」的信令，載體經中樞拉取，明文與密文憑證都不上推播通道。
 
@@ -392,6 +393,7 @@ P1 是最早失敗點：自寫 crypto 正確性與無 spec 互通性是風險最
 - **操作者修訂（2026-10-29，兩項）**：(1) 多 Full client。按 first-principles 重設計而非打補丁：「唯一」從 day-one 前提改寫為「裝置內唯一」，跨裝置收斂升級為一級機制（§1.1、不變量 11、A12），Android 預設 Full。(2) 明文記憶體保護。新增 §2.7（arena/mlock/清零/FFI 字串紀律/出口登記表）、不變量 9-10、斷言 A10-A11。兩份設計候選保留原樣，其「機器上唯一」措辭以本檔為準。
 - **操作者修訂（2026-10-29，第二批）**：(3) thin client 獨立安裝。Full/Thin 分界改掛在執行體而非套件（§1.2、§0 安裝形態列），Q1 隨之關閉，remote 配對伺服提前到 P5。(4) 技術線逐 concern 明細化（§0.1）。
 - **操作者修訂（2026-10-29，第三批）**：(5) 移除 thin 的本機自動 provision：surface 不註冊東西，可用性＝中樞在線，App 新增推播路徑（核准＋喚醒訊息、`HubOffline`/`ApprovalExpired` 快速失敗語意，§1.2、§2.5、P5）。(6) GUI 層採用 NSH（Apache-2.0，一套 Rust UI 碼覆蓋 macOS/Android，§0.2），連帶 §2.7 規則 6（明文只進 Rust 元件，TSX ≤ Masked）與 P0 spike。
+- **操作者修訂（2026-10-29，第四批）**：(7) Android 推播第一級改 UnifiedPush（`unifiedpush` crate，FCM 降為可選 fallback），push endpoint 定義為能力憑證：不入日誌/event、可輪換、預設建議自架 distributor（§1.2、§0.1）。
 
 ## 10. 開放問題
 
