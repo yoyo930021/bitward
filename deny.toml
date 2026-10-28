@@ -1,0 +1,12 @@
+licenses = { deny = ["AGPL-3.0", "GPL-3.0", "LGPL-3.0", "Bitwarden License"] }
+
+[bans]
+multiple-versions = "warn"
+deny = [
+    # 授權硬牆：不得鏈接任何官方 bitwarden-* SDK crate（契約 §0、A9）
+    { name = "bitwarden-crypto" },
+    { name = "bitwarden-core" },
+    { name = "bitwarden-api-api" },
+    { name = "bitwarden-api-identity" },
+    { name = "bitwarden-sdk" },
+]

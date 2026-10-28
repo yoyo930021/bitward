@@ -1,0 +1,23 @@
+[package]
+name = "bw-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bw-proto.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+pbkdf2.workspace = true
+argon2.workspace = true
+hmac.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+aes.workspace = true
+cbc.workspace = true
+rsa.workspace = true
+hkdf.workspace = true
+rand.workspace = true
+base64.workspace = true
+base32.workspace = true

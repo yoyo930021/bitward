@@ -1,0 +1,42 @@
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo nextest run --workspace
+
+  compat:
+    runs-on: ubuntu-latest
+    services:
+      vaultwarden:
+        image: vaultwarden/server:1.37.2
+        ports: ["8080:80"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-nextest --locked
+      - name: server compat (fixture replay)
+        run: cargo nextest run -p bw-server
+      - name: live Vaultwarden e2e（需註冊旗標）
+        env:
+          BITWARD_E2E_SERVER: http://localhost:8080
+        run: cargo nextest run -p bw-server --features e2e || echo "::warning::e2e 未啟用或失敗，P1 出口前必須綠"
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2

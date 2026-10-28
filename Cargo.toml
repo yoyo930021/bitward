@@ -1,0 +1,72 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/bw-proto",
+    "crates/bw-crypto",
+    "crates/bw-server",
+    "crates/bw-store",
+    "crates/bw-keys",
+    "crates/bw-btp",
+    "bins/bitwarderd",
+    "bins/bitward",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/yoyo930021/bitward"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# 內部 crate
+bw-proto = { path = "crates/bw-proto" }
+bw-crypto = { path = "crates/bw-crypto" }
+bw-server = { path = "crates/bw-server" }
+bw-store = { path = "crates/bw-store" }
+bw-keys = { path = "crates/bw-keys" }
+bw-btp = { path = "crates/bw-btp" }
+
+# 序列化與型別
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+postcard = { version = "1", features = ["alloc"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "2"
+zeroize = { version = "1", features = ["derive"] }
+base64 = "0.22"
+base32 = "0.5"
+
+# 非同步與 IO
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "fs", "signal"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+
+# 加密原語（§0.1；信封編排自寫在 bw-crypto）
+pbkdf2 = "0.12"
+argon2 = "0.5"
+hmac = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc", "std"] }
+rsa = { version = "0.9", features = ["sha2"] }
+hkdf = "0.12"
+rand = "0.8"
+x25519-dalek = "2"
+chacha20poly1305 = "0.10"
+
+# 儲存
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# 平台與工具
+tracing = "0.1"
+tracing-subscriber = "0.3"
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+libc = "0.2"
+
+[profile.release]
+lto = "thin"
+strip = true
