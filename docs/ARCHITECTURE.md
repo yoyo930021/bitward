@@ -28,7 +28,7 @@
 | 本地儲存 | SQLite（WAL，`rusqlite`）+ FTS5 索引；附件 content-addressed blob | 檔權限 0600；鏡像存密文原樣 |
 | 金鑰封存 | macOS `security-framework`（Keychain biometric ACL）；Android Keystore Class 3/StrongBox（JNI） | §1 落盤形態 |
 | 記憶體 | `zeroize` + 自寫 secret arena（`mlock`、`MADV_DONTDUMP`、Linux `memfd_secret`） | §2.7 |
-| UI 框架 | **NSH（Native Shell，longbridge/nsh，Apache-2.0）**，Rust 元件一套碼覆蓋 macOS／Android／Linux／Web；後端是各平台原生 view（AppKit、Android views），不是自繪 | 見 §0.2。v0.2.x 新專案：鎖版本、UI 純介面零業務邏輯，框架抖動波及面只到 view 層 |
+| UI 框架 | **NSH（Native Shell，longbridge/nsh，Apache-2.0）**，Rust 元件一套碼覆蓋 macOS／Android／Linux／Web；後端是各平台原生 view（AppKit、Android views），不是自繪 | 見 §0.2。釘版 **0.3.0**（spike 實測；brew tap 落後，安裝走 install.sh）；UI 純介面零業務邏輯，框架抖動波及面只到 view 層 |
 | macOS | NSH GUI（AppKit 後端）；provider extension 為 Swift + XPC 孤島（MachServices 按需啟動）；常駐 `SMAppService`；auto-type CGEvent | 簽章/公證走 Developer ID |
 | Android | NSH UI（Android views 後端）+ Kotlin 整合孤島：`AutofillService`、`androidx.credentials`（API 34）、Keystore、UnifiedPush distributor 接單；foreground service 跑 in-process 中樞 | Keyguard 全棧先例 |
 | 推播 | Android：**UnifiedPush 第一級**（`unifiedpush` crate，distributor：ntfy/Cone/…，FCM 僅可選 fallback）；macOS：APNs（官方雲）或 Vaultwarden web-push/VAPID（自架） | §1.2 推播路徑；只傳信令不傳明文；endpoint 按能力憑證處理 |
@@ -46,7 +46,7 @@
 - **不省什麼**：平台整合孤島照樣要原生碼，NSH 幫不上也不擋路。macOS provider extension（AuthenticationServices/Swift）、Android `AutofillService`/`CredentialProviderService`/Keystore/FCM（Kotlin）、XPC。這些在本設計裡本來就是薄面。
 - **新增紀律**：TSX 執行在 QuickJS，JS 字串不可變、不可清零 → **明文欄位只允許在 Rust 元件渲染；TSX/動態交付畫面最多拿 Masked**。副作用是正面的：AI 生成或動態下發的畫面天然看不見明文（§2.7 規則 6）。
 - **風險與隔離**：v0.2.x 很年輕，API 會抖。緩衝有三層：UI 純介面零業務邏輯（不變量 5）、鎖版本 + 必要時 vendor 補丁（操作者已有 gpui-kit vendor-rebase 的同型經驗）、NSH 與本專案同走 GPUI 系生態（README 致謝 GPUI/GPUI Kit），語彙相近。
-- **裁決**：採用為 GUI 層框架，macOS 與 Android 共用。P0 期間以 provider 設定頁 + vault 列表兩個真實畫面做 spike 驗證渲染品質與打包鏈，再全棧押上。
+- **裁決**：採用為 GUI 層框架，macOS 與 Android 共用。P0 spike 已完成（`spike/nsh-spike/`，nsh 0.3.0）：兩畫面純 Rust 元件跑通、截圖證據在、bw-proto 零摩擦接入。代價記錄在 spike FINDINGS：樣式 setter 只在建立時求值、`nav_stack` 在 macOS dev host 不渲染（正式 GUI 前別依賴）、文字行高需顯式規範、安裝鏈走 install.sh 非 brew tap。
 
 ## 1. 進程拓撲
 

@@ -1,0 +1,8 @@
+{
+  "name": "nsh-spike",
+  "id": "com.example.nshspike",
+  "version": "1.0.0",
+  "build": 1,
+  "rust": ".",
+  "root": "App"
+}
