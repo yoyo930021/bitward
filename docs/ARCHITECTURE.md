@@ -361,7 +361,7 @@ P1 是最早失敗點：自寫 crypto 正確性與無 spec 互通性是風險最
 3. `KeyBundle` 不實作 Clone、Debug 為 REDACTED、只活在 `with_keys` 閉包。
 4. 所有 server 寫入必經 Outbox；無模組能繞過它直接呼叫 push。
 5. 所有 thin 請求必經唯一入口 `call()`；grant 分派編譯期窮盡。
-6. `LockEpoch` 單調遞增；session/lease/identity-store 皆記 epoch，不符即拒。
+6. `LockEpoch` 單調遞增；session/lease/identity-store 皆記 epoch。撤銷由 lock/漂移事件驅動，綁舊世代者一律作廢（A6 裁決：unlock 的 epoch bump 不是撤銷理由）；比對不符即拒。
 7. 讀路徑只讀本地 store，網路永不阻塞讀取。
 8. 未建模欄位經 raw+merge-patch 無損往返（property test）。
 9. 明文只存在 mlock、MADV_DONTDUMP 的 secret arena，drop 即清零；每個離開過程序的明文值都在 Redactor 帳上（§2.7）。
