@@ -117,6 +117,30 @@ enum Cmd {
         keep_both: bool,
     },
     SignOut,
+    /// agent session 治理（人在這台機器上簽發/管理）
+    Agent {
+        #[command(subcommand)]
+        cmd: AgentCmd,
+    },
+    /// 注入 vault 機密執行命令（出口經 Redactor 淨化）
+    Run {
+        /// `K=btw://<uuid>/<field>` 或 `K=literal`，可重複
+        #[arg(long = "env")]
+        env: Vec<String>,
+        #[arg(long, default_value = "")]
+        cwd: String,
+        #[arg(long, default_value_t = 30_000)]
+        timeout_ms: u64,
+        #[arg(last = true)]
+        argv: Vec<String>,
+    },
+    /// 核准一個待批請求（human-in-the-loop）
+    Approve {
+        id: String,
+        /// 追加常駐 grant（DSL），可重複
+        #[arg(long = "grant")]
+        grants: Vec<String>,
+    },
     /// e2e/開發用：向（自架）server 註冊新帳號，不寫入 daemon 狀態
     #[command(hide = true)]
     DevRegister {
@@ -141,6 +165,25 @@ enum Cmd {
 
 fn session_file(data_dir: &std::path::Path) -> PathBuf {
     data_dir.join("cli_session")
+}
+
+#[derive(Subcommand)]
+enum AgentCmd {
+    Open {
+        #[arg(long)]
+        name: String,
+        /// grant DSL（見 bw-agent 文件）
+        #[arg(long)]
+        grant: String,
+        #[arg(long, default_value_t = 3600)]
+        ttl: u64,
+    },
+    List,
+    /// 待核准佇列（回 [{"id","summary"}]）
+    Pending,
+    Revoke {
+        id: String,
+    },
 }
 
 fn default_data_dir() -> PathBuf {
@@ -435,6 +478,46 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             })
         }
         Cmd::SignOut => Call::Auth(AuthCall::SignOut),
+        Cmd::Run {
+            env,
+            cwd,
+            timeout_ms,
+            argv,
+        } => {
+            if argv.is_empty() {
+                return Err("用法：bitward run -- cmd args...".into());
+            }
+            Call::Use(UseCall::Run {
+                plan: bw_proto::RunPlan {
+                    argv: argv.clone(),
+                    env: env
+                        .iter()
+                        .map(|e| {
+                            let (k, v) = e.split_once('=').unwrap_or((e.as_str(), ""));
+                            (k.to_string(), v.to_string())
+                        })
+                        .collect(),
+                    cwd: cwd.clone(),
+                    timeout_ms: *timeout_ms,
+                },
+            })
+        }
+        Cmd::Approve { id, grants } => Call::Agent(AgentCall::Approve {
+            id: bw_proto::ApprovalId(parse_approval(id)?),
+            grants: (!grants.is_empty()).then(|| grants.clone()),
+        }),
+        Cmd::Agent { cmd } => match cmd {
+            AgentCmd::Open { name, grant, ttl } => Call::Agent(AgentCall::OpenSession {
+                scopes: vec![grant.clone()],
+                ttl_secs: *ttl,
+                name: name.clone(),
+            }),
+            AgentCmd::List => Call::Agent(AgentCall::ListSessions),
+            AgentCmd::Pending => Call::Agent(AgentCall::ListPending),
+            AgentCmd::Revoke { id } => Call::Agent(AgentCall::Revoke {
+                session: bw_proto::SessionId(parse_approval(id)?),
+            }),
+        },
         Cmd::DevRegister { .. } | Cmd::DevSeed { .. } => {
             unreachable!("dev 命令在連 daemon 前攔截")
         }
@@ -443,6 +526,10 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
 
 fn parse_id(s: &str) -> Result<ItemId, String> {
     Uuid::parse_str(s).map_err(|e| format!("item id: {e}"))
+}
+
+fn parse_approval(s: &str) -> Result<Uuid, String> {
+    Uuid::parse_str(s).map_err(|e| format!("approval/session id: {e}"))
 }
 
 fn print_response(resp: &Response, json: bool) {
@@ -505,6 +592,15 @@ fn print_response(resp: &Response, json: bool) {
         Response::Account(a) => println!("{}", serde_json::to_string_pretty(&a).unwrap()),
         Response::AuditChain(c) => println!("{}", serde_json::to_string_pretty(&c).unwrap()),
         Response::Conflicts(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap()),
+        Response::Sessions(v) => println!("{}", serde_json::to_string_pretty(v).unwrap()),
+        // agentpath.sh 依賴的扁平形狀：{"token","session","expires_at_ms"}
+        Response::AgentSession {
+            token,
+            expires_epoch_ms,
+        } => println!(
+            "{}",
+            serde_json::json!({"token": token, "session": token, "expires_at_ms": expires_epoch_ms})
+        ),
         other => println!("{}", serde_json::to_string_pretty(other).unwrap()),
     }
 }

@@ -1,13 +1,13 @@
 //! bitwarderd：每裝置唯一的中樞（契約 §1）。
 //! main = 傳輸與 session 生命週期；業務分派在 hub.rs。
 
+mod agent;
 mod arena;
 mod hub;
 mod sync;
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
@@ -18,10 +18,7 @@ use uuid::Uuid;
 
 use bw_btp::{read_client, write_server};
 use bw_keys::UnlockEvent;
-use bw_proto::{
-    Auth, ClientMsg, PROTO_VERSION, Response, ServerMsg, SessionId, SessionToken, WtpError,
-};
-use bw_store::SessionRow;
+use bw_proto::{Auth, ClientMsg, PROTO_VERSION, Response, ServerMsg, WtpError};
 use hub::Hub;
 
 #[derive(Parser)]
@@ -42,12 +39,6 @@ fn default_data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("bitward")
-}
-
-struct LiveSession {
-    row: SessionRow,
-    /// 只由 lock/漂移的 Revoked 事件翻轉（A6：unlock 的 epoch bump 不撤銷既有 session）
-    revoked: bool,
 }
 
 #[tokio::main]
@@ -72,9 +63,6 @@ async fn main() -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
     tracing::info!(sock = %sock.display(), "bitwarderd listening");
-
-    let sessions: Arc<Mutex<HashMap<SessionToken, LiveSession>>> =
-        Arc::new(Mutex::new(HashMap::new()));
 
     // drain：觸發式 + 5 秒兜底輪（離線重試與租約過期回收）
     {
@@ -113,7 +101,6 @@ async fn main() -> Result<(), String> {
     // 級聯撤銷：鎖世代推進 ⇒ 綁舊 epoch 的 session 全滅（§2.2、A6）。
     {
         let hub = hub.clone();
-        let sessions = sessions.clone();
         let mut watch = hub.machine.watch();
         tokio::spawn(async move {
             while let Ok(ev) = watch.recv().await {
@@ -121,9 +108,9 @@ async fn main() -> Result<(), String> {
                     // 鎖世代推進 ⇒ 事件之前存在的所有 session 撤銷；
                     // 之後 Enroll 的（含 AuthLocked 期間）不受影響。
                     let _ = hub.store.sessions_revoke_before(epoch.0);
-                    for s in sessions.lock().unwrap().values_mut() {
+                    for s in hub.sessions.lock().unwrap().values_mut() {
                         if s.row.epoch < epoch.0 {
-                            s.revoked = true;
+                            s.revoked.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
                 }
@@ -146,20 +133,15 @@ async fn main() -> Result<(), String> {
     loop {
         let (stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
         let hub = hub.clone();
-        let sessions = sessions.clone();
         tokio::spawn(async move {
-            if let Err(e) = serve_conn(stream, hub, sessions).await {
+            if let Err(e) = serve_conn(stream, hub).await {
                 tracing::debug!(err = %e, "conn ended");
             }
         });
     }
 }
 
-async fn serve_conn(
-    stream: tokio::net::UnixStream,
-    hub: Arc<Hub>,
-    sessions: Arc<Mutex<HashMap<SessionToken, LiveSession>>>,
-) -> Result<(), WtpError> {
+async fn serve_conn(stream: tokio::net::UnixStream, hub: Arc<Hub>) -> Result<(), WtpError> {
     let peer_uid = bw_btp::peer_uid_from_fd(stream.as_raw_fd()).map_err(|_| WtpError::Denied {
         grant_gap: "peer uid unavailable".into(),
     })?;
@@ -190,47 +172,38 @@ async fn serve_conn(
             feature: format!("peer proto {} > daemon {PROTO_VERSION}", version.0),
         });
     }
-    let token = match auth {
+    let sess = match auth {
         Auth::Enroll {
             display_name,
             pairing,
         } => {
-            let sid = SessionId(Uuid::new_v4());
-            let row = SessionRow {
-                id: sid.0.to_string(),
-                principal: serde_json::json!({"kind": "local", "uid": peer_uid, "name": display_name}),
-                grants: serde_json::json!(["*"]), // P1 全權佔位（§5.4）
-                epoch: hub.machine.epoch().0,
-                state: bw_store::SessionState::Active,
-                created_at: hub.store.now_ms(),
-                expires_at: None,
-            };
+            // 本機同 uid 的 Enroll = Interactive 全權（§5.4 佔位過渡為正式語意）
             let token = if pairing.is_empty() {
                 Uuid::new_v4().to_string()
             } else {
                 pairing.clone()
             };
-            sessions.lock().unwrap().insert(
-                token.clone(),
-                LiveSession {
-                    row: row.clone(),
-                    revoked: false,
-                },
-            );
-            let _ = hub.store.session_put(&row);
-            token
+            hub.new_session(
+                token,
+                crate::agent::SessionKind::Interactive,
+                bw_agent::GrantSet::default_full(),
+                None,
+                serde_json::json!({"kind": "local", "uid": peer_uid, "name": display_name}),
+            )
         }
         Auth::Session { token } => {
-            if !sessions.lock().unwrap().contains_key(&token) {
-                return Err(WtpError::Denied {
+            hub.sessions
+                .lock()
+                .unwrap()
+                .get(&token)
+                .cloned()
+                .ok_or(WtpError::Denied {
                     grant_gap: "unknown session".into(),
-                });
-            }
-            token
+                })?
         }
         Auth::Resume { .. } => {
             return Err(WtpError::Unsupported {
-                feature: "Resume 在 P2".into(),
+                feature: "Resume 在 P4".into(),
             });
         }
     };
@@ -268,22 +241,15 @@ async fn serve_conn(
                 match msg {
                     ClientMsg::Invoke { rid, call } => {
                         // 撤銷只看 lock 事件（A6）；unlock 的 epoch bump 不殺既有 session
-                        let (revoked, bound) = sessions
-                            .lock()
-                            .unwrap()
-                            .get(&token)
-                            .map(|s| (s.revoked, s.row.epoch))
-                            .ok_or(WtpError::Denied {
-                                grant_gap: "session dropped".into(),
-                            })?;
+                        let revoked = sess.revoked.load(std::sync::atomic::Ordering::Relaxed);
                         let now = hub.machine.epoch();
                         let outcome = if revoked {
                             Err(WtpError::StaleEpoch {
-                                seen: bound,
+                                seen: sess.row.epoch,
                                 now: now.0,
                             })
                         } else {
-                            hub.dispatch(&token, &call).await
+                            hub.dispatch(&sess, &call).await
                         };
                         if write_server(&mut wr, &ServerMsg::Reply { rid, outcome })
                             .await

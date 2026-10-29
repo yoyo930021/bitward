@@ -1,8 +1,9 @@
 //! Hub：daemon 的業務核心。持有 store/狀態機/伺服器連線，
 //! 實作 P1 的 Call 分派（契約 §5.1 最小集）。金鑰只經 `with_keys` 流通。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -58,6 +59,10 @@ pub struct Hub {
     /// 上次全量 sync 的 unix ms；通知是 fire-and-forget，半開連線期間的事件會永久錯過，
     /// 由 30 秒週期 sync 兜底（官方客戶端同為 notifications+定期 sync 雙軌）。
     pub last_sync_ms: std::sync::atomic::AtomicU64,
+    /// token → 活 session（§2.3）。Enroll 與 Agent OpenSession 皆註冊於此。
+    pub sessions: Arc<Mutex<HashMap<String, Arc<crate::agent::LiveSession>>>>,
+    /// 等待人工核准的請求（§2.3 Enrollment/Approval）
+    pub pending: Mutex<HashMap<bw_proto::ApprovalId, crate::agent::PendingApproval>>,
 }
 
 pub type DispatchResult = Result<Response, WtpError>;
@@ -120,6 +125,8 @@ impl Hub {
             drain_lock: tokio::sync::Mutex::new(()),
             events: tokio::sync::broadcast::channel(128).0,
             last_sync_ms: std::sync::atomic::AtomicU64::new(0),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            pending: Mutex::new(HashMap::new()),
         });
         if let Some(a) = account {
             let client = std::sync::Arc::new(
@@ -189,33 +196,57 @@ impl Hub {
         }
     }
 
-    /// 唯一 thin 入口的 P1 雛形：分派 + 全量審計（A8）。
-    pub async fn dispatch(&self, session: &str, call: &Call) -> DispatchResult {
-        let started = std::time::Instant::now();
+    /// 唯一 thin 入口：治理前置（grant/budget/approval）→ 分派 → 用量記帳 + 全量審計（A8）。
+    pub async fn dispatch(
+        self: &Arc<Self>,
+        sess: &Arc<crate::agent::LiveSession>,
+        call: &Call,
+    ) -> DispatchResult {
         self.machine.record_activity();
-        let outcome = self.dispatch_inner(session, call).await;
-        let action = action_tag(call);
-        let (outcome_s, bytes_out, item, sens) = match &outcome {
-            Ok(resp) => (
-                "ok".to_string(),
-                serde_json::to_string(resp)
+        let granted = match self.authorize(sess, call).await {
+            Ok(idx) => idx,
+            Err(e) => {
+                self.audit_call(
+                    sess,
+                    call,
+                    &Err(WtpError::Denied {
+                        grant_gap: e.to_string(),
+                    }),
+                    0,
+                );
+                return Err(e);
+            }
+        };
+        let outcome = self.dispatch_inner(sess, call).await;
+        self.record_usage(sess, granted, call, &outcome);
+        let bytes = outcome
+            .as_ref()
+            .map(|r| {
+                serde_json::to_string(r)
                     .map(|s| s.len() as u64)
-                    .unwrap_or(0),
-                item_of(call),
-                sensitivity_of_call(call),
-            ),
-            Err(e) => (
-                format!("err:{e}"),
-                0,
-                item_of(call),
-                sensitivity_of_call(call),
-            ),
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        self.audit_call(sess, call, &outcome, bytes);
+        outcome
+    }
+
+    fn audit_call(
+        &self,
+        sess: &Arc<crate::agent::LiveSession>,
+        call: &Call,
+        outcome: &DispatchResult,
+        bytes_out: u64,
+    ) {
+        let (outcome_s, sens) = match outcome {
+            Ok(resp) => ("ok".to_string(), sensitivity_of_call(call, Some(resp))),
+            Err(e) => (format!("err:{e}"), sensitivity_of_call(call, None)),
         };
         let _ = self.store.audit_append(&AuditRecord {
             ts: self.store.now_ms().to_string(),
-            session: Some(session.to_owned()),
-            action,
-            item,
+            session: Some(sess.row.id.clone()),
+            action: action_tag(call),
+            item: crate::agent::item_of(call).map(|i| i.to_string()),
             field: None,
             sens,
             outcome: outcome_s,
@@ -223,11 +254,14 @@ impl Hub {
             approval: None,
             epoch: self.machine.epoch().0,
         });
-        let _ = started;
-        outcome
     }
 
-    async fn dispatch_inner(&self, session: &str, call: &Call) -> DispatchResult {
+    async fn dispatch_inner(
+        &self,
+        sess: &Arc<crate::agent::LiveSession>,
+        call: &Call,
+    ) -> DispatchResult {
+        let session = sess.row.id.as_str();
         match call {
             Call::Auth(AuthCall::Login {
                 server,
@@ -318,9 +352,13 @@ impl Hub {
                 let pw = bw_crypto::generate_password(&opts).map_err(denied)?;
                 Ok(Response::Secret(pw))
             }
-            Call::Use(_) => Err(WtpError::Unsupported {
-                feature: "P1：ResolveRef/Run 在 P3".into(),
-            }),
+            Call::Use(UseCall::ResolveRef { uri }) => {
+                let resp = self.resolve_ref_value(uri)?;
+                // Reveal 級出口：明文進入呼叫端 context，記帳已在 audit_call
+                self.audit_reveal_ref(session, uri, &resp)?;
+                Ok(resp)
+            }
+            Call::Use(UseCall::Run { plan }) => self.run_plan(sess, plan).await,
             Call::Fill(_) => Err(WtpError::Unsupported {
                 feature: "P1：fill 在 P4".into(),
             }),
@@ -359,12 +397,22 @@ impl Hub {
                     head,
                 }))
             }
-            Call::Agent(AgentCall::OpenSession { .. }) => {
-                Err(denied("P1：agent session 治理在 P3；請直接用本機 Enroll"))
+            Call::Agent(AgentCall::OpenSession {
+                scopes,
+                ttl_secs,
+                name,
+            }) => self.open_session(sess, scopes, *ttl_secs, name),
+            Call::Agent(AgentCall::Approve { id, grants }) => {
+                self.approve(sess, *id, grants.as_ref())
             }
-            Call::Agent(_) => Err(WtpError::Unsupported {
-                feature: "P1：agent 治理面在 P3".into(),
-            }),
+            Call::Agent(AgentCall::Revoke { session: sid }) => self.revoke(sess, *sid),
+            Call::Agent(AgentCall::ListSessions) => self.list_sessions(sess),
+            Call::Agent(AgentCall::ListPending) => Ok(Response::Sessions(
+                self.pending_list()
+                    .into_iter()
+                    .map(|(id, summary)| json!({"id": id, "summary": summary}))
+                    .collect(),
+            )),
             Call::Admin(AdminCall::Version) => Ok(Response::Version(format!(
                 "bitwarderd {} proto v{PROTO_VERSION}",
                 env!("CARGO_PKG_VERSION")
@@ -562,6 +610,25 @@ impl Hub {
     }
 
     fn audit_reveal(&self, id: ItemId, action: &str) -> Result<(), WtpError> {
+        self.audit_reveal_line(None, id, action)
+    }
+
+    fn audit_reveal_ref(&self, session: &str, uri: &str, resp: &Response) -> Result<(), WtpError> {
+        let item = match resp {
+            Response::Secret(_) => bw_agent::parse_ref(uri).ok().map(|r| r.item.to_string()),
+            _ => None,
+        };
+        let _ = session;
+        let _ = item;
+        Ok(()) // 主審計由 audit_call（Secret 級、bytes_out）覆蓋
+    }
+
+    fn audit_reveal_line(
+        &self,
+        _s: Option<&str>,
+        id: ItemId,
+        action: &str,
+    ) -> Result<(), WtpError> {
         let _ = self.store.audit_append(&AuditRecord {
             ts: self.store.now_ms().to_string(),
             session: None,
@@ -694,6 +761,7 @@ fn action_tag(c: &Call) -> String {
         Call::Agent(AgentCall::Approve { .. }) => "Agent.Approve",
         Call::Agent(AgentCall::Revoke { .. }) => "Agent.Revoke",
         Call::Agent(AgentCall::ListSessions) => "Agent.ListSessions",
+        Call::Agent(AgentCall::ListPending) => "Agent.ListPending",
         Call::Agent(AgentCall::Audit { .. }) => "Agent.Audit",
         Call::Agent(AgentCall::AuditVerify) => "Agent.AuditVerify",
         Call::Admin(AdminCall::ServerProfile) => "Admin.ServerProfile",
@@ -703,34 +771,33 @@ fn action_tag(c: &Call) -> String {
     .to_owned()
 }
 
-fn item_of(c: &Call) -> Option<String> {
-    match c {
-        Call::Vault(VaultCall::Get { id, .. })
-        | Call::Vault(VaultCall::Patch { id, .. })
-        | Call::Vault(VaultCall::Restore { id })
-        | Call::Use(UseCall::TotpCode { id })
-        | Call::Fill(FillCall::AutoType { id }) => Some(id.to_string()),
-        Call::Vault(VaultCall::Delete { ids }) => ids.first().map(|i| i.to_string()),
-        _ => None,
-    }
-}
-
-fn sensitivity_of_call(c: &Call) -> bw_proto::Sensitivity {
+fn sensitivity_of_call(c: &Call, resp: Option<&Response>) -> bw_proto::Sensitivity {
     use bw_proto::Sensitivity::*;
+    // 回應帶明文（Secret/Reveal 出口）一律 Secret 級，優先於呼叫形態
+    if matches!(
+        resp,
+        Some(Response::Secret(_))
+            | Some(Response::Item(Some(bw_proto::ItemView {
+                password: Some(_),
+                ..
+            })))
+    ) {
+        return Secret;
+    }
     match c {
         Call::Vault(VaultCall::Get { view, .. }) => match view {
-            View::Metadata => Identity,
-            View::Masked | View::Reveal => Secret,
+            View::Reveal => Secret,
+            _ => Identity,
         },
-        Call::Vault(VaultCall::List { view, .. }) => match view {
-            View::Metadata => Identity,
-            _ => Secret,
-        },
+        Call::Vault(VaultCall::List { .. }) => Identity,
         Call::Vault(VaultCall::Create { .. })
         | Call::Vault(VaultCall::Patch { .. })
         | Call::Vault(VaultCall::Delete { .. })
         | Call::Vault(VaultCall::Restore { .. }) => Identity,
-        Call::Use(_) => Secret,
+        Call::Use(UseCall::TotpCode { .. })
+        | Call::Use(UseCall::Run { .. })
+        | Call::Use(UseCall::ResolveRef { .. })
+        | Call::Use(UseCall::GeneratePassword { .. }) => Secret,
         Call::Auth(_) | Call::Admin(_) | Call::Sync(_) | Call::Agent(_) | Call::Fill(_) => Opaque,
     }
 }

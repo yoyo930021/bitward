@@ -1,0 +1,11 @@
+[package]
+name = "bw-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bw-proto.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+uuid.workspace = true

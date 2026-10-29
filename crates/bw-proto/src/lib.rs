@@ -297,6 +297,7 @@ pub enum AgentCall {
     OpenSession {
         scopes: Vec<String>,
         ttl_secs: u64,
+        name: String,
     },
     Approve {
         id: ApprovalId,
@@ -306,6 +307,8 @@ pub enum AgentCall {
         session: SessionId,
     },
     ListSessions,
+    /// 待人工核准的請求（e2e/GUI 取 id 用）
+    ListPending,
     Audit {
         since: Option<String>,
         limit: u32,

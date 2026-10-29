@@ -168,9 +168,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitward-mcp"
+version = "0.0.1"
+dependencies = [
+ "bw-btp",
+ "bw-proto",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "bitwarderd"
 version = "0.0.1"
 dependencies = [
+ "bw-agent",
  "bw-btp",
  "bw-crypto",
  "bw-keys",
@@ -247,6 +260,16 @@ name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
+
+[[package]]
+name = "bw-agent"
+version = "0.0.1"
+dependencies = [
+ "bw-proto",
+ "serde",
+ "thiserror 2.0.21",
+ "uuid",
+]
 
 [[package]]
 name = "bw-btp"
