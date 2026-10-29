@@ -323,7 +323,7 @@ Transport 總表：
 |---|---|---|
 | P0 | workspace、`bw-proto` 型別+BTP schema+conformance vectors、CI（Vaultwarden docker 釘版矩陣 + macOS runner + Android compile-only）、GPL+`cargo deny`+商標聲明、**NSH spike**（provider 設定頁 + vault 列表兩個真實畫面，雙平台驗證渲染與打包鏈，§0.2） | 骨架編譯、CI 綠、spike 畫面可跑 |
 | **P1（第一增量，可獨立驗證）** | **read-path daemon**：login（password+TOTP 2FA、API key 旁路）→ 金鑰派生與 Keychain 封存 → `/sync` 全量落 SQLite（密文原樣）→ 狀態機+timeout → UDS+BTP+對端驗證 → secret arena（mlock/清零）→ CLI `status/list/search/get/reveal/audit/lock` | §6 斷言全過 |
-| P2 | 寫入路徑：outbox+欄位級三方合併+衝突佇列、離線解鎖與離線寫入收斂、附件 blob 佇列、**多裝置收斂**（cipherId targeted pull、雙裝置併發 e2e A12） | A7/A8 型斷言 + A12（見 §6 附註） |
+| P2 | 寫入路徑：outbox+欄位級三方合併+衝突佇列、離線解鎖與離線寫入收斂、附件 blob 佇列、**多裝置收斂**（cipherId targeted pull、雙裝置併發 e2e A12） | ✅ 2026-10-29：`dev/e2e/writepath.sh` 全過（A7 離線收斂、A7b kill -9 重生 44ms 無 KDF、A12a 不同欄自動合併、A12b 同欄衝突＋裁決、A12c notifications 收斂、軟刪）。附件 blob 佇列延後至 P4（store 端 Awaiting 狀態已預留） |
 | P3 | agent 面：session/grant/approval/budget/audit 鏈、`bitward-mcp`、`Run`+Redactor、事件訂閱 | grep 明文==0 端到端斷言 |
 | P4 | 資料管理（tags/排序/去重/merge/bulk/unshare/值搜尋）+ auto-type（CGEvent）+ 瀏覽器 NM shim；**Android track 自此起平行**（NSH 同進程核心 + Kotlin 孤島：AutofillService、API 34 CredentialProviderService、Keystore；Full＝預設形態的 in-process 中樞） | 各缺口有專屬 e2e |
 | P5 | macOS credential provider（先 passkey 骨架、再 passwords/OTP）+ identity store 維護 + MachServices 按需啟動 + **remote thin 配對伺服**（`pair`/撤銷/跨機 grant）+ **推播路徑**（APNs/FCM/Vaultwarden relay：核准訊息與喚醒訊息、`HubOffline` 快速失敗語意，操作者要求 2026-10-29） | 真機填充延遲量測；跨機 reveal 延遲與撤銷 e2e；手機在口袋裡批准 agent reveal 的 e2e |
@@ -389,7 +389,7 @@ P1 是最早失敗點：自寫 crypto 正確性與無 spec 互通性是風險最
 - **Base**：候選一。不變量機制最完整（`with_keys` 閉包、唯一入口 `call()`、raw mirror、hash 鏈審計、敏感度分級 × `project()`）。
 - **Grafts**（自候選二，逐條手工折入）：(1) P1 收窄為只讀路徑，寫入獨立成 P2；(2) `VaultState::Stale` 金鑰指紋漂移態；(3) outbox `payload_enc` 入列即加密，push 不碰金鑰；(4) 封存 stretched key 的秒級冷啟 + KeepAlive 重生驗收（A7）；(5) Android「同構訊息、無第二套內部 API」規則；(6) `View` 作為讀取簽名的強制參數。
 - **拒絕**：候選二的 app-group unix socket 給 extension（改 XPC+MachServices 換取按需啟動，保留 socket 為實測退路）；候選一原始 P1 含寫入（範圍過大，拆到 P2）。
-- **驗證狀態**：設計包內部自洽性已對照 grounding 事實逐條檢查。P1 已落地並實跑（2026-10-29）：workspace 20 測試套件綠、`cargo deny` licenses+bans ok（無 bitwarden-* SDK 依賴）、`dev/e2e/readpath.sh` 對 Vaultwarden 1.37.2 全過，A1-A6、A8-A11 有證據（A5 冷 ls p95=19ms；A10 arena mlock+清零單元過；A11 argv/env 零命中）。A7/A12（離線寫入、雙中樞併發）屬 P2，尚未實作。
+- **驗證狀態**：設計包內部自洽性已對照 grounding 事實逐條檢查。P1 已落地並實跑（2026-10-29）：workspace 20 測試套件綠、`cargo deny` licenses+bans ok（無 bitwarden-* SDK 依賴）、`dev/e2e/readpath.sh` 對 Vaultwarden 1.37.2 全過，A1-A6、A8-A11 有證據（A5 冷 ls p95=19-26ms；A10 arena mlock+清零單元過；A11 argv/env 零命中）。P2 落地（2026-10-29）：`dev/e2e/writepath.sh` 全過（A7、A7b 重生解鎖 44ms、A12a/b/c），readpath 迴歸同步綠，兩條 e2e 已收進 CI。A10 的「所有明文經 arena」仍是 P3 Redactor 工作（現行：機制就緒＋單元驗證）。
 - **跨候選未解分歧**：macOS extension 走純 thin（兩候選同）對上 grounding 報告建議的混合式 fat fast-path（`research/macos-provider.md` §4）。裁決：先 thin，理由是金鑰進第二進程會迫使 grant/audit 模型重寫一遍；若 P5 實測冷啟延遲不可接受，升級路徑是優化 daemon 快速路徑，不是把金鑰搬進 extension。
 - **操作者修訂（2026-10-29，兩項）**：(1) 多 Full client。按 first-principles 重設計而非打補丁：「唯一」從 day-one 前提改寫為「裝置內唯一」，跨裝置收斂升級為一級機制（§1.1、不變量 11、A12），Android 預設 Full。(2) 明文記憶體保護。新增 §2.7（arena/mlock/清零/FFI 字串紀律/出口登記表）、不變量 9-10、斷言 A10-A11。兩份設計候選保留原樣，其「機器上唯一」措辭以本檔為準。
 - **操作者修訂（2026-10-29，第二批）**：(3) thin client 獨立安裝。Full/Thin 分界改掛在執行體而非套件（§1.2、§0 安裝形態列），Q1 隨之關閉，remote 配對伺服提前到 P5。(4) 技術線逐 concern 明細化（§0.1）。

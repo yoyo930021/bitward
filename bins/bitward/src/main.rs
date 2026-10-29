@@ -10,9 +10,9 @@ use uuid::Uuid;
 
 use bw_btp::{read_server, write_client};
 use bw_proto::{
-    AdminCall, AgentCall, Auth, AuthCall, Call, ClientMsg, ItemId, PROTO_VERSION, ProtoVersion,
-    Query, Response, ServerMsg, SessionToken, SortKey, SyncCall, UseCall, VaultCall, View,
-    WtpError,
+    AdminCall, AgentCall, Auth, AuthCall, Call, CipherDraft, ClientMsg, FieldEdit, ItemId,
+    ItemKind, MutationId, PROTO_VERSION, ProtoVersion, Query, Resolution, Response, ServerMsg,
+    SessionToken, SortKey, SyncCall, UseCall, VaultCall, View, WtpError,
 };
 
 #[derive(Parser)]
@@ -72,6 +72,51 @@ enum Cmd {
         verify: bool,
     },
     Version,
+    New {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        username: Option<String>,
+        /// 從 stdin 讀一行作為密碼（不進 argv，A11）
+        #[arg(long)]
+        password_stdin: bool,
+        #[arg(long)]
+        uri: Option<String>,
+        #[arg(long)]
+        totp: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+    },
+    Edit {
+        id: String,
+        /// `path=value`，可重複。path ∈ name|notes|username|password|totp|uri.<n>|favorite
+        #[arg(long = "set")]
+        sets: Vec<String>,
+        /// 清除欄位，可重複
+        #[arg(long = "clear")]
+        clears: Vec<String>,
+        /// 密碼類新值改由 stdin 讀（搭配 --secret-stdin）
+        #[arg(long)]
+        secret_stdin: bool,
+    },
+    Rm {
+        id: String,
+    },
+    Restore {
+        id: String,
+    },
+    Outbox,
+    Conflicts,
+    Resolve {
+        id: u64,
+        #[arg(long)]
+        ours: bool,
+        #[arg(long)]
+        theirs: bool,
+        #[arg(long)]
+        keep_both: bool,
+    },
+    SignOut,
     /// e2e/開發用：向（自架）server 註冊新帳號，不寫入 daemon 狀態
     #[command(hide = true)]
     DevRegister {
@@ -115,6 +160,69 @@ async fn main() {
     }
 }
 
+async fn open_session(
+    sock: &std::path::Path,
+    data_dir: &std::path::Path,
+) -> Result<
+    (
+        tokio::net::unix::OwnedReadHalf,
+        tokio::net::unix::OwnedWriteHalf,
+    ),
+    String,
+> {
+    // 一次 Session 續用；被拒（daemon 重啟過）則刪檔重 Enroll 一次。
+    for attempt in 0..2u8 {
+        let stream = tokio::net::UnixStream::connect(sock)
+            .await
+            .map_err(|_| format!("連不到 daemon（{}）；先啟動 bitwarderd", sock.display()))?;
+        let (mut rd, mut wr) = stream.into_split();
+        let saved: Option<SessionToken> = if attempt == 0 {
+            std::fs::read_to_string(session_file(data_dir))
+                .ok()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        };
+        let fresh = Uuid::new_v4().to_string();
+        let auth = match saved {
+            Some(t) => Auth::Session { token: t },
+            None => Auth::Enroll {
+                pairing: fresh.clone(),
+                display_name: format!("cli:{}", std::process::id()),
+            },
+        };
+        write_client(
+            &mut wr,
+            &ClientMsg::Hello {
+                version: ProtoVersion(PROTO_VERSION),
+                auth: auth.clone(),
+                wants: vec![],
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        match read_server(&mut rd).await {
+            Ok(ServerMsg::Welcome { proto, .. }) => {
+                if let Some(s) = proto_mismatch(proto) {
+                    return Err(s);
+                }
+                if matches!(auth, Auth::Enroll { .. }) {
+                    let _ = std::fs::write(session_file(data_dir), &fresh);
+                }
+                return Ok((rd, wr));
+            }
+            Ok(other) => return Err(format!("expected Welcome, got {other:?}")),
+            Err(e) if attempt == 0 => {
+                let _ = e;
+                let _ = std::fs::remove_file(session_file(data_dir));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    unreachable!()
+}
+
 async fn run() -> Result<(), String> {
     let args = Args::parse();
     match &args.cmd {
@@ -138,45 +246,7 @@ async fn run() -> Result<(), String> {
         .sock
         .clone()
         .unwrap_or_else(|| data_dir.join("daemon.sock"));
-    let stream = tokio::net::UnixStream::connect(&sock)
-        .await
-        .map_err(|_| format!("連不到 daemon（{}）；先啟動 bitwarderd", sock.display()))?;
-    let (mut rd, mut wr) = stream.into_split();
-
-    let saved: Option<SessionToken> = std::fs::read_to_string(session_file(&data_dir))
-        .ok()
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty());
-    let fresh = Uuid::new_v4().to_string();
-    let auth = match saved {
-        Some(t) => Auth::Session { token: t },
-        None => Auth::Enroll {
-            // P1：token 由 CLI 生成、經配對欄位帶入，daemon 以它作 session key。
-            pairing: fresh.clone(),
-            display_name: format!("cli:{}", std::process::id()),
-        },
-    };
-    write_client(
-        &mut wr,
-        &ClientMsg::Hello {
-            version: ProtoVersion(PROTO_VERSION),
-            auth: auth.clone(),
-            wants: vec![],
-        },
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    match read_server(&mut rd).await.map_err(|e| e.to_string())? {
-        ServerMsg::Welcome { proto, .. } => {
-            if let Some(s) = proto_mismatch(proto) {
-                return Err(s);
-            }
-        }
-        other => return Err(format!("expected Welcome, got {other:?}")),
-    };
-    if matches!(auth, Auth::Enroll { .. }) {
-        let _ = std::fs::write(session_file(&data_dir), &fresh);
-    }
+    let (mut rd, mut wr) = open_session(&sock, &data_dir).await?;
 
     let call = build_call(&args.cmd)?;
     let rid = 1u64;
@@ -280,6 +350,91 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             }
         }
         Cmd::Version => Call::Admin(AdminCall::Version),
+        Cmd::New {
+            name,
+            username,
+            password_stdin,
+            uri,
+            totp,
+            notes,
+        } => {
+            let password = if *password_stdin {
+                Some(read_line_stdin()?)
+            } else {
+                None
+            };
+            Call::Vault(VaultCall::Create {
+                draft: CipherDraft {
+                    kind: ItemKind::Login,
+                    name: name.clone(),
+                    username: username.clone(),
+                    password,
+                    totp: totp.clone(),
+                    uris: uri.clone().into_iter().collect(),
+                    notes: notes.clone(),
+                    favorite: false,
+                },
+            })
+        }
+        Cmd::Edit {
+            id,
+            sets,
+            clears,
+            secret_stdin,
+        } => {
+            let mut edits = Vec::new();
+            for s in sets {
+                let (path, value) = s
+                    .split_once('=')
+                    .ok_or_else(|| format!("--set 需要 path=value， got {s}"))?;
+                let value = if value == "-" || *secret_stdin {
+                    read_line_stdin()?
+                } else {
+                    value.to_owned()
+                };
+                edits.push(FieldEdit {
+                    path: path.to_owned(),
+                    value: Some(value),
+                });
+            }
+            for c in clears {
+                edits.push(FieldEdit {
+                    path: c.clone(),
+                    value: None,
+                });
+            }
+            Call::Vault(VaultCall::Patch {
+                id: parse_id(id)?,
+                edits,
+            })
+        }
+        Cmd::Rm { id } => Call::Vault(VaultCall::Delete {
+            ids: vec![parse_id(id)?],
+        }),
+        Cmd::Restore { id } => Call::Vault(VaultCall::Restore { id: parse_id(id)? }),
+        Cmd::Outbox => Call::Sync(SyncCall::Status),
+        Cmd::Conflicts => Call::Sync(SyncCall::ListConflicts),
+        Cmd::Resolve {
+            id,
+            ours,
+            theirs,
+            keep_both,
+        } => {
+            let pick = if *ours {
+                Resolution::Ours
+            } else if *theirs {
+                Resolution::Theirs
+            } else if *keep_both {
+                Resolution::KeepBoth
+            } else {
+                return Err("需要 --ours/--theirs/--keep-both".into());
+            };
+            Call::Sync(SyncCall::ResolveConflict {
+                id: MutationId(*id),
+                pick,
+            })
+        }
+        Cmd::SignOut => Call::Auth(AuthCall::SignOut),
         Cmd::DevRegister { .. } | Cmd::DevSeed { .. } => {
             unreachable!("dev 命令在連 daemon 前攔截")
         }
@@ -339,21 +494,18 @@ fn print_response(resp: &Response, json: bool) {
                 println!("{code}  ({valid_for_secs}s)");
             }
         }
-        Response::Json(v) => println!(
-            "{}",
-            if json {
-                v.to_string()
-            } else {
-                serde_json::to_string_pretty(v).unwrap()
-            }
-        ),
         Response::Audit(rows) => {
             println!("{}", serde_json::to_string_pretty(rows).unwrap());
         }
         Response::Version(s) => println!("{s}"),
         Response::Profile(p) => println!("{}", json!(p)),
         Response::Ok => println!("ok"),
-        _ => println!("{resp:?}"),
+        // 展開 newtype variant，jq 路徑直接命中欄位（避免 {"Status":{...}} 外殼）
+        Response::Status(s) => println!("{}", serde_json::to_string_pretty(&s).unwrap()),
+        Response::Account(a) => println!("{}", serde_json::to_string_pretty(&a).unwrap()),
+        Response::AuditChain(c) => println!("{}", serde_json::to_string_pretty(&c).unwrap()),
+        Response::Conflicts(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap()),
+        other => println!("{}", serde_json::to_string_pretty(other).unwrap()),
     }
 }
 

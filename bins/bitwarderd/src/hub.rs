@@ -15,14 +15,15 @@ use bw_keys::{
     UnlockMaterial, UnlockReceipt,
 };
 use bw_proto::{
-    AdminCall, AgentCall, AuthCall, Call, FillCall, ItemId, ItemView, PROTO_VERSION, Query,
-    Response, SyncCall, UseCall, VaultCall, View, WtpError,
+    AccountInfo, AdminCall, AgentCall, AuditChainInfo, AuthCall, Call, FillCall, ItemId, ItemView,
+    OutboxCounts, PROTO_VERSION, Query, Response, StatusInfo, SyncCall, UseCall, VaultCall, View,
+    WtpError,
 };
 use bw_server::{Client, PasswordLogin, ServerError};
 use bw_store::{AuditFilter, AuditRecord, Store};
 
 pub struct ServerHandle {
-    pub client: Client,
+    pub client: std::sync::Arc<Client>,
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
@@ -46,6 +47,14 @@ pub struct Hub {
     pub machine: UnlockMachine,
     pub server: RwLock<Option<ServerHandle>>,
     account: RwLock<Option<AccountRecord>>,
+    /// 穩定裝置 id：notifications is_own_change 與 login deviceIdentifier 同源
+    pub device: String,
+    pub drain_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    pub drain_rx: tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<()>>>,
+    /// drain 單飛：併發觸發只跑一轮實際推送（§3.5 trigger 去重語意）
+    pub drain_lock: tokio::sync::Mutex<()>,
+    /// BTP 事件匯流（EventTopic, payload ≤ Identity 級）
+    pub events: tokio::sync::broadcast::Sender<(bw_proto::EventTopic, Value)>,
 }
 
 pub type DispatchResult = Result<Response, WtpError>;
@@ -75,12 +84,9 @@ impl Hub {
         let account: Option<AccountRecord> = Self::read_json(&data_dir.join("account.json"));
         let keystore =
             FileKeyStore::new(data_dir.join("keys")).map_err(|e| format!("keystore: {e}"))?;
-        let label = AccountLabel::new(
-            account
-                .as_ref()
-                .map(|a| a.email.clone())
-                .unwrap_or_default(),
-        );
+        // 固定 label：首次登入時 account.json 還不存在，若用 email 作 label
+        // 會造成封存與載入路徑不一致（A7b 實測教訓）。多帳號（P6）再拆 per-account。
+        let label = AccountLabel::new("default");
         let builder = UnlockMachine::builder()
             .label(label)
             .kernel(Arc::new(BwCryptoKernel))
@@ -98,15 +104,23 @@ impl Hub {
                 keys_fingerprint: a.keys_fingerprint.clone(),
             });
         }
+        let (drain_tx, drain_rx) = tokio::sync::mpsc::unbounded_channel();
         let hub = Arc::new(Hub {
             data_dir: data_dir.to_path_buf(),
             store,
             machine,
             server: RwLock::new(None),
             account: RwLock::new(account.clone()),
+            device: Self::device_id_static(data_dir),
+            drain_tx,
+            drain_rx: tokio::sync::Mutex::new(Some(drain_rx)),
+            drain_lock: tokio::sync::Mutex::new(()),
+            events: tokio::sync::broadcast::channel(128).0,
         });
         if let Some(a) = account {
-            let client = Client::new(&a.server).map_err(|e| e.to_string())?;
+            let client = std::sync::Arc::new(
+                Client::with_options(&a.server, Hub::sync_options()).map_err(|e| e.to_string())?,
+            );
             if let Some(t) = a.access_token.clone() {
                 client.set_access_token(&t).await;
             }
@@ -139,32 +153,43 @@ impl Hub {
         Ok(())
     }
 
-    fn device_id(&self) -> Result<String, WtpError> {
-        let path = self.data_dir.join("device.id");
+    fn device_id_static(dir: &Path) -> String {
+        let path = dir.join("device.id");
         if let Ok(s) = std::fs::read_to_string(&path) {
-            return Ok(s.trim().to_owned());
+            let t = s.trim();
+            if !t.is_empty() {
+                return t.to_owned();
+            }
         }
         let id = Uuid::new_v4().to_string();
-        std::fs::write(&path, &id).map_err(denied)?;
-        Ok(id)
+        let _ = std::fs::write(&path, &id);
+        id
     }
 
-    pub async fn status_json(&self) -> Value {
-        let depth = self.store.depth().ok();
-        json!({
-            "state": self.machine.state(),
-            "epoch": self.machine.epoch().0,
-            "items": self.store.cipher_count().unwrap_or(0),
-            "outbox": depth.map(|d| d.queued + d.in_flight + d.awaiting + d.conflict).unwrap_or(0),
-            "needs_reauth": self.machine.needs_reauth(),
-            "proto": PROTO_VERSION,
-        })
+    pub async fn status_info(&self) -> StatusInfo {
+        let d = self.store.depth().unwrap_or_default();
+        StatusInfo {
+            state: self.machine.state(),
+            epoch: self.machine.epoch().0,
+            items: self.store.cipher_count().unwrap_or(0),
+            outbox: OutboxCounts {
+                queued: d.queued,
+                in_flight: d.in_flight,
+                awaiting: d.awaiting,
+                conflict: d.conflict,
+                dead: d.dead,
+                total: d.total,
+            },
+            needs_reauth: self.machine.needs_reauth(),
+            proto: PROTO_VERSION,
+        }
     }
 
     /// 唯一 thin 入口的 P1 雛形：分派 + 全量審計（A8）。
     pub async fn dispatch(&self, session: &str, call: &Call) -> DispatchResult {
         let started = std::time::Instant::now();
-        let outcome = self.dispatch_inner(call).await;
+        self.machine.record_activity();
+        let outcome = self.dispatch_inner(session, call).await;
         let action = action_tag(call);
         let (outcome_s, bytes_out, item, sens) = match &outcome {
             Ok(resp) => (
@@ -198,7 +223,7 @@ impl Hub {
         outcome
     }
 
-    async fn dispatch_inner(&self, call: &Call) -> DispatchResult {
+    async fn dispatch_inner(&self, session: &str, call: &Call) -> DispatchResult {
         match call {
             Call::Auth(AuthCall::Login {
                 server,
@@ -214,19 +239,23 @@ impl Hub {
                     return Err(denied("P1: biometric assertion 尚未接 KeychainKeystore"));
                 }
                 match self.machine.submit(UnlockMaterial::DeviceAssertion) {
-                    Ok(
-                        UnlockReceipt::Unlocked { epoch }
-                        | UnlockReceipt::AlreadyUnlocked { epoch },
-                    ) => {
-                        let v = self.status_json().await;
-                        let _ = epoch;
-                        Ok(Response::Json(v))
+                    Ok(UnlockReceipt::Unlocked { .. } | UnlockReceipt::AlreadyUnlocked { .. }) => {
+                        Ok(Response::Status(self.status_info().await))
                     }
                     Ok(UnlockReceipt::Pending { .. }) => Err(denied("unlock pending")),
                     Err(e) => Err(WtpError::Denied {
                         grant_gap: e.to_string(),
                     }),
                 }
+            }
+            Call::Auth(AuthCall::SignOut) => {
+                if let Some(h) = self.server.read().await.as_ref() {
+                    h.client.sign_out().await;
+                }
+                self.machine.sign_out();
+                *self.account.write().await = None;
+                let _ = std::fs::remove_file(self.data_dir.join("account.json"));
+                Ok(Response::Status(self.status_info().await))
             }
             Call::Auth(AuthCall::Lock) => {
                 let epoch = self.machine.lock(LockReason::User);
@@ -236,11 +265,10 @@ impl Hub {
             }
             Call::Auth(AuthCall::WhoAmI) => {
                 let acc = self.account.read().await;
-                Ok(Response::Json(
-                    acc.as_ref()
-                        .map(|a| json!({"email": a.email, "server": a.server}))
-                        .unwrap_or(Value::Null),
-                ))
+                Ok(Response::Account(acc.as_ref().map(|a| AccountInfo {
+                    email: a.email.clone(),
+                    server: a.server.clone(),
+                })))
             }
             Call::Vault(VaultCall::List { query, view }) => {
                 if *view > View::Metadata && !self.machine.is_unlocked() {
@@ -267,9 +295,12 @@ impl Hub {
                 let v = self.project_one(*id, *view)?;
                 Ok(Response::Item(v))
             }
-            Call::Vault(_) => Err(WtpError::Unsupported {
-                feature: "P1 read-only：寫入路徑在 P2".into(),
-            }),
+            Call::Vault(VaultCall::Create { draft }) => self.write_create(session, draft).await,
+            Call::Vault(VaultCall::Patch { id, edits }) => {
+                self.write_patch(session, *id, edits).await
+            }
+            Call::Vault(VaultCall::Delete { ids }) => self.write_delete(session, ids).await,
+            Call::Vault(VaultCall::Restore { id }) => self.write_restore(session, *id).await,
             Call::Use(UseCall::TotpCode { id }) => self.totp(*id),
             Call::Use(UseCall::GeneratePassword { policy }) => {
                 let opts = bw_crypto::PasswordOptions {
@@ -289,20 +320,18 @@ impl Hub {
             Call::Fill(_) => Err(WtpError::Unsupported {
                 feature: "P1：fill 在 P4".into(),
             }),
-            Call::Sync(SyncCall::Trigger { .. }) => match self.sync_now().await {
-                Ok(()) => Ok(Response::Ok),
-                Err(e) => Err(e),
-            },
-            Call::Sync(SyncCall::Status) => {
-                let d = self.store.depth().map_err(denied)?;
-                Ok(Response::Json(json!({
-                    "queued": d.queued, "in_flight": d.in_flight,
-                    "awaiting": d.awaiting, "conflict": d.conflict, "dead": d.dead, "total": d.total,
-                })))
+            Call::Sync(SyncCall::Trigger { force }) => {
+                if *force {
+                    self.sync_now().await?;
+                }
+                self.trigger_drain();
+                Ok(Response::Status(self.status_info().await))
             }
-            Call::Sync(SyncCall::ResolveConflict { .. }) => Err(WtpError::Unsupported {
-                feature: "P1：衝突裁決在 P2".into(),
-            }),
+            Call::Sync(SyncCall::Status) => Ok(Response::Status(self.status_info().await)),
+            Call::Sync(SyncCall::ListConflicts) => self.list_conflicts().await,
+            Call::Sync(SyncCall::ResolveConflict { id, pick }) => {
+                self.resolve_conflict(*id, *pick).await
+            }
             Call::Agent(AgentCall::Audit { since, limit }) => {
                 let rows = self
                     .store
@@ -320,9 +349,11 @@ impl Hub {
             }
             Call::Agent(AgentCall::AuditVerify) => {
                 let (count, head) = self.store.audit_verify().map_err(denied)?;
-                Ok(Response::Json(
-                    json!({"ok": true, "count": count, "head": head}),
-                ))
+                Ok(Response::AuditChain(AuditChainInfo {
+                    ok: true,
+                    count,
+                    head,
+                }))
             }
             Call::Agent(AgentCall::OpenSession { .. }) => {
                 Err(denied("P1：agent session 治理在 P3；請直接用本機 Enroll"))
@@ -340,17 +371,18 @@ impl Hub {
                 let p = h.client.cached_probe().await;
                 Ok(Response::Profile(p.profile))
             }
-            Call::Admin(AdminCall::Diagnostics) => Ok(Response::Json(self.status_json().await)),
+            Call::Admin(AdminCall::Diagnostics) => Ok(Response::Status(self.status_info().await)),
         }
     }
 
     async fn login(&self, server: &str, email: &str, pw: &str) -> DispatchResult {
-        let client = Client::new(server).map_err(denied)?;
+        let client =
+            std::sync::Arc::new(Client::with_options(server, Hub::sync_options()).map_err(denied)?);
         let pre = client.prelogin(email).await.map_err(map_server_err)?;
         let kdf = KdfWire::from_prelogin(&pre).ok_or_else(|| drift("prelogin 缺 KDF 欄位"))?;
         let mk = bw_crypto::master_key(pw, email, kdf.to_params()).map_err(denied)?;
         let hash = bw_crypto::master_password_hash(&mk, pw).as_b64().to_owned();
-        let login = PasswordLogin::new(email, hash, self.device_id()?);
+        let login = PasswordLogin::new(email, hash, self.device.clone());
         let bundle = client
             .password_login(&login)
             .await
@@ -392,7 +424,7 @@ impl Hub {
             .map_err(denied)?;
         self.server.write().await.replace(ServerHandle { client });
         self.sync_now().await?;
-        Ok(Response::Json(self.status_json().await))
+        Ok(Response::Status(self.status_info().await))
     }
 
     pub async fn sync_now(&self) -> Result<(), WtpError> {
@@ -633,6 +665,7 @@ fn action_tag(c: &Call) -> String {
         Call::Auth(AuthCall::Login { .. }) => "Auth.Login",
         Call::Auth(AuthCall::Unlock { .. }) => "Auth.Unlock",
         Call::Auth(AuthCall::Lock) => "Auth.Lock",
+        Call::Auth(AuthCall::SignOut) => "Auth.SignOut",
         Call::Auth(AuthCall::WhoAmI) => "Auth.WhoAmI",
         Call::Vault(VaultCall::List { view, .. }) => return format!("Vault.List.{view:?}"),
         Call::Vault(VaultCall::Get { view, .. }) => return format!("Vault.Get.{view:?}"),
@@ -649,6 +682,7 @@ fn action_tag(c: &Call) -> String {
         Call::Fill(FillCall::AutoType { .. }) => "Fill.AutoType",
         Call::Sync(SyncCall::Trigger { .. }) => "Sync.Trigger",
         Call::Sync(SyncCall::Status) => "Sync.Status",
+        Call::Sync(SyncCall::ListConflicts) => "Sync.ListConflicts",
         Call::Sync(SyncCall::ResolveConflict { .. }) => "Sync.ResolveConflict",
         Call::Agent(AgentCall::OpenSession { .. }) => "Agent.OpenSession",
         Call::Agent(AgentCall::Approve { .. }) => "Agent.Approve",

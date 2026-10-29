@@ -11,6 +11,7 @@ bw-server.workspace = true
 bw-store.workspace = true
 bw-keys.workspace = true
 bw-btp.workspace = true
+bw-vault.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true

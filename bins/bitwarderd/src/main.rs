@@ -3,6 +3,7 @@
 
 mod arena;
 mod hub;
+mod sync;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -17,7 +18,9 @@ use uuid::Uuid;
 
 use bw_btp::{read_client, write_server};
 use bw_keys::UnlockEvent;
-use bw_proto::{Auth, ClientMsg, PROTO_VERSION, ServerMsg, SessionId, SessionToken, WtpError};
+use bw_proto::{
+    Auth, ClientMsg, PROTO_VERSION, Response, ServerMsg, SessionId, SessionToken, WtpError,
+};
 use bw_store::SessionRow;
 use hub::Hub;
 
@@ -72,6 +75,31 @@ async fn main() -> Result<(), String> {
 
     let sessions: Arc<Mutex<HashMap<SessionToken, LiveSession>>> =
         Arc::new(Mutex::new(HashMap::new()));
+
+    // drain：觸發式 + 5 秒兜底輪（離線重試與租約過期回收）
+    {
+        let hub_a = hub.clone();
+        tokio::spawn(async move {
+            let mut rx = hub_a.drain_rx.lock().await.take().expect("drain rx once");
+            while rx.recv().await.is_some() {
+                hub_a.drain_until_idle().await;
+            }
+        });
+        let hub2 = hub.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if hub2.store.depth().map(|d| d.total > 0).unwrap_or(false) {
+                    hub2.drain_until_idle().await;
+                }
+            }
+        });
+    }
+    // notifications：多中樞收斂（§1.1 targeted pull）
+    {
+        let hub = hub.clone();
+        tokio::spawn(async move { hub.notify_loop().await });
+    }
 
     // 級聯撤銷：鎖世代推進 ⇒ 綁舊 epoch 的 session 全滅（§2.2、A6）。
     {
@@ -138,7 +166,12 @@ async fn serve_conn(
         .map_err(|_| WtpError::Denied {
             grant_gap: "hello unreadable".into(),
         })?;
-    let ClientMsg::Hello { version, auth, .. } = hello else {
+    let ClientMsg::Hello {
+        version,
+        auth,
+        wants,
+    } = hello
+    else {
         return Err(WtpError::Denied {
             grant_gap: "first message must be Hello".into(),
         });
@@ -208,41 +241,81 @@ async fn serve_conn(
         grant_gap: "write".into(),
     })?;
 
+    let mut ev_rx = if wants.is_empty() {
+        None
+    } else {
+        Some(hub.events.subscribe())
+    };
+
     loop {
-        let msg = match read_client(&mut rd).await {
-            Ok(m) => m,
-            Err(bw_btp::BtpError::Closed) => return Ok(()),
-            Err(_) => return Ok(()),
-        };
-        match msg {
-            ClientMsg::Invoke { rid, call } => {
-                // 撤銷只看 lock 事件（A6）；unlock 的 epoch bump 不殺既有 session
-                let (revoked, bound) = sessions
-                    .lock()
-                    .unwrap()
-                    .get(&token)
-                    .map(|s| (s.revoked, s.row.epoch))
-                    .ok_or(WtpError::Denied {
-                        grant_gap: "session dropped".into(),
-                    })?;
-                let now = hub.machine.epoch();
-                let outcome = if revoked {
-                    Err(WtpError::StaleEpoch {
-                        seen: bound,
-                        now: now.0,
-                    })
-                } else {
-                    hub.dispatch(&token, &call).await
+        let recv = read_client(&mut rd);
+        tokio::pin!(recv);
+        tokio::select! {
+            msg = &mut recv => {
+                let msg = match msg {
+                    Ok(m) => m,
+                    Err(_) => return Ok(()),
                 };
-                if write_server(&mut wr, &ServerMsg::Reply { rid, outcome })
-                    .await
-                    .is_err()
-                {
-                    return Ok(());
+                match msg {
+                    ClientMsg::Invoke { rid, call } => {
+                        // 撤銷只看 lock 事件（A6）；unlock 的 epoch bump 不殺既有 session
+                        let (revoked, bound) = sessions
+                            .lock()
+                            .unwrap()
+                            .get(&token)
+                            .map(|s| (s.revoked, s.row.epoch))
+                            .ok_or(WtpError::Denied {
+                                grant_gap: "session dropped".into(),
+                            })?;
+                        let now = hub.machine.epoch();
+                        let outcome = if revoked {
+                            Err(WtpError::StaleEpoch {
+                                seen: bound,
+                                now: now.0,
+                            })
+                        } else {
+                            hub.dispatch(&token, &call).await
+                        };
+                        if write_server(&mut wr, &ServerMsg::Reply { rid, outcome })
+                            .await
+                            .is_err()
+                        {
+                            return Ok(());
+                        }
+                    }
+                    ClientMsg::Pull { cursor } => {
+                        // P2：事件歷史重播在 P3 補（目前 Pull 回游標確認）
+                        let _seq = hub.store.cursor().unwrap_or(cursor);
+                        if write_server(&mut wr, &ServerMsg::Reply { rid: 0, outcome: Ok(Response::Status(hub.status_info().await)) }).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    ClientMsg::Cancel { .. } | ClientMsg::Hello { .. } => {}
                 }
             }
-            ClientMsg::Pull { .. } => {}
-            ClientMsg::Cancel { .. } | ClientMsg::Hello { .. } => {}
+            ev = async {
+                match ev_rx.as_mut() {
+                    Some(r) => r.recv().await.ok(),
+                    None => std::future::pending::<Option<_>>().await,
+                }
+            } => {
+                if let Some((topic, payload)) = ev {
+                    let seq = hub.store.cursor().unwrap_or(0);
+                    if write_server(
+                        &mut wr,
+                        &ServerMsg::Event {
+                            topic,
+                            seq,
+                            payload,
+                        },
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return Ok(());
+                    }
+                }
+            }
         }
     }
 }
