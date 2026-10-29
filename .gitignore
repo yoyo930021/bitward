@@ -1,5 +1,6 @@
 /target
-/dev/
+dev/e2e/data*/
+dev/e2e/dbg*/
 .DS_Store
 spike/*/.nsh/
 spike/*/target/
