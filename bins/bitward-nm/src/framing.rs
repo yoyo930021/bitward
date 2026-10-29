@@ -4,7 +4,6 @@
 //! 但那是 postcard/JSON 的協定型別化幀——本檔是 NM 面自用的 `serde_json::Value` 幀。）
 
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -79,10 +78,11 @@ mod tests {
     #[tokio::test]
     async fn le_round_trip() {
         let (a, mut b) = duplex(1 << 16);
-        let (mut w, mut r) = tokio::io::split(a);
+        let (_a_rd, mut a_wr) = tokio::io::split(a);
         let msg = json!({"id": 7, "method": "ping", "params": {}});
-        let t = tokio::spawn(async move { write_nm(&mut w, &msg).await });
-        let got = read_nm(&mut r).await.unwrap().unwrap();
+        let wire = msg.clone();
+        let t = tokio::spawn(async move { write_nm(&mut a_wr, &wire).await });
+        let got = read_nm(&mut b).await.unwrap().unwrap();
         assert_eq!(got, msg);
         t.await.unwrap().unwrap();
     }
@@ -103,7 +103,7 @@ mod tests {
 
     #[tokio::test]
     async fn clean_eof_is_none() {
-        let (mut w, mut r) = duplex(64);
+        let (w, mut r) = duplex(64);
         drop(w);
         assert!(read_nm(&mut r).await.unwrap().is_none());
     }
@@ -112,7 +112,7 @@ mod tests {
     async fn partial_prefix_is_eof() {
         let (mut w, mut r) = duplex(64);
         w.write_all(&[3, 0]).await.unwrap();
-        w.flush().unwrap();
+        w.flush().await.unwrap();
         drop(w);
         assert!(read_nm(&mut r).await.unwrap().is_none());
     }
@@ -121,7 +121,7 @@ mod tests {
     async fn truncated_body_is_error() {
         let (mut w, mut r) = duplex(64);
         w.write_all(&[9, 0, 0, 0, b'{']).await.unwrap();
-        w.flush().unwrap();
+        w.flush().await.unwrap();
         drop(w);
         assert!(read_nm(&mut r).await.is_err());
     }
@@ -131,7 +131,7 @@ mod tests {
         let (mut w, mut r) = duplex(64);
         let fake = MAX_FRAME as u32 + 1;
         w.write_all(&fake.to_le_bytes()).await.unwrap();
-        w.flush().unwrap();
+        w.flush().await.unwrap();
         let e = read_nm(&mut r).await.unwrap_err();
         assert!(e.contains("too large"), "{e}");
     }

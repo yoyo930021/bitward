@@ -58,7 +58,7 @@ async fn main() -> ExitCode {
     }) = &args.cmd
     {
         let exe = std::env::current_exe().expect("current_exe");
-        return match manifest::install(*browser, extension_id, dest.as_deref(), exe) {
+        return match manifest::install(*browser, extension_id, dest.as_deref(), &exe) {
             Ok(p) => {
                 println!("{}", p.display());
                 ExitCode::SUCCESS

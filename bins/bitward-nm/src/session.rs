@@ -61,6 +61,7 @@ async fn try_connect(sock: &Path, dir: &Path, use_saved: bool) -> Result<Bridge,
         None
     };
     let pairing = Uuid::new_v4().to_string();
+    let enrolled = saved.is_none();
     let auth = match saved {
         Some(t) => Auth::Session { token: t },
         None => Auth::Enroll {
@@ -69,7 +70,7 @@ async fn try_connect(sock: &Path, dir: &Path, use_saved: bool) -> Result<Bridge,
         },
     };
     let bridge = Bridge::connect(stream, auth).await?;
-    if !use_saved {
+    if enrolled {
         if let Some(parent) = token_file(dir).parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
@@ -77,6 +78,7 @@ async fn try_connect(sock: &Path, dir: &Path, use_saved: bool) -> Result<Bridge,
         #[cfg(unix)]
         {
             use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
             let mut f = std::fs::OpenOptions::new()
                 .create(true)
                 .write(true)

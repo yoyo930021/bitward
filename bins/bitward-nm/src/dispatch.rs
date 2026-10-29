@@ -41,24 +41,28 @@ pub async fn dispatch(bridge: &Bridge, method: &str, params: &Value) -> Result<V
                 .filter(|s| !s.is_empty())
                 .ok_or("params.uri required")?
                 .to_owned();
+            // daemon 的 `Query.uri` 是「存儲值 ⊇ 查詢值」的子串比對：拿整頁 URL 去查
+            // 永遠空集合（存儲的 site uri 較短）。故先歸一到 host 再查，
+            // host 精確過濾在回應端做（見 FINDINGS）。
+            let want = host_of(&uri).unwrap_or_else(|| uri.to_ascii_lowercase());
             (
                 Call::Vault(VaultCall::List {
                     query: Query {
-                        uri: Some(uri),
+                        uri: Some(want.clone()),
                         limit: MATCH_LIMIT,
                         ..Default::default()
                     },
                     view: View::Metadata,
                 }),
-                Shape::Match,
+                Shape::Match(want),
             )
         }
         "credential.reveal" => {
-            let id = params
+            let raw = params
                 .get("id")
                 .and_then(Value::as_str)
-                .ok_or("params.id (item uuid) required")
-                .and_then(|s| Uuid::parse_str(s).map_err(|e| format!("params.id: {e}")))?;
+                .ok_or_else(|| "params.id (item uuid) required".to_owned())?;
+            let id = Uuid::parse_str(raw).map_err(|e| format!("params.id: {e}"))?;
             (
                 Call::Vault(VaultCall::Get {
                     id,
@@ -76,8 +80,7 @@ pub async fn dispatch(bridge: &Bridge, method: &str, params: &Value) -> Result<V
     let resp = outcome.map_err(|e| e.to_string())?;
     match shape {
         Shape::Raw => serde_json::to_value(&resp).map_err(|e| e.to_string()),
-        Shape::Match => {
-            let want = host_of(&params["uri"].as_str().unwrap_or_default());
+        Shape::Match(want) => {
             let items = match resp {
                 bw_proto::Response::Items(v) => v,
                 other => return Err(format!("unexpected daemon response: {other:?}")),
@@ -85,8 +88,13 @@ pub async fn dispatch(bridge: &Bridge, method: &str, params: &Value) -> Result<V
             let matched: Vec<Value> = items
                 .into_iter()
                 // daemon 的 uri 過濾是子串 LIKE；這裡歸一到 host 精確比對，
-                // 擋掉 "git" 命中 "github.com" 這類誤配。
-                .filter(|it| it.meta.uris.iter().any(|u| host_of(u) == want))
+                // 擋掉 "github.com" 命中 "gist.github.com" 這類誤配。
+                .filter(|it| {
+                    it.meta
+                        .uris
+                        .iter()
+                        .any(|u| host_of(u).as_deref() == Some(want.as_str()))
+                })
                 .map(|it| {
                     json!({
                         "id": it.meta.id,
@@ -102,12 +110,12 @@ pub async fn dispatch(bridge: &Bridge, method: &str, params: &Value) -> Result<V
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Shape {
     /// daemon Response 原樣（serde externally-tagged）。
     Raw,
     /// host 精確過濾 + 塑形為 [{id,name,uris,username_hint}]。
-    Match,
+    Match(String),
 }
 
 /// URI → 小寫 host（去 scheme/userinfo/port/path/trailing dot）。無 `url` crate：
@@ -126,9 +134,10 @@ pub fn host_of(uri: &str) -> Option<String> {
         Some((_, hostport)) => hostport,
         None => s,
     };
-    let host = if s.starts_with('[') {
-        // IPv6：[::1]:8080 → [::1]
-        s.split(']').next()?.to_owned()
+    let host = if let Some(rest) = s.strip_prefix('[') {
+        // IPv6：[::1]:8080 → [::1]（含括號，比對兩側形態一致）
+        let end = rest.find(']')?;
+        format!("[{}]", &rest[..end])
     } else {
         s.split(':').next().unwrap_or(s).to_owned()
     };
@@ -155,6 +164,9 @@ mod tests {
         assert_eq!(host_of("https://[::1]:8080/x").as_deref(), Some("[::1]"));
         assert_eq!(host_of(""), None);
         assert_eq!(host_of("https:///path"), None);
-        assert_eq!(host_of("app.example.com/privacy"), Some("app.example.com"));
+        assert_eq!(
+            host_of("app.example.com/privacy").as_deref(),
+            Some("app.example.com")
+        );
     }
 }

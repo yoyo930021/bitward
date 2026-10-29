@@ -26,6 +26,7 @@ use crate::session::{open_bridge, token_file};
 
 const GITHUB: &str = "67e55044-10b1-426f-9247-bb680e5fe0c8";
 const GITLAB: &str = "11111111-2222-3333-4444-555555555555";
+const GIST: &str = "22222222-3333-4444-5555-666666666666";
 
 fn item(id: &str, name: &str, uris: &[&str]) -> ItemView {
     ItemView::metadata(ItemMeta {
@@ -48,6 +49,9 @@ struct Daemon {
     calls: Arc<Mutex<Vec<Call>>>,
     /// true ⇒ `Auth::Session` 握手即斷線（模擬 daemon 重啟後的 unknown session）。
     kill_sessions: Arc<AtomicBool>,
+    /// true ⇒ vault.list 收到後不回 Reply，等 `kill` 訊號再收線（測 pending 斷線）。
+    hang_lists: Arc<AtomicBool>,
+    kill: Arc<tokio::sync::Notify>,
 }
 
 async fn spawn_daemon(dir: &Path) -> Daemon {
@@ -56,6 +60,8 @@ async fn spawn_daemon(dir: &Path) -> Daemon {
         hellos: Arc::new(Mutex::new(Vec::new())),
         calls: Arc::new(Mutex::new(Vec::new())),
         kill_sessions: Arc::new(AtomicBool::new(false)),
+        hang_lists: Arc::new(AtomicBool::new(false)),
+        kill: Arc::new(tokio::sync::Notify::new()),
     };
     let inner = d.clone();
     tokio::spawn(async move {
@@ -102,8 +108,14 @@ async fn conn(stream: UnixStream, d: Daemon) {
         let ClientMsg::Invoke { rid, call } = msg else {
             continue;
         };
+        let hung = d.hang_lists.load(AtomicOrdering::SeqCst)
+            && matches!(call, Call::Vault(VaultCall::List { .. }));
         let outcome = reply(&call);
         d.calls.lock().unwrap().push(call);
+        if hung {
+            d.kill.notified().await;
+            return; // 收線：對端讀到 EOF ⇒ 橋斷
+        }
         if write_server(&mut wr, &ServerMsg::Reply { rid, outcome })
             .await
             .is_err()
@@ -122,10 +134,11 @@ fn reply(call: &Call) -> Result<Response, WtpError> {
         }))),
         Call::Vault(VaultCall::List { query, view }) => {
             // 假 daemon 的 uri 過濾＝子串比對（真 daemon 是 LIKE，語意一致）：
-            // "git" 同時命中 GitHub 與 GitLab，逼 shim 做 host 精確過濾。
+            // "github.com" 同時命中 GitHub 與 Gist，逼 shim 做 host 精確過濾。
             let all = vec![
                 item(GITHUB, "GitHub", &["https://github.com"]),
                 item(GITLAB, "GitLab", &["https://gitlab.com"]),
+                item(GIST, "Gist", &["https://gist.github.com"]),
             ];
             let items: Vec<ItemView> = match query.uri.as_deref() {
                 Some(sub) => all
@@ -155,23 +168,19 @@ fn reply(call: &Call) -> Result<Response, WtpError> {
 }
 
 /// 起一條假瀏覽器 stdin（UDS pair）＋記憶體 stdout，回 (寫請求端, 讀回應端, serve 任務)。
-async fn shim(
+fn shim(
     bridge: Arc<Bridge>,
 ) -> (
     UnixStream,
-    DuplexReader,
+    tokio::io::DuplexStream,
     tokio::task::JoinHandle<Result<(), String>>,
-)
-where
-{
+) {
     let (host_stdin, shim_stdin) = UnixStream::pair().unwrap();
     let (resp_tx, resp_rx) = duplex(1 << 20);
     // serve 吃 resp_tx 當 stdout；測試從 resp_rx 讀。
     let task = tokio::spawn(serve(bridge, shim_stdin, resp_tx));
     (host_stdin, resp_rx, task)
 }
-
-type DuplexReader = tokio::io::DuplexStream;
 
 #[tokio::test]
 async fn five_methods_over_fake_daemon() {
@@ -190,7 +199,7 @@ async fn five_methods_over_fake_daemon() {
         .await
         .unwrap(),
     );
-    let (mut stdin, mut rx, task) = shim(bridge).await;
+    let (mut stdin, mut rx, task) = shim(bridge);
 
     let requests = vec![
         json!({"id": 1, "method": "ping", "params": {}}),
@@ -218,11 +227,12 @@ async fn five_methods_over_fake_daemon() {
         json!({"id": 2, "ok": true, "result": {"Account": {"email": "dev@bitward.test", "server": "http://127.0.0.1:8080"}}})
     );
     let items = by_id["3"]["result"]["Items"].as_array().unwrap();
-    assert_eq!(items.len(), 2);
+    assert_eq!(items.len(), 3);
     // A3 語意：Metadata 輸出裡機密鍵根本不存在
     let list_raw = serde_json::to_string(&by_id["3"]).unwrap();
     assert!(!list_raw.contains("password") && !list_raw.contains("hunter2"));
-    // credential.match：daemon 子串回兩筆，shim host 過濾後只剩 GitHub
+    // credential.match：shim 以 host "github.com" 查，daemon 子串回 GitHub+Gist，
+    // shim host 過濾後只剩 GitHub
     let matched = by_id["4"]["result"].as_array().unwrap();
     assert_eq!(matched.len(), 1, "{}", by_id["4"]);
     assert_eq!(matched[0]["id"], json!(GITHUB));
@@ -234,20 +244,21 @@ async fn five_methods_over_fake_daemon() {
     assert_eq!(by_id["5"]["result"]["Item"]["password"], json!("hunter2"));
 
     // 對映表守門：五個 method 各自落到正確的 BTP Call
-    let calls = daemon.calls.lock().unwrap();
-    assert!(matches!(
-        &calls[3],
-        Call::Vault(VaultCall::List { query, view: View::Metadata })
-            if query.uri.as_deref() == Some("https://github.com/settings/profile")
-    ));
-    assert!(matches!(
-        &calls[4],
-        Call::Vault(VaultCall::Get {
-            view: View::Reveal,
-            ..
-        })
-    ));
-    drop(calls);
+    {
+        let calls = daemon.calls.lock().unwrap();
+        assert!(matches!(
+            &calls[3],
+            Call::Vault(VaultCall::List { query, view: View::Metadata })
+                if query.uri.as_deref() == Some("github.com")
+        ));
+        assert!(matches!(
+            &calls[4],
+            Call::Vault(VaultCall::Get {
+                view: View::Reveal,
+                ..
+            })
+        ));
+    }
 
     // 未知 method ⇒ 協定級 error，不斷管線
     write_nm(
@@ -278,9 +289,9 @@ async fn btp_drop_fails_pending_and_exits() {
             .await
             .unwrap(),
     );
-    // 讓 fake daemon 對 vault.list 卡住不回：製造「pending 中斷線」。
-    // 直接殺 daemon 任務太粗糙——用一個永遠不回的橋：另起一個只握手的連線。
-    let (host_stdin, mut rx, task) = shim(bridge.clone()).await;
+    // fake daemon 對 vault.list 卡住不回（hang_lists），再主動收線 ⇒ 請求仍在 pending。
+    daemon.hang_lists.store(true, AtomicOrdering::SeqCst);
+    let (mut host_stdin, mut rx, task) = shim(bridge);
     write_nm(
         &mut host_stdin,
         &json!({"id": 7, "method": "vault.list", "params": {}}),
@@ -291,7 +302,7 @@ async fn btp_drop_fails_pending_and_exits() {
     while daemon.calls.lock().unwrap().is_empty() {
         tokio::task::yield_now().await;
     }
-    drop(bridge); // 橋的所有者放手 ⇒ 讀寫任務 EOF ⇒ dead
+    daemon.kill.notify_waiters(); // daemon 收線 ⇒ 橋 dead ⇒ pending 必須被代答
     let resp = read_nm(&mut rx).await.unwrap().unwrap();
     assert_eq!(resp["id"], json!(7));
     assert_eq!(resp["ok"], json!(false));
@@ -336,13 +347,9 @@ async fn unknown_session_re_enrolls_once() {
     let saved2 = std::fs::read_to_string(token_file(&data)).unwrap();
     assert_ne!(saved1, saved2, "重配對必須換 pairing");
     let hellos = daemon.hellos.lock().unwrap();
-    assert_eq!(
-        hellos.len(),
-        3,
-        "Session(拒) → Enroll → 第二次 Session(拒) → Enroll"
-    );
-    assert!(matches!(&hellos[1], Auth::Session { token } if *token == saved1));
-    assert!(matches!(&hellos[2], Auth::Enroll { .. }));
+    // 被拒的 Session 不進 hellos（daemon 在註冊前收線）：兩次成功都是 Enroll。
+    assert_eq!(hellos.len(), 2, "Enroll → (Session 拒) → Enroll");
+    assert!(matches!(&hellos[1], Auth::Enroll { pairing, .. } if *pairing == saved2));
 }
 
 #[test]

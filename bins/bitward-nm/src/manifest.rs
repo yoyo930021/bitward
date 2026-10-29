@@ -6,6 +6,7 @@
 //! - Firefox: `~/Library/Application Support/Firefox/Profiles/<profile>/native-messaging-hosts/`
 //!   （profile 由 `<AppSupport>/Firefox/profiles.ini` 的 Install.Default 解析；
 //!   解析不了就要 `--dest`）
+//!
 //! Linux 對應 `~/.config/google-chrome/NativeMessagingHosts/` 與
 //! `~/.mozilla/firefox/<profile>/native-messaging-hosts/`。
 
@@ -137,15 +138,13 @@ fn parse_profiles_ini(ini: &Path) -> Option<Vec<(String, PathBuf)>> {
     for line in text.lines() {
         let l = line.trim();
         if let Some(rest) = l.strip_prefix('[') {
-            if let Some(name) = cur.take() {
-                if let Some(p) = path.take() {
-                    let joined = if relative {
-                        base.join(p)
-                    } else {
-                        PathBuf::from(p)
-                    };
-                    out.push((name, joined));
-                }
+            if let (Some(name), Some(p)) = (cur.take(), path.take()) {
+                let joined = if relative {
+                    base.join(p)
+                } else {
+                    PathBuf::from(p)
+                };
+                out.push((name, joined));
             }
             path = None;
             relative = true;
@@ -157,15 +156,13 @@ fn parse_profiles_ini(ini: &Path) -> Option<Vec<(String, PathBuf)>> {
             path = Some(v.trim().to_owned());
         }
     }
-    if let Some(name) = cur {
-        if let Some(p) = path {
-            let joined = if relative {
-                base.join(p)
-            } else {
-                PathBuf::from(p)
-            };
-            out.push((name, joined));
-        }
+    if let (Some(name), Some(p)) = (cur, path) {
+        let joined = if relative {
+            base.join(p)
+        } else {
+            PathBuf::from(p)
+        };
+        out.push((name, joined));
     }
     Some(out)
 }
