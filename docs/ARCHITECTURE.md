@@ -381,6 +381,7 @@ P1 是最早失敗點：自寫 crypto 正確性與無 spec 互通性是風險最
 | 商標與授權 | 不用 Bitwarden 當產品名；v1 不鏈接 GPL 元件（僅取測試向量）；出貨前 `cargo deny` + NOTICE + 商標查證 |
 | 多中樞併發寫入（兩台裝置同時編輯） | 伺服器 `revisionDate` CAS + outbox `seq` FIFO；欄位不相交自動合併、相交進收件匣（A12）；notifications 事件帶 cipherId 做 targeted pull，縮小衝突窗口 |
 | 堆記憶體／swap／core dump 殘留明文 | secret arena 是唯一明文落點：mlock 防分頁、MADV_DONTDUMP/RLIMIT_CORE=0 防影像、drop 即清零（不變量 9、斷言 A10/A11）；同 uid root 與 cold boot 為已聲明邊界 |
+| rsa 0.9.x 的 RSA-OAEP 時序側信道（Marvin，RUSTSEC-2023-0071） | 僅用於本機 org key unwrap，攻擊需對同一私鑰大量本機解密嘗試；0.9.10 為最新穩定版、修復在 0.10，`deny.toml` 掛 ID 豁免並追蹤，出穩定版即升級（P1 實測記錄） |
 
 ## 9. 綜合紀錄（arena synthesis note)
 

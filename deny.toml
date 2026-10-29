@@ -11,3 +11,13 @@ deny = [
     { name = "bitwarden-api-identity" },
     { name = "bitwarden-sdk" },
 ]
+
+[advisories]
+ignore = [
+    # rsa 0.9.10（最新穩定）仍掛 Marvin 時序攻擊；修復在 rsa 0.10。
+    # 本專案僅用於本機 org key unwrap，攻擊者需對同一私鑰做大量本機解密嘗試。
+    # 追蹤：rsa 0.10 出穩定版即升級並移除（契約 §8）。
+    "RUSTSEC-2023-0071",
+    # atomic-polyfill（ring 的傳遞依賴）unmaintained；無已知漏洞，等上游移除。
+    "RUSTSEC-2023-0089",
+]

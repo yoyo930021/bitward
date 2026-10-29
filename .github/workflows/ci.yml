@@ -23,23 +23,26 @@ jobs:
     services:
       vaultwarden:
         image: vaultwarden/server:1.37.2
+        env:
+          # 服務容器無持久卷；VW 缺這個旗標會拒絕啟動（readpath e2e 同源教訓）
+          I_REALLY_WANT_VOLATILE_STORAGE: "true"
+          LOGIN_RATELIMIT_SECONDS: "1"
+          LOGIN_RATELIMIT_MAX_BURST: "50"
         ports: ["8080:80"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo install cargo-nextest --locked
+      - uses: taiki-e/install-action@nextest
       - name: server compat (fixture replay)
         run: cargo nextest run -p bw-server
-      - name: live Vaultwarden e2e（需註冊旗標）
+      - name: live Vaultwarden e2e
         env:
           BITWARD_E2E_SERVER: http://localhost:8080
-        run: cargo nextest run -p bw-server --features e2e || echo "::warning::e2e 未啟用或失敗，P1 出口前必須綠"
+        run: cargo nextest run -p bw-server --features e2e
 
   deny:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          toolchain: stable
