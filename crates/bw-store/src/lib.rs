@@ -126,6 +126,12 @@ impl Store {
             return Err(StoreError::SchemaVersion(version));
         }
         conn.execute_batch(schema::V1)?;
+        if version < 2 {
+            // 逐條 ALTER：新庫（V1 已含欄位）會回 Duplicate column，屬預期
+            for stmt in schema::V2.split(';').filter(|s| !s.trim().is_empty()) {
+                let _ = conn.execute_batch(&format!("{stmt};"));
+            }
+        }
         if version < schema::SCHEMA_VERSION {
             conn.execute_batch(&format!(
                 "PRAGMA user_version = {};",

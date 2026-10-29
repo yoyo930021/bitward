@@ -13,6 +13,7 @@ members = [
     "bins/bitwarderd",
     "bins/bitward",
     "bins/bitward-mcp",
+    "bins/bitward-nm",
 ]
 
 [workspace.package]

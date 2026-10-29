@@ -187,6 +187,18 @@ impl Hub {
                 (Access::Mutate(MutateOp::Delete), ids.first().copied())
             }
             Call::Vault(VaultCall::Restore { id }) => (Access::Mutate(MutateOp::Move), Some(*id)),
+            Call::Vault(VaultCall::Overlay { id, .. }) => {
+                (Access::Mutate(MutateOp::Patch), Some(*id))
+            }
+            Call::Vault(VaultCall::FindDuplicates) => {
+                (Access::See(bw_proto::Sensitivity::Identity), None)
+            }
+            Call::Vault(VaultCall::Merge { keep, .. }) => {
+                (Access::Mutate(MutateOp::Delete), Some(*keep))
+            }
+            Call::Vault(VaultCall::MoveToOrg { item, .. }) => {
+                (Access::Mutate(MutateOp::Move), Some(*item))
+            }
             Call::Use(UseCall::TotpCode { id }) => (Access::Use(UseKind::TotpCode), Some(*id)),
             Call::Use(UseCall::ResolveRef { .. }) => {
                 (Access::Reveal(bw_proto::Sensitivity::Secret), None)

@@ -1,5 +1,9 @@
 /// schema 版本；每次加表/改表就 +1 並在本檔補一段遷移 SQL。
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
+
+/// v1→v2：值搜尋明文索引欄。舊庫 ALTER；新庫 V1 已含，Duplicate column 容忍。
+pub const V2: &str = "ALTER TABLE meta_plain ADD COLUMN username_plain TEXT;
+ALTER TABLE meta_plain ADD COLUMN password_plain TEXT;";
 
 /// v1：鏡像（密文原樣）+ 明文 metadata 索引（FTS5）+ overlay + outbox +
 /// audit（append-only hash 鏈）+ sessions + blobs 登記 + meta。
@@ -22,7 +26,9 @@ CREATE TABLE IF NOT EXISTS meta_plain(
   org        TEXT,
   favorite   INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT,
-  pending    INTEGER NOT NULL DEFAULT 0
+  pending    INTEGER NOT NULL DEFAULT 0,
+  username_plain TEXT,        -- v2：值搜尋索引（FR 11941），明文僅存於 0600 檔（§2.7 R3）
+  password_plain TEXT         -- 同上
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS meta_fts USING fts5(

@@ -80,6 +80,21 @@ impl Store {
         Ok(())
     }
 
+    /// 值搜尋明文索引（FR 11941）。僅解鎖回填時呼叫；0600 檔承載（§2.7 R3）。
+    pub fn set_plain_secrets(
+        &self,
+        id: ItemId,
+        username: Option<&str>,
+        password: Option<&str>,
+    ) -> StoreResult<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "UPDATE meta_plain SET username_plain = ?2, password_plain = ?3 WHERE id = ?1",
+            rusqlite::params![id.to_string(), username, password],
+        )?;
+        Ok(())
+    }
+
     pub fn item(&self, id: ItemId) -> StoreResult<Option<CipherRow>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let row = conn

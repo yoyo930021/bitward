@@ -49,6 +49,12 @@ impl Store {
             sql.push_str(" AND m.uris LIKE ?");
             args.push(format!("%{}%", escape_like(uri)));
         }
+        if let Some(val) = q.value.as_deref().filter(|t| !t.is_empty()) {
+            // 值搜尋走明文索引欄（解鎖回填後才有資料）；大小寫敏感＝精確比對語意
+            sql.push_str(" AND (m.username_plain = ? OR m.password_plain = ?)");
+            args.push(val.to_string());
+            args.push(val.to_string());
+        }
         if let Some(kind) = q.kind {
             sql.push_str(" AND m.kind = ?");
             args.push(kind_index(kind).to_string());

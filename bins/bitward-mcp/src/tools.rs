@@ -129,6 +129,7 @@ pub fn map_call(name: &str, args: &Value) -> Result<bw_proto::Call, ToolError> {
                 text: opt_str(args, "text")?,
                 tag: opt_str(args, "tag")?,
                 uri: opt_str(args, "uri")?,
+                value: None,
                 kind: None,
                 sort: SortKey::default(),
                 limit: get_limit(args, 100)?,

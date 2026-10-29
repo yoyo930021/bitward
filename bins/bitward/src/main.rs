@@ -11,8 +11,8 @@ use uuid::Uuid;
 use bw_btp::{read_server, write_client};
 use bw_proto::{
     AdminCall, AgentCall, Auth, AuthCall, Call, CipherDraft, ClientMsg, FieldEdit, ItemId,
-    ItemKind, MutationId, PROTO_VERSION, ProtoVersion, Query, Resolution, Response, ServerMsg,
-    SessionToken, SortKey, SyncCall, UseCall, VaultCall, View, WtpError,
+    ItemKind, MutationId, OverlayOpWire, PROTO_VERSION, ProtoVersion, Query, Resolution, Response,
+    ServerMsg, SessionToken, SortKey, SyncCall, UseCall, VaultCall, View, WtpError,
 };
 
 #[derive(Parser)]
@@ -49,6 +49,9 @@ enum Cmd {
         tag: Option<String>,
         #[arg(long)]
         uri: Option<String>,
+        /// 以密碼/帳號值精確搜尋（需曾解鎖回填索引）
+        #[arg(long)]
+        value: Option<String>,
         #[arg(long, default_value = "name")]
         sort: String,
         #[arg(long, default_value_t = 100)]
@@ -117,6 +120,22 @@ enum Cmd {
         keep_both: bool,
     },
     SignOut,
+    /// 本地 overlay 標籤（FR 132）
+    Tag {
+        #[command(subcommand)]
+        cmd: TagCmd,
+    },
+    /// 去重報告（同 host+username 群集）
+    Dupes,
+    /// 合併重複項：保留 KEEP，軟刪其餘，tags 聯集
+    Merge {
+        keep: String,
+        dupes: Vec<String>,
+    },
+    /// unshare：把 org 項目移回個人 vault（FR 604）
+    Unshare {
+        id: String,
+    },
     /// agent session 治理（人在這台機器上簽發/管理）
     Agent {
         #[command(subcommand)]
@@ -165,6 +184,23 @@ enum Cmd {
 
 fn session_file(data_dir: &std::path::Path) -> PathBuf {
     data_dir.join("cli_session")
+}
+
+#[derive(Subcommand)]
+enum TagCmd {
+    Add {
+        id: String,
+        tag: String,
+    },
+    Rm {
+        id: String,
+        tag: String,
+    },
+    Pin {
+        id: String,
+        #[arg(default_value = "true")]
+        on: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -351,6 +387,7 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             text,
             tag,
             uri,
+            value,
             sort,
             limit,
         } => Call::Vault(VaultCall::List {
@@ -358,6 +395,7 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                 text: text.clone(),
                 tag: tag.clone(),
                 uri: uri.clone(),
+                value: value.clone(),
                 kind: None,
                 sort: match sort.as_str() {
                     "updated" => SortKey::Updated,
@@ -478,6 +516,29 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             })
         }
         Cmd::SignOut => Call::Auth(AuthCall::SignOut),
+        Cmd::Tag { cmd } => Call::Vault(VaultCall::Overlay {
+            id: parse_id(match cmd {
+                TagCmd::Add { id, .. } | TagCmd::Rm { id, .. } | TagCmd::Pin { id, .. } => id,
+            })?,
+            op: match cmd {
+                TagCmd::Add { tag, .. } => OverlayOpWire::AddTag(tag.clone()),
+                TagCmd::Rm { tag, .. } => OverlayOpWire::RemoveTag(tag.clone()),
+                TagCmd::Pin { on, .. } => OverlayOpWire::SetPinned(on == "true"),
+            },
+        }),
+        Cmd::Dupes => Call::Vault(VaultCall::FindDuplicates),
+        Cmd::Merge { keep, dupes } => Call::Vault(VaultCall::Merge {
+            keep: parse_id(keep)?,
+            dupes: dupes
+                .iter()
+                .map(|d| parse_id(d))
+                .collect::<Result<_, _>>()?,
+        }),
+        Cmd::Unshare { id } => Call::Vault(VaultCall::MoveToOrg {
+            item: parse_id(id)?,
+            org: None,
+            collections: vec![],
+        }),
         Cmd::Run {
             env,
             cwd,
@@ -593,6 +654,7 @@ fn print_response(resp: &Response, json: bool) {
         Response::AuditChain(c) => println!("{}", serde_json::to_string_pretty(&c).unwrap()),
         Response::Conflicts(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap()),
         Response::Sessions(v) => println!("{}", serde_json::to_string_pretty(v).unwrap()),
+        Response::DupGroups(g) => println!("{}", serde_json::to_string_pretty(g).unwrap()),
         // agentpath.sh 依賴的扁平形狀：{"token","session","expires_at_ms"}
         Response::AgentSession {
             token,

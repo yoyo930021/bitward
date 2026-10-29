@@ -339,6 +339,19 @@ impl Hub {
             }
             Call::Vault(VaultCall::Delete { ids }) => self.write_delete(session, ids).await,
             Call::Vault(VaultCall::Restore { id }) => self.write_restore(session, *id).await,
+            Call::Vault(VaultCall::Overlay { id, op }) => self.overlay_op(session, *id, op),
+            Call::Vault(VaultCall::FindDuplicates) => self.duplicates(),
+            Call::Vault(VaultCall::Merge { keep, dupes }) => {
+                self.merge_dupes(session, *keep, dupes).await
+            }
+            Call::Vault(VaultCall::MoveToOrg {
+                item,
+                org,
+                collections,
+            }) => {
+                self.write_move(session, *item, org.clone(), collections.clone())
+                    .await
+            }
             Call::Use(UseCall::TotpCode { id }) => self.totp(*id),
             Call::Use(UseCall::GeneratePassword { policy }) => {
                 let opts = bw_crypto::PasswordOptions {
@@ -519,6 +532,16 @@ impl Hub {
                     .get("name")
                     .and_then(Value::as_str)
                     .and_then(|e| bw_crypto::decrypt(uk, &e.to_string()).ok());
+                let username = row
+                    .enc_cipher
+                    .pointer("/login/username")
+                    .and_then(Value::as_str)
+                    .and_then(|e| bw_crypto::decrypt(uk, &e.to_string()).ok());
+                let password = row
+                    .enc_cipher
+                    .pointer("/login/password")
+                    .and_then(Value::as_str)
+                    .and_then(|e| bw_crypto::decrypt(uk, &e.to_string()).ok());
                 let uris: Vec<String> = row
                     .enc_cipher
                     .pointer("/login/uris")
@@ -530,13 +553,16 @@ impl Hub {
                             .collect()
                     })
                     .unwrap_or_default();
-                (name, uris)
+                (name, uris, username, password)
             });
-            let (name, uris) = match decrypted {
+            let (name, uris, username, password) = match decrypted {
                 Ok(v) => v,
                 Err(_) => continue,
             };
             let _ = self.store.set_plain_meta(m.id, name.as_deref(), &uris);
+            let _ = self
+                .store
+                .set_plain_secrets(m.id, username.as_deref(), password.as_deref());
         }
         Ok(())
     }
@@ -746,6 +772,10 @@ fn action_tag(c: &Call) -> String {
         Call::Vault(VaultCall::Patch { .. }) => "Vault.Patch",
         Call::Vault(VaultCall::Delete { .. }) => "Vault.Delete",
         Call::Vault(VaultCall::Restore { .. }) => "Vault.Restore",
+        Call::Vault(VaultCall::Overlay { .. }) => "Vault.Overlay",
+        Call::Vault(VaultCall::FindDuplicates) => "Vault.FindDuplicates",
+        Call::Vault(VaultCall::Merge { .. }) => "Vault.Merge",
+        Call::Vault(VaultCall::MoveToOrg { .. }) => "Vault.MoveToOrg",
         Call::Use(UseCall::TotpCode { .. }) => "Use.TotpCode",
         Call::Use(UseCall::GeneratePassword { .. }) => "Use.GeneratePassword",
         Call::Use(UseCall::ResolveRef { .. }) => "Use.ResolveRef",
@@ -793,7 +823,11 @@ fn sensitivity_of_call(c: &Call, resp: Option<&Response>) -> bw_proto::Sensitivi
         Call::Vault(VaultCall::Create { .. })
         | Call::Vault(VaultCall::Patch { .. })
         | Call::Vault(VaultCall::Delete { .. })
-        | Call::Vault(VaultCall::Restore { .. }) => Identity,
+        | Call::Vault(VaultCall::Restore { .. })
+        | Call::Vault(VaultCall::Overlay { .. })
+        | Call::Vault(VaultCall::FindDuplicates)
+        | Call::Vault(VaultCall::Merge { .. })
+        | Call::Vault(VaultCall::MoveToOrg { .. }) => Identity,
         Call::Use(UseCall::TotpCode { .. })
         | Call::Use(UseCall::Run { .. })
         | Call::Use(UseCall::ResolveRef { .. })

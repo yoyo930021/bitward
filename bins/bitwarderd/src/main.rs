@@ -3,6 +3,7 @@
 
 mod agent;
 mod arena;
+mod datamanage;
 mod hub;
 mod sync;
 

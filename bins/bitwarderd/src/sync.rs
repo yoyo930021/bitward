@@ -36,7 +36,7 @@ impl Hub {
         let _ = self.events.send((topic, payload));
     }
 
-    fn require_unlocked(&self) -> Result<(), WtpError> {
+    pub(crate) fn require_unlocked(&self) -> Result<(), WtpError> {
         if self.machine.is_unlocked() {
             Ok(())
         } else {
@@ -287,6 +287,7 @@ impl Hub {
                 .await
                 .map(|_| ())
                 .map_err(|e| (e, false)),
+            "move" => self.push_move(&client, m).await,
             other => {
                 tracing::error!(op = other, "unknown outbox op");
                 let _ = self.store.settle(m.id, MutState::Dead);
@@ -446,6 +447,30 @@ impl Hub {
         }
     }
 
+    async fn push_move(
+        &self,
+        client: &bw_server::Client,
+        m: &Mutation,
+    ) -> Result<(), (bw_server::ServerError, bool)> {
+        let theirs = client.cipher_get(m.item).await.map_err(|e| (e, false))?;
+        let mut body = theirs;
+        if let Some(o) = body.as_object_mut() {
+            o.insert(
+                "organizationId".into(),
+                m.payload.get("org").cloned().unwrap_or(Value::Null),
+            );
+            o.insert(
+                "collectionIds".into(),
+                m.payload.get("collections").cloned().unwrap_or(json!([])),
+            );
+        }
+        let resp = client
+            .cipher_put(m.item, &body)
+            .await
+            .map_err(|e| (e, false))?;
+        self.finish_applied(m.id, &resp)
+    }
+
     fn finish_applied(
         &self,
         id: MutationId,
@@ -469,13 +494,23 @@ impl Hub {
     pub fn reindex_one(&self, id: ItemId) -> Result<(), WtpError> {
         let row = self.store.item(id).map_err(denied)?;
         let Some(row) = row else { return Ok(()) };
-        let (name, uris) = self
+        let (name, uris, username, password) = self
             .machine
             .with_keys(|kb| {
                 let uk = kb.user_key();
                 let name = row
                     .enc_cipher
                     .get("name")
+                    .and_then(Value::as_str)
+                    .and_then(|e| bw_crypto::decrypt(uk, &e.to_string()).ok());
+                let username = row
+                    .enc_cipher
+                    .pointer("/login/username")
+                    .and_then(Value::as_str)
+                    .and_then(|e| bw_crypto::decrypt(uk, &e.to_string()).ok());
+                let password = row
+                    .enc_cipher
+                    .pointer("/login/password")
                     .and_then(Value::as_str)
                     .and_then(|e| bw_crypto::decrypt(uk, &e.to_string()).ok());
                 let uris: Vec<String> = row
@@ -489,10 +524,13 @@ impl Hub {
                             .collect()
                     })
                     .unwrap_or_default();
-                (name, uris)
+                (name, uris, username, password)
             })
             .map_err(denied)?;
         let _ = self.store.set_plain_meta(id, name.as_deref(), &uris);
+        let _ = self
+            .store
+            .set_plain_secrets(id, username.as_deref(), password.as_deref());
         Ok(())
     }
 
@@ -676,7 +714,7 @@ fn cipher_id(c: &Value) -> Option<ItemId> {
         .and_then(|s| Uuid::parse_str(s).ok())
 }
 
-fn row_rev_of(raw: &Value) -> Option<String> {
+pub(crate) fn row_rev_of(raw: &Value) -> Option<String> {
     raw.get("rev")
         .and_then(Value::as_str)
         .or_else(|| raw.get("revisionDate").and_then(Value::as_str))

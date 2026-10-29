@@ -200,6 +200,8 @@ pub struct Query {
     pub text: Option<String>,
     pub tag: Option<String>,
     pub uri: Option<String>,
+    /// 以密碼/帳號值精確搜尋（FR 11941；依賴本機明文索引，§2.7 R3）
+    pub value: Option<String>,
     pub kind: Option<ItemKind>,
     pub sort: SortKey,
     pub limit: u32,
@@ -216,12 +218,51 @@ pub enum SortKey {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum VaultCall {
-    List { query: Query, view: View },
-    Get { id: ItemId, view: View },
-    Create { draft: CipherDraft },
-    Patch { id: ItemId, edits: Vec<FieldEdit> },
-    Delete { ids: Vec<ItemId> },
-    Restore { id: ItemId },
+    List {
+        query: Query,
+        view: View,
+    },
+    Get {
+        id: ItemId,
+        view: View,
+    },
+    Create {
+        draft: CipherDraft,
+    },
+    Patch {
+        id: ItemId,
+        edits: Vec<FieldEdit>,
+    },
+    Delete {
+        ids: Vec<ItemId>,
+    },
+    Restore {
+        id: ItemId,
+    },
+    Overlay {
+        id: ItemId,
+        op: OverlayOpWire,
+    },
+    FindDuplicates,
+    Merge {
+        keep: ItemId,
+        dupes: Vec<ItemId>,
+    },
+    /// org None = unshare 回個人 vault
+    MoveToOrg {
+        item: ItemId,
+        org: Option<String>,
+        collections: Vec<String>,
+    },
+}
+
+/// overlay 操作（tags/pin/last-used）：協定無這些欄位，本地權威（§2.4）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum OverlayOpWire {
+    AddTag(String),
+    RemoveTag(String),
+    SetPinned(bool),
+    Touch,
 }
 
 /// CLI 邊界的明文草稿；加密只發生在 daemon 的 `with_keys` 閉包。
@@ -401,7 +442,15 @@ pub enum Response {
     Account(Option<AccountInfo>),
     Profile(ServerProfile),
     Version(String),
+    /// 去重報告：同 (domain, username) 叢集，只回 id 不回明文
+    DupGroups(Vec<DupGroup>),
     Ok,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DupGroup {
+    pub domain: String,
+    pub ids: Vec<ItemId>,
 }
 
 /// 全型別化回應：這是 P2 切 postcard 主線的前置（`Value` 的 f64 postcard 不支援）。

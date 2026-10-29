@@ -3,7 +3,9 @@ dev/e2e/data*/
 dev/e2e/dbg*/
 .DS_Store
 spike/*/.nsh/
+spike/**/.nsh/
 spike/*/target/
+spike/**/target/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm

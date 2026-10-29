@@ -179,6 +179,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitward-nm"
+version = "0.0.1"
+dependencies = [
+ "bw-btp",
+ "bw-proto",
+ "clap",
+ "dirs",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "bitwarderd"
 version = "0.0.1"
 dependencies = [
