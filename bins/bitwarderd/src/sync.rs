@@ -531,24 +531,41 @@ impl Hub {
             match client.notifications().await {
                 Ok(mut stream) => {
                     self.machine.set_egress(true);
-                    while let Some(ev) = stream.next().await {
-                        if ev.is_own_change(&self.device) {
-                            continue;
-                        }
-                        if let Some(id) = ev.cipher_id() {
-                            self.apply_theirs(id).await;
+                    loop {
+                        // 60 秒讀取逾時：docker stop / 網路中斷常留半開 TCP，
+                        // tungstenite 不會自己發現死了；逾時強制走重連路徑。
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(60),
+                            stream.next(),
+                        )
+                        .await
+                        {
+                            Ok(Some(ev)) => {
+                                if ev.is_own_change(&self.device) {
+                                    continue;
+                                }
+                                if let Some(id) = ev.cipher_id() {
+                                    self.apply_theirs(id).await;
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(_) => {
+                                tracing::debug!("notifications idle 60s; recycling connection");
+                                break;
+                            }
                         }
                     }
-                    tracing::info!("notifications stream ended; reconnect in 10s");
+                    let _ = stream.close().await;
+                    tracing::info!("notifications stream ended; reconnect in 2s");
                 }
                 Err(e) => {
-                    tracing::warn!(err = %e, "notifications connect failed; retry in 30s");
+                    tracing::warn!(err = %e, "notifications connect failed; retry in 5s");
                     self.machine.set_egress(false);
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     continue;
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
     }
 

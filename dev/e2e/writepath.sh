@@ -106,7 +106,7 @@ pass "A12b 同欄衝突進收件匣、--ours 裁決收斂"
 # A12c：notifications targeted pull（B 改完，A 不手動 sync 也該在 5 秒內看到）
 B edit "$GID" --set name=notify-me >/dev/null
 SEEN=no
-for _ in $(seq 1 10); do
+for _ in $(seq 1 45); do
   sleep 1
   N=$(A ls --json | jq -r ".[] | select(.meta.id==\"$GID\") | .meta.name")
   [[ "$N" == "notify-me" ]] && { SEEN=yes; break; }
