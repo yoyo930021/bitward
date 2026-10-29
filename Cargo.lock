@@ -173,7 +173,6 @@ version = "0.0.1"
 dependencies = [
  "bw-btp",
  "bw-proto",
- "serde",
  "serde_json",
  "tokio",
  "uuid",

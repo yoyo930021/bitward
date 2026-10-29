@@ -32,7 +32,7 @@
 | macOS | NSH GUI（AppKit 後端）；provider extension 為 Swift + XPC 孤島（MachServices 按需啟動）；常駐 `SMAppService`；auto-type CGEvent | 簽章/公證走 Developer ID |
 | Android | NSH UI（Android views 後端）+ Kotlin 整合孤島：`AutofillService`、`androidx.credentials`（API 34）、Keystore、UnifiedPush distributor 接單；foreground service 跑 in-process 中樞 | Keyguard 全棧先例 |
 | 推播 | Android：**UnifiedPush 第一級**（`unifiedpush` crate，distributor：ntfy/Cone/…，FCM 僅可選 fallback）；macOS：APNs（官方雲）或 Vaultwarden web-push/VAPID（自架） | §1.2 推播路徑；只傳信令不傳明文；endpoint 按能力憑證處理 |
-| CLI／MCP | `clap`；MCP 用 `rmcp`（Rust SDK），shim 只做 MCP↔BTP 轉譯 | shim 不含政策邏輯 |
+| CLI／MCP | `clap`；MCP 手刻 JSON-RPC 2.0 stdio（newline-delimited，不用 rmcp：v0.x API 抖動風險 > 協定子集實作成本，P3 定案），shim 只做 MCP↔BTP 轉譯 | shim 不含政策邏輯；七工具對映見 `bins/bitward-mcp/src/tools.rs` |
 | 可觀察性 | `tracing`，secret 出口經 Redactor 層 | 日誌零明文由 A8 守 |
 | 測試 | `cargo nextest` + `proptest`（raw mirror 無損往返）+ 錄製 fixtures + docker Vaultwarden 釘版矩陣 + macOS runner + Android compile-only | A1..A12 |
 | 打包 | macOS `.pkg`（公證）、Android AAB、Linux tarball + systemd user unit、後續 brew tap | `cargo deny` 守授權 |
@@ -324,7 +324,7 @@ Transport 總表：
 | P0 | workspace、`bw-proto` 型別+BTP schema+conformance vectors、CI（Vaultwarden docker 釘版矩陣 + macOS runner + Android compile-only）、GPL+`cargo deny`+商標聲明、**NSH spike**（provider 設定頁 + vault 列表兩個真實畫面，雙平台驗證渲染與打包鏈，§0.2） | 骨架編譯、CI 綠、spike 畫面可跑 |
 | **P1（第一增量，可獨立驗證）** | **read-path daemon**：login（password+TOTP 2FA、API key 旁路）→ 金鑰派生與 Keychain 封存 → `/sync` 全量落 SQLite（密文原樣）→ 狀態機+timeout → UDS+BTP+對端驗證 → secret arena（mlock/清零）→ CLI `status/list/search/get/reveal/audit/lock` | §6 斷言全過 |
 | P2 | 寫入路徑：outbox+欄位級三方合併+衝突佇列、離線解鎖與離線寫入收斂、附件 blob 佇列、**多裝置收斂**（cipherId targeted pull、雙裝置併發 e2e A12） | ✅ 2026-10-29：`dev/e2e/writepath.sh` 全過（A7 離線收斂、A7b kill -9 重生 44ms 無 KDF、A12a 不同欄自動合併、A12b 同欄衝突＋裁決、A12c notifications 收斂、軟刪）。附件 blob 佇列延後至 P4（store 端 Awaiting 狀態已預留） |
-| P3 | agent 面：session/grant/approval/budget/audit 鏈、`bitward-mcp`、`Run`+Redactor、事件訂閱 | grep 明文==0 端到端斷言 |
+| P3 | agent 面：session/grant/approval/budget/audit 鏈、`bitward-mcp`、`Run`+Redactor、事件訂閱 | ✅ 2026-10-29：`dev/e2e/agentpath.sh` 全過（grant 拒絕、metadata-only、**整個 MCP stdout 對明文 grep==0**、NeedApproval 阻塞→人工 approve→放行、run 注入出口淨化、revoke 級聯）；bw-agent 判定層單元 8 測、MCP 協定 13 測 |
 | P4 | 資料管理（tags/排序/去重/merge/bulk/unshare/值搜尋）+ auto-type（CGEvent）+ 瀏覽器 NM shim；**Android track 自此起平行**（NSH 同進程核心 + Kotlin 孤島：AutofillService、API 34 CredentialProviderService、Keystore；Full＝預設形態的 in-process 中樞） | 各缺口有專屬 e2e |
 | P5 | macOS credential provider（先 passkey 骨架、再 passwords/OTP）+ identity store 維護 + MachServices 按需啟動 + **remote thin 配對伺服**（`pair`/撤銷/跨機 grant）+ **推播路徑**（APNs/FCM/Vaultwarden relay：核准訊息與喚醒訊息、`HubOffline` 快速失敗語意，操作者要求 2026-10-29） | 真機填充延遲量測；跨機 reveal 延遲與撤銷 e2e；手機在口袋裡批准 agent reveal 的 e2e |
 | P6 | 跨機 thin 進階（多 hub 編組、Tailscale 場景）、多帳號打磨、Linux 正式支援 | 待定 |
@@ -395,6 +395,7 @@ P1 是最早失敗點：自寫 crypto 正確性與無 spec 互通性是風險最
 - **操作者修訂（2026-10-29，第二批）**：(3) thin client 獨立安裝。Full/Thin 分界改掛在執行體而非套件（§1.2、§0 安裝形態列），Q1 隨之關閉，remote 配對伺服提前到 P5。(4) 技術線逐 concern 明細化（§0.1）。
 - **操作者修訂（2026-10-29，第三批）**：(5) 移除 thin 的本機自動 provision：surface 不註冊東西，可用性＝中樞在線，App 新增推播路徑（核准＋喚醒訊息、`HubOffline`/`ApprovalExpired` 快速失敗語意，§1.2、§2.5、P5）。(6) GUI 層採用 NSH（Apache-2.0，一套 Rust UI 碼覆蓋 macOS/Android，§0.2），連帶 §2.7 規則 6（明文只進 Rust 元件，TSX ≤ Masked）與 P0 spike。
 - **操作者修訂（2026-10-29，第四批）**：(7) Android 推播第一級改 UnifiedPush（`unifiedpush` crate，FCM 降為可選 fallback），push endpoint 定義為能力憑證：不入日誌/event、可輪換、預設建議自架 distributor（§1.2、§0.1）。
+- **P3 落地紀錄（2026-10-29）**：MCP 不採 rmcp，手刻 JSON-RPC stdio 子集（§0.1 已改）。治理語意定案：NeedApproval 由 daemon 阻塞請求端 ≤120 秒等人工 `bitward approve`，MCP 端透明；Interactive（同 uid Enroll）= 全權，Agent session 逐 Call 過判定表。明文出口目前仍走 String（arena 只驗證機制），「所有明文經 arena」列 P3.5：把 Reveal/Run 注入值接入 arena 與 Redactor 帳本。
 
 ## 10. 開放問題
 

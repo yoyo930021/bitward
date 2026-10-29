@@ -64,3 +64,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -q -p bitwarderd -p bitward
       - run: ./dev/e2e/writepath.sh
+
+  agentpath:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -q -p bitwarderd -p bitward -p bitward-mcp
+      - run: ./dev/e2e/agentpath.sh
