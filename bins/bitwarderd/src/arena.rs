@@ -73,9 +73,25 @@ impl Drop for ArenaSecret {
 
 #[cfg(target_os = "linux")]
 unsafe fn alloc_arena() -> Option<Arena> {
-    let fd = unsafe { libc::memfd_secret(0) };
+    // glibc 沒有 memfd_secret() wrapper，只能走 syscall（Linux 5.14+）。
+    // libc crate 在 x86_64-gnu 漏了 SYS_memfd_secret 常數，這裡自持 syscall 號：
+    //   x86_64 = 444（arch/x86/entry/syscalls/syscall_64.tbl）
+    //   通用   = 447（include/uapi/asm-generic/unistd.h）
+    // 不支援的核心回 <0，退回匿名 mmap。
+    // https://man7.org/linux/man-pages/man2/memfd_secret.2.html
+    let nr: Option<libc::c_long> = if cfg!(target_arch = "x86_64") {
+        Some(444)
+    } else if cfg!(any(target_arch = "aarch64", target_arch = "riscv64")) {
+        Some(447)
+    } else {
+        None
+    };
+    let fd = match nr {
+        Some(n) => unsafe { libc::syscall(n, 0usize) },
+        None => -1,
+    };
     let (mmap_fd, flags) = if fd >= 0 {
-        (fd, libc::MAP_SHARED)
+        (fd as i32, libc::MAP_SHARED)
     } else {
         (-1, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS)
     };
