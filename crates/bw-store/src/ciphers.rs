@@ -196,8 +196,11 @@ pub(crate) fn refresh_pending(tx: &rusqlite::Connection, item: Option<ItemId>) -
 }
 
 fn cipher_kind(c: &Value) -> Option<i64> {
+    // 伺服器 wire type 原樣入索引：1 Login | 2 SecureNote | 3 Card | 4 Identity。
+    // 證據：crates/bw-server/fixtures/（VW 1.37.2 實錄，type:1 == e2e 建立的 Login）
+    // 與 jslib 歷史列舉 libs/common/src/enums/cipher-type.enum.ts。
     match c.get("type").and_then(Value::as_u64) {
-        Some(v @ 0..=3) => Some(v as i64),
+        Some(v @ 1..=4) => Some(v as i64),
         _ => None,
     }
 }

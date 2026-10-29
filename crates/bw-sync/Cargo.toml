@@ -1,0 +1,23 @@
+[package]
+name = "bw-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# 純協定黏合層（契约 §1.1、§2.4、§2.6、§3.5）：不做加解密、不持金鑰、不碰 HTTP。
+# 依賴刻意收窄——加解密在 bw-crypto/bw-keys，網路在 bw-server，本層只處理
+# 「JSON 形態、協定形態、併發形態」三件事。
+[dependencies]
+bw-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+base64.workspace = true
+# Vaultwarden 的 notifications 用 messagepack（見 NOTES.md）；解析器自持，
+# 不經 bw-server（依賴方向：bw-server 是傳輸層，本層是協定黏合）。
+rmpv = "1.3"
+
+[dev-dependencies]
+# start_paused / auto-advance timers in SingleFlight property tests.
+tokio = { workspace = true, features = ["test-util"] }

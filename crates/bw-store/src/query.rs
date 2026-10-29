@@ -123,19 +123,20 @@ fn parse_string_array(s: &str) -> Vec<String> {
 }
 
 fn kind_index(k: ItemKind) -> i64 {
+    // 與 wire type 對齊（見 ciphers::cipher_kind 出處）
     match k {
-        ItemKind::Login => 0,
-        ItemKind::SecureNote => 1,
-        ItemKind::Card => 2,
-        ItemKind::Identity => 3,
+        ItemKind::Login => 1,
+        ItemKind::SecureNote => 2,
+        ItemKind::Card => 3,
+        ItemKind::Identity => 4,
     }
 }
 
 fn index_kind(v: i64) -> ItemKind {
     match v {
-        1 => ItemKind::SecureNote,
-        2 => ItemKind::Card,
-        3 => ItemKind::Identity,
+        2 => ItemKind::SecureNote,
+        3 => ItemKind::Card,
+        4 => ItemKind::Identity,
         _ => ItemKind::Login,
     }
 }

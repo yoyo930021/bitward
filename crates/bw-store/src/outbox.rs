@@ -188,6 +188,50 @@ impl Store {
         Ok(())
     }
 
+    /// create 推送後把本地 id 換成伺服器 id：鏡像、meta、overlay 與未終態
+    /// outbox 列同交易遷移（A7 的 id 收斂依賴此函數）。
+    pub fn remap_item(&self, old: ItemId, new: ItemId) -> StoreResult<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.unchecked_transaction()?;
+        let (o, n) = (old.to_string(), new.to_string());
+        tx.execute("DELETE FROM ciphers WHERE id = ?1", [&n])?;
+        tx.execute("DELETE FROM meta_plain WHERE id = ?1", [&n])?;
+        tx.execute("DELETE FROM overlay WHERE id = ?1", [&n])?;
+        let hit = tx.execute(
+            "UPDATE ciphers SET id = ?2 WHERE id = ?1",
+            rusqlite::params![o, n],
+        )?;
+        if hit == 0 {
+            return Err(StoreError::NotFound);
+        }
+        tx.execute(
+            "UPDATE meta_plain SET id = ?2 WHERE id = ?1",
+            rusqlite::params![o, n],
+        )?;
+        tx.execute(
+            "UPDATE overlay SET id = ?2 WHERE id = ?1",
+            rusqlite::params![o, n],
+        )?;
+        tx.execute(
+            "UPDATE outbox SET item = ?2 WHERE item = ?1 AND state NOT IN ('applied','dead')",
+            rusqlite::params![o, n],
+        )?;
+        crate::ciphers::refresh_pending(&tx, Some(new))?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 該 item 是否有未終態變更（notifications 套用 theirs 前必查，§1.1）。
+    pub fn has_pending(&self, item: ItemId) -> StoreResult<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let exists: i64 = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM outbox WHERE item = ?1 AND state NOT IN ('applied','dead'))",
+            [item.to_string()],
+            |r| r.get(0),
+        )?;
+        Ok(exists == 1)
+    }
+
     pub fn conflicts(&self) -> StoreResult<Vec<ConflictRecord>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut stmt = conn.prepare(

@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS meta_plain(
   id         TEXT PRIMARY KEY,
   name       TEXT,            -- 未解鎖前可能仍是信封字串；解鎖後 set_plain_meta 覆寫為明文
   uris       TEXT NOT NULL DEFAULT '[]',  -- JSON array；同上
-  kind       INTEGER,         -- 0 Login | 1 SecureNote | 2 Card | 3 Identity（來源見 NOTES.md）
+  kind       INTEGER,         -- 1 Login | 2 SecureNote | 3 Card | 4 Identity（來源見 NOTES.md）
   folder     TEXT,
   org        TEXT,
   favorite   INTEGER NOT NULL DEFAULT 0,

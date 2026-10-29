@@ -16,7 +16,7 @@
 
 | 常數 | 值 | 來源 |
 |---|---|---|
-| cipher `type` → ItemKind | 0=Login, 1=SecureNote, 2=Card, 3=Identity | https://github.com/bitwarden/clients/blob/main/libs/common/src/enums/cipher-type.enum.ts |
+| cipher `type` → ItemKind | 1=Login, 2=SecureNote, 3=Card, 4=Identity（VW 1.37.2 實錄 fixtures 佐證；原引路徑 404 已改） | https://github.com/dani-garcia/vaultwarden/blob/main/src/api/websockets/notifications.rs 同族欄位 |
 | 信封格式 `type.iv|ct|mac`（type 2 = AES-256-CBC + HMAC-SHA256） | — | https://bitwarden.com/help/what-encryption-is-used ；docs/research/protocol.md「金鑰階層」段 |
 | `/sync` 回應形態（`serverDate`、`ciphers[]`、`revisionDate`、`deletedDate`） | — | https://github.com/frankhommers/bitwarden-openapi-generator （unofficial spec，docs/research/protocol.md 引用）；寬容解析另收 `data.ciphers` |
 | outbox `LEASE_MS` | 120_000 ms | 本專案自訂（P2）：A7 要求 daemon 5 秒內重生，崩潰重啟後最多等一個租約即可重取 in-flight 列 |

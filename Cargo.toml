@@ -7,6 +7,8 @@ members = [
     "crates/bw-store",
     "crates/bw-keys",
     "crates/bw-btp",
+    "crates/bw-vault",
+    "crates/bw-sync",
     "bins/bitwarderd",
     "bins/bitward",
 ]
@@ -26,6 +28,8 @@ bw-server = { path = "crates/bw-server" }
 bw-store = { path = "crates/bw-store" }
 bw-keys = { path = "crates/bw-keys" }
 bw-btp = { path = "crates/bw-btp" }
+bw-vault = { path = "crates/bw-vault" }
+bw-sync = { path = "crates/bw-sync" }
 
 # 序列化與型別
 serde = { version = "1", features = ["derive"] }

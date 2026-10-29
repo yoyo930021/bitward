@@ -13,8 +13,9 @@ pub type AttachmentId = Uuid;
 /// Bitwarden 信封字串 `type.iv|ct|mac`。密文原樣是鏡像與伺服器的共同通货。
 pub type EncStr = String;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum ItemKind {
+    #[default]
     Login,
     SecureNote,
     Card,
@@ -189,6 +190,8 @@ pub enum AuthCall {
         biometric: bool,
     },
     Lock,
+    /// 登出：清 token 與封存金鑰（鏡像保留）
+    SignOut,
     WhoAmI,
 }
 
@@ -213,27 +216,34 @@ pub enum SortKey {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum VaultCall {
-    List {
-        query: Query,
-        view: View,
-    },
-    Get {
-        id: ItemId,
-        view: View,
-    },
-    Create {
-        draft: serde_json::Value,
-    },
-    Patch {
-        id: ItemId,
-        patch: serde_json::Value,
-    },
-    Delete {
-        ids: Vec<ItemId>,
-    },
-    Restore {
-        id: ItemId,
-    },
+    List { query: Query, view: View },
+    Get { id: ItemId, view: View },
+    Create { draft: CipherDraft },
+    Patch { id: ItemId, edits: Vec<FieldEdit> },
+    Delete { ids: Vec<ItemId> },
+    Restore { id: ItemId },
+}
+
+/// CLI 邊界的明文草稿；加密只發生在 daemon 的 `with_keys` 閉包。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CipherDraft {
+    pub kind: ItemKind,
+    pub name: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub totp: Option<String>,
+    pub uris: Vec<String>,
+    pub notes: Option<String>,
+    pub favorite: bool,
+}
+
+/// 欄位編輯。path 文法三處共用（bw-vault flatten、bw-sync build_put_body、daemon）：
+/// `name`、`notes`、`username`、`password`、`totp`、`uri.<n>`、`favorite`。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FieldEdit {
+    pub path: String,
+    /// None ＝清空
+    pub value: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -262,9 +272,16 @@ pub enum FillCall {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SyncCall {
-    Trigger { force: bool },
+    Trigger {
+        force: bool,
+    },
     Status,
-    ResolveConflict { id: MutationId, pick: Resolution },
+    /// 衝突收件匣列表（只給路徑，值不外洩）。
+    ListConflicts,
+    ResolveConflict {
+        id: MutationId,
+        pick: Resolution,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -356,7 +373,7 @@ pub enum UnlockStateView {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Response {
-    Status(UnlockStateView),
+    Status(StatusInfo),
     Items(Vec<ItemView>),
     Item(Option<ItemView>),
     TotpCode {
@@ -369,18 +386,64 @@ pub enum Response {
         stdout: String,
         stderr: String,
     },
-    Outbox(Vec<(MutationId, String)>),
+    Conflicts(Vec<ConflictEntry>),
     AgentSession {
         token: SessionToken,
         expires_epoch_ms: u64,
     },
+    /// 行內容為自構 JSON（字串/整數，無 f64）——postcard-safe，見測試。
     Audit(Vec<serde_json::Value>),
+    AuditChain(AuditChainInfo),
     Sessions(Vec<serde_json::Value>),
+    Account(Option<AccountInfo>),
     Profile(ServerProfile),
     Version(String),
-    /// 狀態/診斷類回應用自由 JSON（P1 起用；欄位契約見 hub.rs）
-    Json(serde_json::Value),
     Ok,
+}
+
+/// 全型別化回應：這是 P2 切 postcard 主線的前置（`Value` 的 f64 postcard 不支援）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StatusInfo {
+    pub state: UnlockStateView,
+    pub epoch: u64,
+    pub items: u32,
+    pub outbox: OutboxCounts,
+    pub needs_reauth: bool,
+    pub proto: u16,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutboxCounts {
+    pub queued: u32,
+    pub in_flight: u32,
+    pub awaiting: u32,
+    pub conflict: u32,
+    pub dead: u32,
+    pub total: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AccountInfo {
+    pub email: String,
+    pub server: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuditChainInfo {
+    pub ok: bool,
+    pub count: u64,
+    pub head: String,
+}
+
+/// 衝突收件匣的一列。`fields` 是相撞的欄位路徑（無值：明文不進列表）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConflictEntry {
+    pub id: MutationId,
+    pub item: ItemId,
+    pub base_rev: Option<String>,
+    pub origin: Option<String>,
+    pub created_at: u64,
+    pub fields: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

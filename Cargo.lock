@@ -177,6 +177,7 @@ dependencies = [
  "bw-proto",
  "bw-server",
  "bw-store",
+ "bw-vault",
  "clap",
  "dirs",
  "libc",
@@ -353,6 +354,28 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "bw-sync"
+version = "0.0.1"
+dependencies = [
+ "base64 0.22.1",
+ "bw-proto",
+ "rmpv",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "bw-vault"
+version = "0.0.1"
+dependencies = [
+ "bw-proto",
+ "proptest",
+ "serde_json",
 ]
 
 [[package]]
