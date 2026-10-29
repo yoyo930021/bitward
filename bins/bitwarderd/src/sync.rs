@@ -535,7 +535,7 @@ impl Hub {
                         // 60 秒讀取逾時：docker stop / 網路中斷常留半開 TCP，
                         // tungstenite 不會自己發現死了；逾時強制走重連路徑。
                         match tokio::time::timeout(
-                            std::time::Duration::from_secs(60),
+                            std::time::Duration::from_secs(20),
                             stream.next(),
                         )
                         .await

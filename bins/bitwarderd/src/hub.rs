@@ -55,6 +55,9 @@ pub struct Hub {
     pub drain_lock: tokio::sync::Mutex<()>,
     /// BTP 事件匯流（EventTopic, payload ≤ Identity 級）
     pub events: tokio::sync::broadcast::Sender<(bw_proto::EventTopic, Value)>,
+    /// 上次全量 sync 的 unix ms；通知是 fire-and-forget，半開連線期間的事件會永久錯過，
+    /// 由 30 秒週期 sync 兜底（官方客戶端同為 notifications+定期 sync 雙軌）。
+    pub last_sync_ms: std::sync::atomic::AtomicU64,
 }
 
 pub type DispatchResult = Result<Response, WtpError>;
@@ -116,6 +119,7 @@ impl Hub {
             drain_rx: tokio::sync::Mutex::new(Some(drain_rx)),
             drain_lock: tokio::sync::Mutex::new(()),
             events: tokio::sync::broadcast::channel(128).0,
+            last_sync_ms: std::sync::atomic::AtomicU64::new(0),
         });
         if let Some(a) = account {
             let client = std::sync::Arc::new(
@@ -431,6 +435,8 @@ impl Hub {
         let g = self.server.read().await;
         let h = g.as_ref().ok_or(WtpError::NotFound)?;
         let raw = h.client.sync().await.map_err(map_server_err)?;
+        self.last_sync_ms
+            .store(self.store.now_ms(), std::sync::atomic::Ordering::Relaxed);
         self.store.apply_sync(&raw).map_err(denied)?;
         if let Some(keys) = raw.pointer("/profile/keys") {
             let fp = sha256_hex(&keys.to_string());

@@ -92,6 +92,15 @@ async fn main() -> Result<(), String> {
                 if hub2.store.depth().map(|d| d.total > 0).unwrap_or(false) {
                     hub2.drain_until_idle().await;
                 }
+                // 通知是 fire-and-forget：斷線期間的事件永久錯過，30 秒週期 sync 兜底
+                if hub2.machine.is_unlocked()
+                    && hub2.machine.egress_online()
+                    && hub2.store.now_ms()
+                        - hub2.last_sync_ms.load(std::sync::atomic::Ordering::Relaxed)
+                        > 30_000
+                {
+                    let _ = hub2.sync_now().await;
+                }
             }
         });
     }

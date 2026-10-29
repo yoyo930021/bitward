@@ -111,7 +111,13 @@ for _ in $(seq 1 45); do
   N=$(A ls --json | jq -r ".[] | select(.meta.id==\"$GID\") | .meta.name")
   [[ "$N" == "notify-me" ]] && { SEEN=yes; break; }
 done
-[[ "$SEEN" == yes ]] || fail "A12c targeted pull 未在 10 秒內收斂"
+[[ "$SEEN" == yes ]] || {
+  echo "--- A files:"; ls -la "$DA" || true
+  echo "--- A status:"; A status --json || true
+  echo "--- A daemon log:"; tail -15 "$DA/log" 2>/dev/null || true
+  echo "--- B daemon log:"; tail -8 "$DB/log" 2>/dev/null || true
+  fail "A12c targeted pull 未在 45 秒內收斂"
+}
 pass "A12c notifications 收斂（A 未手動 sync）"
 
 # 軟刪與還原
