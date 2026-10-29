@@ -41,7 +41,10 @@ pub async fn open_bridge() -> Result<Bridge, String> {
             }
         }
     }
-    Err(format!("cannot pair with daemon ({}): {last}", sock.display()))
+    Err(format!(
+        "cannot pair with daemon ({}): {last}",
+        sock.display()
+    ))
 }
 
 async fn try_connect(sock: &Path, dir: &Path, use_saved: bool) -> Result<Bridge, String> {

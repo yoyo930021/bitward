@@ -15,10 +15,7 @@ const MATCH_LIMIT: u32 = 512;
 /// 回 `Err`＝協定級失敗（呼叫端包成 `{"ok":false,"error":...}`）。
 pub async fn dispatch(bridge: &Bridge, method: &str, params: &Value) -> Result<Value, String> {
     let (call, shape) = match method {
-        "ping" => (
-            Call::Admin(AdminCall::Version),
-            Shape::Raw,
-        ),
+        "ping" => (Call::Admin(AdminCall::Version), Shape::Raw),
         "session.info" => (Call::Auth(AuthCall::WhoAmI), Shape::Raw),
         "vault.list" => {
             let limit = match params.get("limit").and_then(Value::as_u64) {
@@ -63,7 +60,10 @@ pub async fn dispatch(bridge: &Bridge, method: &str, params: &Value) -> Result<V
                 .ok_or("params.id (item uuid) required")
                 .and_then(|s| Uuid::parse_str(s).map_err(|e| format!("params.id: {e}")))?;
             (
-                Call::Vault(VaultCall::Get { id, view: View::Reveal }),
+                Call::Vault(VaultCall::Get {
+                    id,
+                    view: View::Reveal,
+                }),
                 Shape::Raw,
             )
         }
@@ -121,10 +121,7 @@ pub fn host_of(uri: &str) -> Option<String> {
         Some((_, rest)) => rest,
         None => s,
     };
-    let s = s
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default();
+    let s = s.split(['/', '?', '#']).next().unwrap_or_default();
     let s = match s.rsplit_once('@') {
         Some((_, hostport)) => hostport,
         None => s,
@@ -145,10 +142,16 @@ mod tests {
 
     #[test]
     fn host_extraction_basics() {
-        assert_eq!(host_of("https://GitHub.com/path?x=1#f").as_deref(), Some("github.com"));
+        assert_eq!(
+            host_of("https://GitHub.com/path?x=1#f").as_deref(),
+            Some("github.com")
+        );
         assert_eq!(host_of("github.com").as_deref(), Some("github.com"));
         assert_eq!(host_of("github.com.").as_deref(), Some("github.com"));
-        assert_eq!(host_of("http://user:pw@sub.example.com:8080/a").as_deref(), Some("sub.example.com"));
+        assert_eq!(
+            host_of("http://user:pw@sub.example.com:8080/a").as_deref(),
+            Some("sub.example.com")
+        );
         assert_eq!(host_of("https://[::1]:8080/x").as_deref(), Some("[::1]"));
         assert_eq!(host_of(""), None);
         assert_eq!(host_of("https:///path"), None);

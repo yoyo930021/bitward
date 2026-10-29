@@ -9,10 +9,10 @@ mod manifest;
 mod session;
 
 use std::collections::HashMap;
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
@@ -23,7 +23,11 @@ use crate::bridge::Bridge;
 use crate::framing::{read_nm, write_nm};
 
 #[derive(Parser)]
-#[command(name = "bitward-nm", version, about = "bitward browser native messaging shim")]
+#[command(
+    name = "bitward-nm",
+    version,
+    about = "bitward browser native messaging shim"
+)]
 struct Args {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -106,7 +110,11 @@ where
             Some(v @ (Value::Number(_) | Value::String(_))) => v.clone(),
             _ => {
                 // 無 id 無法歸屬回應；協定要求 id 必填。
-                let _ = write_nm(&mut *out.lock().await, &err_resp(Value::Null, "request id required")).await;
+                let _ = write_nm(
+                    &mut *out.lock().await,
+                    &err_resp(Value::Null, "request id required"),
+                )
+                .await;
                 continue;
             }
         };
@@ -115,10 +123,7 @@ where
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
-        let params = req
-            .get("params")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
+        let params = req.get("params").cloned().unwrap_or_else(|| json!({}));
         let ticket = next_ticket.fetch_add(1, Ordering::Relaxed);
         pending
             .lock()

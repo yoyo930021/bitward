@@ -74,8 +74,7 @@ fn default_dest(browser: Browser) -> Result<PathBuf, String> {
     match browser {
         Browser::Chrome => {
             if cfg!(target_os = "macos") {
-                Ok(home
-                    .join("Library/Application Support/Google/Chrome/NativeMessagingHosts"))
+                Ok(home.join("Library/Application Support/Google/Chrome/NativeMessagingHosts"))
             } else if cfg!(target_os = "linux") {
                 Ok(home.join(".config/google-chrome/NativeMessagingHosts"))
             } else {
@@ -160,7 +159,11 @@ fn parse_profiles_ini(ini: &Path) -> Option<Vec<(String, PathBuf)>> {
     }
     if let Some(name) = cur {
         if let Some(p) = path {
-            let joined = if relative { base.join(p) } else { PathBuf::from(p) };
+            let joined = if relative {
+                base.join(p)
+            } else {
+                PathBuf::from(p)
+            };
             out.push((name, joined));
         }
     }

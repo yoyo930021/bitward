@@ -3,8 +3,8 @@
 //! （Chromium 以 native endian 寫入；macOS/Linux 皆 LE。BTP 線格式同為 LE 前綴，
 //! 但那是 postcard/JSON 的協定型別化幀——本檔是 NM 面自用的 `serde_json::Value` 幀。）
 
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -63,7 +63,9 @@ pub(crate) async fn write_nm_raw<W: AsyncWrite + Unpin>(
     wr.write_all(&(body.len() as u32).to_le_bytes())
         .await
         .map_err(|e| format!("nm write prefix: {e}"))?;
-    wr.write_all(&body).await.map_err(|e| format!("nm write body: {e}"))?;
+    wr.write_all(&body)
+        .await
+        .map_err(|e| format!("nm write body: {e}"))?;
     wr.flush().await.map_err(|e| format!("nm flush: {e}"))?;
     Ok(())
 }
