@@ -572,3 +572,51 @@ fn schema_version_guard() {
         Err(e) => assert!(matches!(e, StoreError::SchemaVersion(99))),
     }
 }
+
+// P5-b3：uri 過濾 host 錨定（credential.match 教訓：整頁 URL 直查不得恆空、
+// 子字串不得誤命中）
+#[test]
+fn query_uri_host_anchoring() {
+    let (_d, path) = tmp_vault("anchor");
+    let store = Store::open(&path).unwrap();
+    let gh = Uuid::new_v4();
+    let sub = Uuid::new_v4();
+    let evil = Uuid::new_v4();
+    store
+        .apply_sync(&json!({
+            "ciphers": [
+                cipher(&gh.to_string(), "GitHub", "2026-10-01T00:00:00.000Z", false),
+                cipher(&sub.to_string(), "Gist", "2026-10-02T00:00:00.000Z", false),
+                cipher(&evil.to_string(), "Evil", "2026-10-03T00:00:00.000Z", false),
+            ]
+        }))
+        .unwrap();
+    store
+        .set_plain_meta(gh, Some("GitHub"), &["https://github.com/login".into()])
+        .unwrap();
+    store
+        .set_plain_meta(sub, Some("Gist"), &["https://gist.github.com/x".into()])
+        .unwrap();
+    store
+        .set_plain_meta(evil, Some("Evil"), &["https://notgithub.com".into()])
+        .unwrap();
+
+    // 整頁 URL 查詢：精確 host ＋ 子網域都命中，notgithub.com 不得誤入
+    let hits = store
+        .query(&Query { uri: Some("https://github.com/login?x=1".into()), ..Default::default() })
+        .unwrap();
+    let ids: Vec<_> = hits.iter().map(|h| h.id).collect();
+    assert!(ids.contains(&gh) && ids.contains(&sub) && !ids.contains(&evil), "{ids:?}");
+
+    // 子網域後綴命中（gist.github.com ∈ github.com）
+    let hits = store
+        .query(&Query { uri: Some("github.com".into()), ..Default::default() })
+        .unwrap();
+    assert_eq!(hits.len(), 2);
+
+    // 子字串不再誤命中：notgithub.com 不屬於 github.com
+    let hits = store
+        .query(&Query { uri: Some("otgithub.com".into()), ..Default::default() })
+        .unwrap();
+    assert!(hits.is_empty());
+}

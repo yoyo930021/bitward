@@ -19,6 +19,7 @@ impl Store {
         );
         let mut args: Vec<String> = Vec::new();
         let mut like_fallback: Option<String> = None;
+        let mut uri_host: Option<String> = None;
 
         if let Some(text) = q.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
             match fts_match(text) {
@@ -46,8 +47,12 @@ impl Store {
             args.push(tag.to_string());
         }
         if let Some(uri) = q.uri.as_deref().filter(|t| !t.is_empty()) {
+            // host 錨定（P5-b3）：查詢可帶整頁 URL，比對 host 相等或子網域後綴。
+            // SQL LIKE 用 host 做預篩，真實判定在 Rust 端對存儲 uris 逐筆比。
+            let want = host_of(uri).unwrap_or_else(|| uri.to_ascii_lowercase());
             sql.push_str(" AND m.uris LIKE ?");
-            args.push(format!("%{}%", escape_like(uri)));
+            args.push(format!("%{want}%"));
+            uri_host = Some(want);
         }
         if let Some(val) = q.value.as_deref().filter(|t| !t.is_empty()) {
             // 值搜尋走明文索引欄（解鎖回填後才有資料）；大小寫敏感＝精確比對語意
@@ -75,7 +80,15 @@ impl Store {
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(args.iter()), row_to_meta)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let mut out = rows.collect::<Result<Vec<_>, _>>()?;
+        if let Some(want) = uri_host {
+            out.retain(|m| {
+                m.uris.iter().any(|u| {
+                    host_of(u).is_some_and(|h| h == want || h.ends_with(&format!(".{want}")))
+                })
+            });
+        }
+        Ok(out)
     }
 
     /// 單筆取回（含 tombstone 判定交給呼叫端的 `CipherRow.deleted`）。
@@ -126,6 +139,15 @@ fn row_to_meta(row: &Row<'_>) -> Result<ItemMeta, rusqlite::Error> {
 
 fn parse_string_array(s: &str) -> Vec<String> {
     serde_json::from_str(s).unwrap_or_default()
+}
+
+/// `https://host[:port]/path` → `host`（小寫）。無 scheme 時整串當 host。
+fn host_of(uri: &str) -> Option<String> {
+    let after = uri.split_once("://").map(|(_, r)| r).unwrap_or(uri);
+    let host = after.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let host = host.split(':').next().unwrap_or("").to_ascii_lowercase();
+    (!host.is_empty()).then_some(host)
 }
 
 fn kind_index(k: ItemKind) -> i64 {
