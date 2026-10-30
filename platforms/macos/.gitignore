@@ -1,0 +1,4 @@
+# Xcode 本機狀態；專案由 project.yml 生成，重新生成即可复原。
+xcuserdata/
+DerivedData/
+.build/

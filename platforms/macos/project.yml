@@ -1,0 +1,81 @@
+# Bitward macOS：容器 App + credential provider extension。
+# 重新生成：`xcodegen generate`（本檔是唯一事實來源，Info.plist 檔頭也由此處 settings 引用）。
+name: Bitward
+options:
+  bundleIdPrefix: io.bitward
+  deploymentTarget:
+    macOS: "14.0" # ASPasswordCredentialRequest 的 availability 下限（research/macos-provider.md §0）
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5"
+    # ad-hoc：本機骨架不需要 Apple Development 憑證；正式簽章鏈在 P5 接 ASC。
+    # 受限 entitlement（autofill-credential-provider）會讓 XCBuild 在 Manual+ad-hoc 下
+    # 硬性索求 provisioning profile；改由 postCompileScript 由內而外手動 codesign。
+    CODE_SIGNING_ALLOWED: NO
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    DEVELOPMENT_TEAM: ""
+    PROVISIONING_PROFILE_SPECIFIER: ""
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    GENERATE_INFOPLIST_FILE: NO
+targets:
+  Bitward:
+    type: application
+    platform: macOS
+    sources:
+      - Bitward/Sources
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.bitward.dev
+        PRODUCT_NAME: Bitward
+        INFOPLIST_FILE: Bitward/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Bitward/Bitward.entitlements
+    dependencies:
+      # embed:false：xcodegen 把 postCompileScripts 排在 Embed 階段之前，簽章會先於嵌入發生；
+      # 改由下方 script 自己 ditto + 由內而外簽，順序才可控。
+      - target: BitwardProvider
+        embed: false
+    postCompileScripts:
+      - name: Embed and ad-hoc sign
+        outputFiles:
+          - "$(BUILT_PRODUCTS_DIR)/$(PRODUCT_NAME).app/Contents/PlugIns/BitwardProvider.appex/Contents/_CodeSignature"
+          - "$(BUILT_PRODUCTS_DIR)/$(PRODUCT_NAME).app/Contents/_CodeSignature"
+        script: |
+          set -euo pipefail
+          APP="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app"
+          # codesign --strict 要求 Resources 目錄存在，否則 "code has no resources"。
+          mkdir -p "${APP}/Contents/Resources" \
+            "${BUILT_PRODUCTS_DIR}/BitwardProvider.appex/Contents/Resources"
+          rm -rf "${APP}/Contents/PlugIns/BitwardProvider.appex"
+          mkdir -p "${APP}/Contents/PlugIns"
+          ditto "${BUILT_PRODUCTS_DIR}/BitwardProvider.appex" \
+            "${APP}/Contents/PlugIns/BitwardProvider.appex"
+          codesign --force --sign - --timestamp=none \
+            --entitlements "${SRCROOT}/BitwardProvider/BitwardProvider.entitlements" \
+            "${APP}/Contents/PlugIns/BitwardProvider.appex"
+          codesign --force --sign - --timestamp=none \
+            --entitlements "${SRCROOT}/Bitward/Bitward.entitlements" \
+            "${APP}"
+  BitwardProvider:
+    type: app-extension
+    platform: macOS
+    sources:
+      - BitwardProvider/Sources
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.bitward.dev.provider
+        PRODUCT_NAME: BitwardProvider
+        INFOPLIST_FILE: BitwardProvider/Info.plist
+        CODE_SIGN_ENTITLEMENTS: BitwardProvider/BitwardProvider.entitlements
+schemes:
+  Bitward:
+    build:
+      targets:
+        Bitward: all
+    run:
+      config: Debug
+      target: Bitward

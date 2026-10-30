@@ -1,0 +1,465 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		1665726F5AC7E72E07DB2B56 /* BitwardApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF3FDF1E8E8CE270ACE6F11B /* BitwardApp.swift */; };
+		27C961CEFA953F7DDA28D5B2 /* BitwardGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E75116995D1D6A3D6ECC3E3 /* BitwardGroup.swift */; };
+		2AF9460ACFE55DC54F074434 /* BTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25C3BDA637D74D9057065DED /* BTPClient.swift */; };
+		59CBAD684FE91E440E48AA56 /* BitwardGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E75116995D1D6A3D6ECC3E3 /* BitwardGroup.swift */; };
+		645807D23E2C009A86E2575A /* BTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25C3BDA637D74D9057065DED /* BTPClient.swift */; };
+		82BD21D47DD27EFDD277B291 /* ProviderViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 974EF14296AB1177D31C53AD /* ProviderViewController.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		8D1E26B9090D901557D94FE6 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 04C161A0CEB8EC7BFAF3C773 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 6DD3C5585C1F077AEFCFB47B;
+			remoteInfo = BitwardProvider;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		0A7B5F02CAB65867EBC45312 /* Bitward.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Bitward.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		0E75116995D1D6A3D6ECC3E3 /* BitwardGroup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BitwardGroup.swift; sourceTree = "<group>"; };
+		25C3BDA637D74D9057065DED /* BTPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BTPClient.swift; sourceTree = "<group>"; };
+		974EF14296AB1177D31C53AD /* ProviderViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderViewController.swift; sourceTree = "<group>"; };
+		BF3FDF1E8E8CE270ACE6F11B /* BitwardApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BitwardApp.swift; sourceTree = "<group>"; };
+		EBAA0AE3E2826BF329591F74 /* BitwardProvider.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = BitwardProvider.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		0287C95DCBB76D3C6CC1E7F9 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				0A7B5F02CAB65867EBC45312 /* Bitward.app */,
+				EBAA0AE3E2826BF329591F74 /* BitwardProvider.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		289D4EDBE3DF38A213AC1F26 = {
+			isa = PBXGroup;
+			children = (
+				A6B7CB9FA27B99A066753C39 /* Bitward */,
+				8AA897B045119781648077EB /* BitwardProvider */,
+				C0238562E62BF7D50EE53ACD /* Shared */,
+				0287C95DCBB76D3C6CC1E7F9 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		8AA897B045119781648077EB /* BitwardProvider */ = {
+			isa = PBXGroup;
+			children = (
+				A32E9A22C4D3B80A9092D02D /* Sources */,
+			);
+			path = BitwardProvider;
+			sourceTree = "<group>";
+		};
+		A32E9A22C4D3B80A9092D02D /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				974EF14296AB1177D31C53AD /* ProviderViewController.swift */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		A6B7CB9FA27B99A066753C39 /* Bitward */ = {
+			isa = PBXGroup;
+			children = (
+				B311DD94B782CF44907C5BD6 /* Sources */,
+			);
+			path = Bitward;
+			sourceTree = "<group>";
+		};
+		B311DD94B782CF44907C5BD6 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				BF3FDF1E8E8CE270ACE6F11B /* BitwardApp.swift */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		C0238562E62BF7D50EE53ACD /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				0E75116995D1D6A3D6ECC3E3 /* BitwardGroup.swift */,
+				25C3BDA637D74D9057065DED /* BTPClient.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		6DD3C5585C1F077AEFCFB47B /* BitwardProvider */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E085EAD2671D70A8CDF4BB3F /* Build configuration list for PBXNativeTarget "BitwardProvider" */;
+			buildPhases = (
+				C87E85270A0E30F6BD18D369 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = BitwardProvider;
+			packageProductDependencies = (
+			);
+			productName = BitwardProvider;
+			productReference = EBAA0AE3E2826BF329591F74 /* BitwardProvider.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		7C4C439A9D12C2B6A276BB1C /* Bitward */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8B8A5CFB97450C7D2427A2FC /* Build configuration list for PBXNativeTarget "Bitward" */;
+			buildPhases = (
+				BD606DC7845B367143C5D1CC /* Sources */,
+				B42973DB65992D92D9A2941B /* Embed and ad-hoc sign */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				493AA066BA875AD26B71EE2B /* PBXTargetDependency */,
+			);
+			name = Bitward;
+			packageProductDependencies = (
+			);
+			productName = Bitward;
+			productReference = 0A7B5F02CAB65867EBC45312 /* Bitward.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		04C161A0CEB8EC7BFAF3C773 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					6DD3C5585C1F077AEFCFB47B = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Manual;
+					};
+					7C4C439A9D12C2B6A276BB1C = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Manual;
+					};
+				};
+			};
+			buildConfigurationList = B5945AC187883CE7545710FC /* Build configuration list for PBXProject "Bitward" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 289D4EDBE3DF38A213AC1F26;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 0287C95DCBB76D3C6CC1E7F9 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				7C4C439A9D12C2B6A276BB1C /* Bitward */,
+				6DD3C5585C1F077AEFCFB47B /* BitwardProvider */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		B42973DB65992D92D9A2941B /* Embed and ad-hoc sign */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Embed and ad-hoc sign";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/$(PRODUCT_NAME).app/Contents/PlugIns/BitwardProvider.appex/Contents/_CodeSignature",
+				"$(BUILT_PRODUCTS_DIR)/$(PRODUCT_NAME).app/Contents/_CodeSignature",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -euo pipefail\nAPP=\"${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app\"\n# codesign --strict 要求 Resources 目錄存在，否則 \"code has no resources\"。\nmkdir -p \"${APP}/Contents/Resources\" \\\n  \"${BUILT_PRODUCTS_DIR}/BitwardProvider.appex/Contents/Resources\"\nrm -rf \"${APP}/Contents/PlugIns/BitwardProvider.appex\"\nmkdir -p \"${APP}/Contents/PlugIns\"\nditto \"${BUILT_PRODUCTS_DIR}/BitwardProvider.appex\" \\\n  \"${APP}/Contents/PlugIns/BitwardProvider.appex\"\ncodesign --force --sign - --timestamp=none \\\n  --entitlements \"${SRCROOT}/BitwardProvider/BitwardProvider.entitlements\" \\\n  \"${APP}/Contents/PlugIns/BitwardProvider.appex\"\ncodesign --force --sign - --timestamp=none \\\n  --entitlements \"${SRCROOT}/Bitward/Bitward.entitlements\" \\\n  \"${APP}\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		BD606DC7845B367143C5D1CC /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				645807D23E2C009A86E2575A /* BTPClient.swift in Sources */,
+				1665726F5AC7E72E07DB2B56 /* BitwardApp.swift in Sources */,
+				59CBAD684FE91E440E48AA56 /* BitwardGroup.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C87E85270A0E30F6BD18D369 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2AF9460ACFE55DC54F074434 /* BTPClient.swift in Sources */,
+				27C961CEFA953F7DDA28D5B2 /* BitwardGroup.swift in Sources */,
+				82BD21D47DD27EFDD277B291 /* ProviderViewController.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		493AA066BA875AD26B71EE2B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 6DD3C5585C1F077AEFCFB47B /* BitwardProvider */;
+			targetProxy = 8D1E26B9090D901557D94FE6 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		162B140DFCD14002E38D788F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Bitward/Bitward.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = Bitward/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.bitward.dev;
+				PRODUCT_NAME = Bitward;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		19F4C7166E2D9FBF50859469 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = BitwardProvider/BitwardProvider.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = BitwardProvider/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.bitward.dev.provider;
+				PRODUCT_NAME = BitwardProvider;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		6B9C371EFC3B1E79F5F9BDE5 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = BitwardProvider/BitwardProvider.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = BitwardProvider/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.bitward.dev.provider;
+				PRODUCT_NAME = BitwardProvider;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		CF1E05A54F55C1D4C285B3EB /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5;
+			};
+			name = Release;
+		};
+		D32C4CDBD668D557421FAC72 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5;
+			};
+			name = Debug;
+		};
+		FEBCFE2D63C29AD3C6DA8BFB /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Bitward/Bitward.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = Bitward/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.bitward.dev;
+				PRODUCT_NAME = Bitward;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		8B8A5CFB97450C7D2427A2FC /* Build configuration list for PBXNativeTarget "Bitward" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FEBCFE2D63C29AD3C6DA8BFB /* Debug */,
+				162B140DFCD14002E38D788F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		B5945AC187883CE7545710FC /* Build configuration list for PBXProject "Bitward" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D32C4CDBD668D557421FAC72 /* Debug */,
+				CF1E05A54F55C1D4C285B3EB /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E085EAD2671D70A8CDF4BB3F /* Build configuration list for PBXNativeTarget "BitwardProvider" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				19F4C7166E2D9FBF50859469 /* Debug */,
+				6B9C371EFC3B1E79F5F9BDE5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 04C161A0CEB8EC7BFAF3C773 /* Project object */;
+}
