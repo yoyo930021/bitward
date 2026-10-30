@@ -1,6 +1,8 @@
 //! BTP 骨幹：4 bytes LE 長度前綴 + postcard 幀（契約 §2.5、§3.9）。
 //! 傳輸綁定：UDS（本機）、XPC（macOS provider，平台層）、TLS（跨機，P5）。
 
+pub mod tls;
+
 use bw_proto::{ClientMsg, ServerMsg};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
