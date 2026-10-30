@@ -67,6 +67,7 @@ async fn try_connect(sock: &Path, dir: &Path, use_saved: bool) -> Result<Bridge,
         None => Auth::Enroll {
             pairing: pairing.clone(),
             display_name: format!("browser-nm:{}", std::process::id()),
+            pair_code: None,
         },
     };
     let bridge = Bridge::connect(stream, auth).await?;

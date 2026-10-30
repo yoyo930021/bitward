@@ -77,6 +77,7 @@ fn server_identity(token: Option<&str>, pid: u32, pairing: String) -> (String, A
                 Auth::Enroll {
                     pairing,
                     display_name: name,
+                    pair_code: None,
                 },
             )
         }

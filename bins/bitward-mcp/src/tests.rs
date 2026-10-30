@@ -544,6 +544,7 @@ fn server_identity_follows_frozen_env_contract() {
         Auth::Enroll {
             pairing,
             display_name,
+            ..
         } => {
             assert_eq!(display_name, "mcp:42");
             assert_eq!(pairing, "pair");
