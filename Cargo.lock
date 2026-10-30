@@ -318,6 +318,7 @@ dependencies = [
 name = "bw-autotype"
 version = "0.0.1"
 dependencies = [
+ "core-foundation 0.10.1",
  "core-graphics",
  "thiserror 2.0.21",
 ]

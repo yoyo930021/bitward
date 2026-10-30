@@ -238,6 +238,43 @@ impl MacSink {
     }
 }
 
+/// 輔助使用（Accessibility）權限查詢。
+/// CGEventPost 在**未授權時靜默丟事件**（不報錯），所以 autotype 前必須先查；
+/// `prompt = true` 走 Apple 正統請求路徑：未授權時系統彈窗、並把本程式加入
+/// 「設定 → 隱私與安全性 → 輔助使用」清單（該清單只列主動請求過的程式）。
+/// 來源：https://developer.apple.com/documentation/applicationservices/1461188-axistrustedcheckoptionprompt
+#[cfg(target_os = "macos")]
+pub fn accessibility_trusted(prompt: bool) -> bool {
+    use core_foundation::base::TCFType;
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::string::CFString;
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    unsafe extern "C" {
+        // 以不透明指標宣告（CFStringRef）：直接宣告 CFString 會觸發 improper_ctypes
+        static kAXTrustedCheckOptionPrompt: *const std::ffi::c_void;
+        fn AXIsProcessTrusted() -> bool;
+        fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> bool;
+    }
+    unsafe {
+        if !prompt {
+            return AXIsProcessTrusted();
+        }
+        let key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt as *const _);
+        let dict = CFDictionary::<CFString, CFBoolean>::from_CFType_pairs(&[(
+            key,
+            CFBoolean::true_value(),
+        )]);
+        AXIsProcessTrustedWithOptions(dict.as_CFTypeRef())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn accessibility_trusted(_prompt: bool) -> bool {
+    false
+}
+
 #[cfg(target_os = "macos")]
 impl KeySink for MacSink {
     fn unicode(&mut self, s: &str) {

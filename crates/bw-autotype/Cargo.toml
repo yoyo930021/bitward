@@ -11,3 +11,4 @@ thiserror.workspace = true
 # 選 core-graphics 而非 objc2-quartz 的理由與來源 URL 見 NOTES.md。
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.25"
+core-foundation = "0.10"

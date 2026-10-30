@@ -654,6 +654,14 @@ impl Hub {
         if !self.machine.is_unlocked() {
             return Err(WtpError::Locked);
         }
+        // 未授權先觸發系統彈窗（會把 bitwarderd 登記進輔助使用清單）；
+        // 不查就直接打字的話 CGEventPost 會靜默丟事件，使用者看到「成功但沒發生事」
+        #[cfg(target_os = "macos")]
+        if !bw_autotype::accessibility_trusted(true) {
+            return Err(denied(
+                "輔助使用權限未授予：系統已彈出授權窗（或到 設定→隱私與安全性→輔助使用 允許 bitwarderd），完成後重試",
+            ));
+        }
         let tpl =
             bw_autotype::TypeTemplate::parse(template.unwrap_or(bw_autotype::DEFAULT_TEMPLATE))
                 .map_err(denied)?;

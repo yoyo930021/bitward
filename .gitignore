@@ -9,3 +9,4 @@ spike/**/target/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+dev/e2e/demo/
