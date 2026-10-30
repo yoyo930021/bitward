@@ -158,6 +158,9 @@ pub enum Auth {
     Enroll {
         pairing: String,
         display_name: String,
+        /// Some(配對碼) = 跨機 Device session（§1.2 異機配對）；
+        /// None = 本機 UDS 互動端（peer uid 已驗）
+        pair_code: Option<String>,
     },
     Resume {
         session: SessionId,
@@ -192,6 +195,16 @@ pub enum AuthCall {
     Lock,
     /// 登出：清 token 與封存金鑰（鏡像保留）
     SignOut,
+    /// 產生一次性配對碼（跨機 thin 用，§1.2）
+    PairStart {
+        name: String,
+        grant: String,
+        ttl_secs: u64,
+    },
+    PairList,
+    PairRevoke {
+        code: String,
+    },
     WhoAmI,
 }
 
@@ -306,9 +319,17 @@ pub struct RunPlan {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum FillCall {
-    Request { uri: String },
-    Claim { plan_id: u64 },
-    AutoType { id: ItemId },
+    Request {
+        uri: String,
+    },
+    Claim {
+        plan_id: u64,
+    },
+    /// 按鍵注入。`template` None → daemon 預設模板；回應只含計數，明文不回傳。
+    AutoType {
+        id: ItemId,
+        template: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -442,8 +463,12 @@ pub enum Response {
     Account(Option<AccountInfo>),
     Profile(ServerProfile),
     Version(String),
+    /// 配對碼資訊（跨機 join 前的人類面）
+    PairInfo(PairInfo),
     /// 去重報告：同 (domain, username) 叢集，只回 id 不回明文
     DupGroups(Vec<DupGroup>),
+    /// 自構 JSON 結果（如 AutoType 計數）。值限字串/整數，無 f64——postcard-safe，見 Audit。
+    Json(serde_json::Value),
     Ok,
 }
 
@@ -451,6 +476,14 @@ pub enum Response {
 pub struct DupGroup {
     pub domain: String,
     pub ids: Vec<ItemId>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PairInfo {
+    pub code: String,
+    /// SPKI pin；無 CA 體系的信任錨點（§1.2）
+    pub pin: String,
+    pub expires_in_secs: u64,
 }
 
 /// 全型別化回應：這是 P2 切 postcard 主線的前置（`Value` 的 f64 postcard 不支援）。

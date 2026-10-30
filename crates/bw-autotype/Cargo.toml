@@ -1,0 +1,13 @@
+[package]
+name = "bw-autotype"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+# 平台耦合只在 MacSink；核心（模板解析/emit）零平台依赖。
+# 選 core-graphics 而非 objc2-quartz 的理由與來源 URL 見 NOTES.md。
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.25"

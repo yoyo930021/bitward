@@ -22,6 +22,17 @@ use crate::hub::Hub;
 pub enum SessionKind {
     Interactive,
     Agent,
+    /// 跨機配對裝置（§1.2）：授權走同一張判定表
+    Device,
+}
+
+/// 一次性配對碼（`bitward pair start` 產生，join 時消耗）
+#[derive(Clone, Debug)]
+pub struct PairingSpec {
+    pub name: String,
+    pub grants: GrantSet,
+    pub expires_at_ms: u64,
+    pub ttl_secs: u64,
 }
 
 pub struct LiveSession {
@@ -121,6 +132,7 @@ impl Hub {
                     EventTopic::ApprovalRequired,
                     json!({"id": id.0.to_string(), "summary": summarize(call)}),
                 );
+                self.publish_signal(&format!("bitward: approval {} {}", id.0, summarize(call)));
                 let waited = tokio::time::timeout(std::time::Duration::from_secs(120), rx).await;
                 self.pending.lock().unwrap().remove(&id);
                 match waited {
@@ -367,6 +379,123 @@ impl Hub {
             .iter()
             .map(|(id, p)| (id.0.to_string(), p.summary.clone()))
             .collect()
+    }
+
+    // —— 跨機配對（§1.2）——
+
+    pub fn restore_session(
+        &self,
+        row: SessionRow,
+        kind: crate::agent::SessionKind,
+        grants: bw_agent::GrantSet,
+    ) -> Arc<crate::agent::LiveSession> {
+        let sess = Arc::new(crate::agent::LiveSession {
+            expires_at_ms: row.expires_at,
+            revoked: std::sync::atomic::AtomicBool::new(false),
+            row,
+            kind,
+            grants: std::sync::RwLock::new(grants),
+            ledger: std::sync::Mutex::new(bw_agent::Ledger::default()),
+        });
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(sess.row.id.clone(), sess.clone());
+        sess
+    }
+
+    /// 顯示給配對端的信任錨點：TLS 啟動時注入；未啟動 TLS 時即時從身分檔算。
+    pub fn tls_pin(&self) -> String {
+        if let Some(p) = self.tls_pin.get() {
+            return p.clone();
+        }
+        bw_btp::tls::load_or_create(&self.data_dir)
+            .map(|id| id.spki_pin)
+            .unwrap_or_default()
+    }
+
+    pub fn pair_start(&self, name: &str, dsl: &str, ttl_secs: u64) -> Result<Response, WtpError> {
+        let grants = parse_grants(dsl).map_err(parse_err)?;
+        let code: String = {
+            use rand::Rng;
+            let alphabet: Vec<char> = "ABCDEFGHJKMNPQRSTUVWXYZ23456789".chars().collect();
+            let mut rng = rand::thread_rng();
+            (0..9)
+                .map(|_| alphabet[rng.gen_range(0..alphabet.len())])
+                .collect()
+        };
+        let expires = self.store.now_ms() + 120_000;
+        self.pairings.lock().unwrap().insert(
+            code.clone(),
+            PairingSpec {
+                name: name.to_string(),
+                grants,
+                expires_at_ms: expires,
+                ttl_secs: ttl_secs.max(60),
+            },
+        );
+        Ok(Response::PairInfo(bw_proto::PairInfo {
+            code,
+            pin: self.tls_pin(),
+            expires_in_secs: 120,
+        }))
+    }
+
+    pub fn pair_list(&self) -> Response {
+        let now = self.store.now_ms();
+        let rows: Vec<Value> = self
+            .pairings
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, s)| s.expires_at_ms > now)
+            .map(
+                |(code, s)| json!({"code": code, "name": s.name, "expires_at_ms": s.expires_at_ms}),
+            )
+            .collect();
+        Response::Sessions(rows)
+    }
+
+    pub fn pair_revoke_code(&self, code: &str) -> Result<Response, WtpError> {
+        self.pairings
+            .lock()
+            .unwrap()
+            .remove(code)
+            .map(|_| Response::Ok)
+            .ok_or(WtpError::NotFound)
+    }
+
+    /// join 時消耗：過期/不存在 → None。
+    pub fn consume_pairing(&self, code: &str) -> Option<PairingSpec> {
+        let spec = self.pairings.lock().unwrap().remove(code)?;
+        if spec.expires_at_ms < self.store.now_ms() {
+            return None;
+        }
+        Some(spec)
+    }
+
+    /// ntfy 信令（§1.2 推播路徑的自架形態）：只傳不透明信令。
+    pub fn publish_signal(&self, text: &str) {
+        let Some(url) = self.ntfy_url.clone() else {
+            return;
+        };
+        let body = text.to_string();
+        tokio::spawn(async move {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap_or_default();
+            if let Err(e) = client
+                .post(&url)
+                .header("Title", "bitward approval")
+                .header("Priority", "high")
+                .body(body)
+                .send()
+                .await
+            {
+                tracing::warn!(err = %e, "ntfy signal publish failed");
+            }
+        });
     }
 
     /// `use:env` 逐 item 檢查後取明文值；回傳 (注入環境變數, 已知明文集合)。

@@ -3,16 +3,16 @@
 //! 密碼輸入走 stdin/旗標轉 stdin，不進 argv（A11）。
 
 use std::io::Read as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use uuid::Uuid;
 
 use bw_btp::{read_server, write_client};
 use bw_proto::{
-    AdminCall, AgentCall, Auth, AuthCall, Call, CipherDraft, ClientMsg, FieldEdit, ItemId,
-    ItemKind, MutationId, OverlayOpWire, PROTO_VERSION, ProtoVersion, Query, Resolution, Response,
-    ServerMsg, SessionToken, SortKey, SyncCall, UseCall, VaultCall, View, WtpError,
+    AdminCall, AgentCall, Auth, AuthCall, Call, CipherDraft, ClientMsg, FieldEdit, FillCall,
+    ItemId, ItemKind, MutationId, OverlayOpWire, PROTO_VERSION, ProtoVersion, Query, Resolution,
+    Response, ServerMsg, SessionToken, SortKey, SyncCall, UseCall, VaultCall, View, WtpError,
 };
 
 #[derive(Parser)]
@@ -23,6 +23,9 @@ struct Args {
     /// 輸出 JSON（機器可讀契約；ls 的 metadata 永不含 password/username 鍵）
     #[arg(long, global = true)]
     json: bool,
+    /// 以跨機 device profile 連線（`pair join` 建立），值為 profile 名稱
+    #[arg(long, global = true)]
+    remote: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -67,6 +70,13 @@ enum Cmd {
     },
     Totp {
         id: String,
+    },
+    /// AutoType：daemon 解密後倒數 3 秒注入按鍵（明文不回程）
+    Autotype {
+        id: String,
+        /// 模板，預設 {username}{TAB}{password}{TAB}{enter}
+        #[arg(long)]
+        template: Option<String>,
     },
     Audit {
         #[arg(long, default_value_t = 50)]
@@ -160,6 +170,11 @@ enum Cmd {
         #[arg(long = "grant")]
         grants: Vec<String>,
     },
+    /// 跨機配對（§1.2）
+    Pair {
+        #[command(subcommand)]
+        cmd: PairCmd,
+    },
     /// e2e/開發用：向（自架）server 註冊新帳號，不寫入 daemon 狀態
     #[command(hide = true)]
     DevRegister {
@@ -200,6 +215,40 @@ enum TagCmd {
         id: String,
         #[arg(default_value = "true")]
         on: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum PairCmd {
+    /// 全端：產生一次性配對碼
+    Start {
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value = "see:identity all")]
+        grant: String,
+        #[arg(long, default_value_t = 30 * 24 * 3600)]
+        ttl: u64,
+    },
+    /// thin 端：用配對碼換長期 device token
+    Join {
+        /// https://host:port
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        pin: String,
+        #[arg(long)]
+        code: String,
+        #[arg(long)]
+        name: String,
+        /// ntfy 喚醒 endpoint（能力憑證，選填）
+        #[arg(long)]
+        wake: Option<String>,
+        #[arg(long, default_value = "default")]
+        profile: String,
+    },
+    List,
+    Revoke {
+        code: String,
     },
 }
 
@@ -269,6 +318,7 @@ async fn open_session(
             None => Auth::Enroll {
                 pairing: fresh.clone(),
                 display_name: format!("cli:{}", std::process::id()),
+                pair_code: None,
             },
         };
         write_client(
@@ -321,13 +371,32 @@ async fn run() -> Result<(), String> {
         _ => {}
     }
     let data_dir = default_data_dir();
+    if let Cmd::Pair {
+        cmd: PairCmd::Join { .. },
+    } = &args.cmd
+    {
+        return pair_join(&args, &data_dir).await;
+    }
     let sock = args
         .sock
         .clone()
         .unwrap_or_else(|| data_dir.join("daemon.sock"));
-    let (mut rd, mut wr) = open_session(&sock, &data_dir).await?;
+    let (mut rd, mut wr): (
+        Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+        Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
+    ) = match &args.remote {
+        None => {
+            let (r, w) = open_session(&sock, &data_dir).await?;
+            (Box::new(r), Box::new(w))
+        }
+        Some(profile) => open_remote(profile, &data_dir).await?,
+    };
 
     let call = build_call(&args.cmd)?;
+    if matches!(args.cmd, Cmd::Autotype { .. }) {
+        // 倒數在 daemon 端跑，stderr 提示讓使用者抓時機切視窗
+        eprintln!("AutoType: 準備倒數 3 秒後注入按鍵，請切到目標視窗");
+    }
     let rid = 1u64;
     write_client(&mut wr, &ClientMsg::Invoke { rid, call })
         .await
@@ -354,6 +423,184 @@ fn proto_mismatch(peer: u16) -> Option<String> {
     } else {
         None
     }
+}
+
+/// `pair join` 後的跨機身分檔：remotes/<profile>.json
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RemoteProfile {
+    url: String,
+    pin: String,
+    token: SessionToken,
+    #[serde(default)]
+    wake: Option<String>,
+}
+
+fn split_url(url: &str) -> Result<(String, u16), String> {
+    let rest = url
+        .strip_prefix("https://")
+        .ok_or_else(|| "需要 https://".to_string())?;
+    let (host, port) = rest
+        .rsplit_once(':')
+        .ok_or_else(|| "需要 :port".to_string())?;
+    Ok((
+        host.to_string(),
+        port.parse::<u16>()
+            .map_err(|e: std::num::ParseIntError| e.to_string())?,
+    ))
+}
+
+async fn pair_join(args: &Args, data_dir: &Path) -> Result<(), String> {
+    let PairCmd::Join {
+        url,
+        pin,
+        code,
+        name,
+        wake,
+        profile,
+    } = (match &args.cmd {
+        Cmd::Pair { cmd } => cmd,
+        _ => unreachable!(),
+    })
+    else {
+        unreachable!()
+    };
+    let (host, port) = split_url(url)?;
+    let stream = bw_btp::tls::connect(&host, port, pin)
+        .await
+        .map_err(|e| format!("TLS 連線失敗（pin 正確？）：{e}"))?;
+    let (mut rd, mut wr) = tokio::io::split(stream);
+    let fresh = Uuid::new_v4().to_string();
+    write_client(
+        &mut wr,
+        &ClientMsg::Hello {
+            version: ProtoVersion(PROTO_VERSION),
+            auth: Auth::Enroll {
+                pairing: fresh.clone(),
+                display_name: format!("remote:{name}"),
+                pair_code: Some(code.clone()),
+            },
+            wants: vec![],
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    match read_server(&mut rd).await.map_err(|e| e.to_string())? {
+        ServerMsg::Welcome { .. } => {}
+        ServerMsg::Reply {
+            outcome: Err(e), ..
+        } => return Err(format!("join 被拒：{e}")),
+        other => return Err(format!("預期 Welcome，got {other:?}")),
+    }
+    let dir = data_dir.join("remotes");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let prof = RemoteProfile {
+        url: url.clone(),
+        pin: pin.clone(),
+        token: fresh,
+        wake: wake.clone(),
+    };
+    let path = dir.join(format!("{profile}.json"));
+    std::fs::write(&path, serde_json::to_vec_pretty(&prof).unwrap()).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    println!("paired → --remote {profile} ({})", path.display());
+    Ok(())
+}
+
+/// 跨機連線：HubOffline 快速失敗 + 可選 wake 信令後重試一次（§1.2）
+async fn open_remote(
+    profile: &str,
+    data_dir: &Path,
+) -> Result<
+    (
+        Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+        Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
+    ),
+    String,
+> {
+    let path = data_dir.join("remotes").join(format!("{profile}.json"));
+    let prof: RemoteProfile =
+        serde_json::from_slice(&std::fs::read(&path).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    let (host, port) = split_url(&prof.url)?;
+    let last_ok_path = data_dir.join(format!("remote_{profile}_last_ok"));
+
+    for attempt in 0..2u8 {
+        match try_remote(&host, port, &prof).await {
+            Ok(pair) => {
+                let _ = std::fs::write(&last_ok_path, chrono_now_ms().to_string());
+                return Ok(pair);
+            }
+            Err(e) => {
+                // 第一次失敗：發喚醒信令（endpoint 即能力憑證），稍後重試一次
+                if attempt == 0
+                    && let Some(wake) = &prof.wake
+                {
+                    let body = "bitward wake".to_string();
+                    let url = wake.clone();
+                    tokio::spawn(async move {
+                        let _ = reqwest::Client::new().post(url).body(body).send().await;
+                    });
+                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                    continue;
+                }
+                let seen = std::fs::read_to_string(&last_ok_path).unwrap_or_default();
+                return Err(format!(
+                    "HubOffline（last_seen={}）：{e}",
+                    if seen.is_empty() { "never" } else { &seen }
+                ));
+            }
+        }
+    }
+    unreachable!()
+}
+
+async fn try_remote(
+    host: &str,
+    port: u16,
+    prof: &RemoteProfile,
+) -> Result<
+    (
+        Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+        Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
+    ),
+    String,
+> {
+    let stream = bw_btp::tls::connect(host, port, &prof.pin)
+        .await
+        .map_err(|e| e.to_string())?;
+    let (mut rd, mut wr) = tokio::io::split(stream);
+    write_client(
+        &mut wr,
+        &ClientMsg::Hello {
+            version: ProtoVersion(PROTO_VERSION),
+            auth: Auth::Session {
+                token: prof.token.clone(),
+            },
+            wants: vec![],
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    match read_server(&mut rd).await.map_err(|e| e.to_string())? {
+        ServerMsg::Welcome { proto, .. } => {
+            if let Some(s) = proto_mismatch(proto) {
+                return Err(s);
+            }
+            Ok((Box::new(rd), Box::new(wr)))
+        }
+        other => Err(format!("expected Welcome, got {other:?}")),
+    }
+}
+
+fn chrono_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
 }
 
 fn build_call(cmd: &Cmd) -> Result<Call, String> {
@@ -420,6 +667,10 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             view: View::Reveal,
         }),
         Cmd::Totp { id } => Call::Use(UseCall::TotpCode { id: parse_id(id)? }),
+        Cmd::Autotype { id, template } => Call::Fill(FillCall::AutoType {
+            id: parse_id(id)?,
+            template: template.clone(),
+        }),
         Cmd::Audit { tail, verify } => {
             if *verify {
                 Call::Agent(AgentCall::AuditVerify)
@@ -515,6 +766,16 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                 pick,
             })
         }
+        Cmd::Pair { cmd } => match cmd {
+            PairCmd::Start { name, grant, ttl } => Call::Auth(AuthCall::PairStart {
+                name: name.clone(),
+                grant: grant.clone(),
+                ttl_secs: *ttl,
+            }),
+            PairCmd::List => Call::Auth(AuthCall::PairList),
+            PairCmd::Revoke { code } => Call::Auth(AuthCall::PairRevoke { code: code.clone() }),
+            PairCmd::Join { .. } => unreachable!("join 不經 daemon 分派"),
+        },
         Cmd::SignOut => Call::Auth(AuthCall::SignOut),
         Cmd::Tag { cmd } => Call::Vault(VaultCall::Overlay {
             id: parse_id(match cmd {
@@ -645,6 +906,8 @@ fn print_response(resp: &Response, json: bool) {
         Response::Audit(rows) => {
             println!("{}", serde_json::to_string_pretty(rows).unwrap());
         }
+        // AutoType 等計數類結果：扁平 JSON，無外殼（jq 直接命中 .typed）
+        Response::Json(v) => println!("{}", serde_json::to_string_pretty(v).unwrap()),
         Response::Version(s) => println!("{s}"),
         Response::Profile(p) => println!("{}", json!(p)),
         Response::Ok => println!("ok"),
@@ -655,6 +918,7 @@ fn print_response(resp: &Response, json: bool) {
         Response::Conflicts(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap()),
         Response::Sessions(v) => println!("{}", serde_json::to_string_pretty(v).unwrap()),
         Response::DupGroups(g) => println!("{}", serde_json::to_string_pretty(g).unwrap()),
+        Response::PairInfo(p) => println!("{}", serde_json::to_string_pretty(p).unwrap()),
         // agentpath.sh 依賴的扁平形狀：{"token","session","expires_at_ms"}
         Response::AgentSession {
             token,

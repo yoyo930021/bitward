@@ -10,6 +10,7 @@ members = [
     "crates/bw-vault",
     "crates/bw-sync",
     "crates/bw-agent",
+    "crates/bw-autotype",
     "bins/bitwarderd",
     "bins/bitward",
     "bins/bitward-mcp",
@@ -34,6 +35,7 @@ bw-btp = { path = "crates/bw-btp" }
 bw-vault = { path = "crates/bw-vault" }
 bw-sync = { path = "crates/bw-sync" }
 bw-agent = { path = "crates/bw-agent" }
+bw-autotype = { path = "crates/bw-autotype" }
 
 # 序列化與型別
 serde = { version = "1", features = ["derive"] }

@@ -603,20 +603,32 @@ fn query_uri_host_anchoring() {
 
     // 整頁 URL 查詢：精確 host ＋ 子網域都命中，notgithub.com 不得誤入
     let hits = store
-        .query(&Query { uri: Some("https://github.com/login?x=1".into()), ..Default::default() })
+        .query(&Query {
+            uri: Some("https://github.com/login?x=1".into()),
+            ..Default::default()
+        })
         .unwrap();
     let ids: Vec<_> = hits.iter().map(|h| h.id).collect();
-    assert!(ids.contains(&gh) && ids.contains(&sub) && !ids.contains(&evil), "{ids:?}");
+    assert!(
+        ids.contains(&gh) && ids.contains(&sub) && !ids.contains(&evil),
+        "{ids:?}"
+    );
 
     // 子網域後綴命中（gist.github.com ∈ github.com）
     let hits = store
-        .query(&Query { uri: Some("github.com".into()), ..Default::default() })
+        .query(&Query {
+            uri: Some("github.com".into()),
+            ..Default::default()
+        })
         .unwrap();
     assert_eq!(hits.len(), 2);
 
     // 子字串不再誤命中：notgithub.com 不屬於 github.com
     let hits = store
-        .query(&Query { uri: Some("otgithub.com".into()), ..Default::default() })
+        .query(&Query {
+            uri: Some("otgithub.com".into()),
+            ..Default::default()
+        })
         .unwrap();
     assert!(hits.is_empty());
 }

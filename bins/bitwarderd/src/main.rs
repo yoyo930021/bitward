@@ -31,6 +31,15 @@ struct Args {
     /// BTP unix socket 路徑（預設 <data_dir>/daemon.sock）
     #[arg(long)]
     sock: Option<PathBuf>,
+    /// 跨機 BTP over TLS 監聽位址（self-signed，pin 由 pair start 顯示）
+    #[arg(long)]
+    listen: Option<String>,
+    /// ntfy 信令 URL（核准/喚醒通知；只傳不透明信令）
+    #[arg(long)]
+    ntfy: Option<String>,
+    /// macOS：在 app group 容器內多綁一個 BTP socket（provider extension 用）
+    #[arg(long)]
+    push_app_group: Option<String>,
 }
 
 fn default_data_dir() -> PathBuf {
@@ -55,7 +64,7 @@ async fn main() -> Result<(), String> {
     let sock = args.sock.unwrap_or_else(|| data_dir.join("daemon.sock"));
     std::fs::create_dir_all(data_dir.join("run")).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(&sock);
-    let hub = Hub::open(&data_dir).await?;
+    let hub = Hub::open(&data_dir, args.ntfy.clone()).await?;
     let listener = UnixListener::bind(&sock).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
@@ -64,6 +73,72 @@ async fn main() -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
     tracing::info!(sock = %sock.display(), "bitwarderd listening");
+
+    // 跨機 TLS listener（§1.2）：身分持久化 ⇒ pin 穩定
+    if let Some(addr) = args.listen.clone() {
+        let id = bw_btp::tls::load_or_create(&data_dir).map_err(|e| e.to_string())?;
+        let _ = hub.tls_pin.set(id.spki_pin.clone());
+        let acceptor = tokio_rustls::TlsAcceptor::from(bw_btp::tls::server_config(&id).unwrap());
+        let tcp = tokio::net::TcpListener::bind(&addr)
+            .await
+            .map_err(|e| e.to_string())?;
+        tracing::info!(%addr, pin = %id.spki_pin, "bitwarderd TLS listening");
+        let hub = hub.clone();
+        tokio::spawn(async move {
+            loop {
+                match tcp.accept().await {
+                    Ok((sock, _)) => {
+                        let hub = hub.clone();
+                        let acceptor = acceptor.clone();
+                        tokio::spawn(async move {
+                            match bw_btp::tls::accept(&acceptor, sock).await {
+                                Ok(tls) => {
+                                    let (rd, wr) = tokio::io::split(tls);
+                                    if let Err(e) = serve_conn(rd, wr, hub, None).await {
+                                        tracing::debug!(err = %e, "tls conn ended");
+                                    }
+                                }
+                                Err(e) => tracing::warn!(err = %e, "TLS handshake failed"),
+                            }
+                        });
+                    }
+                    Err(e) => tracing::warn!(err = %e, "tcp accept"),
+                }
+            }
+        });
+    }
+
+    // macOS provider：app group 容器內多綁一條 UDS（§1.4，Xcode worker 依賴）
+    #[cfg(target_os = "macos")]
+    if let Some(group) = args.push_app_group.clone() {
+        let base = dirs::home_dir().unwrap_or_default();
+        let group_dir = base.join("Library/Group Containers").join(&group);
+        if std::fs::create_dir_all(&group_dir).is_ok() {
+            let gsock = group_dir.join("daemon.sock");
+            let _ = std::fs::remove_file(&gsock);
+            match UnixListener::bind(&gsock) {
+                Ok(gl) => {
+                    tracing::info!(sock = %gsock.display(), "bitwarderd app-group socket listening");
+                    let hub = hub.clone();
+                    tokio::spawn(async move {
+                        loop {
+                            if let Ok((stream, _)) = gl.accept().await {
+                                let hub = hub.clone();
+                                tokio::spawn(async move {
+                                    let uid = bw_btp::peer_uid_from_fd(stream.as_raw_fd()).ok();
+                                    let (rd, wr) = stream.into_split();
+                                    if let Err(e) = serve_conn(rd, wr, hub, uid).await {
+                                        tracing::debug!(err = %e, "group conn ended");
+                                    }
+                                });
+                            }
+                        }
+                    });
+                }
+                Err(e) => tracing::warn!(err = %e, "app-group socket bind failed"),
+            }
+        }
+    }
 
     // drain：觸發式 + 5 秒兜底輪（離線重試與租約過期回收）
     {
@@ -135,23 +210,37 @@ async fn main() -> Result<(), String> {
         let (stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
         let hub = hub.clone();
         tokio::spawn(async move {
-            if let Err(e) = serve_conn(stream, hub).await {
+            let uid = bw_btp::peer_uid_from_fd(stream.as_raw_fd()).ok();
+            let (rd, wr) = stream.into_split();
+            if let Err(e) = serve_conn(rd, wr, hub, uid).await {
                 tracing::debug!(err = %e, "conn ended");
             }
         });
     }
 }
 
-async fn serve_conn(stream: tokio::net::UnixStream, hub: Arc<Hub>) -> Result<(), WtpError> {
-    let peer_uid = bw_btp::peer_uid_from_fd(stream.as_raw_fd()).map_err(|_| WtpError::Denied {
-        grant_gap: "peer uid unavailable".into(),
-    })?;
-    if peer_uid != unsafe { libc::geteuid() } {
+type BoxRd = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+type BoxWr = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
+
+async fn serve_conn<R, W>(
+    rd: R,
+    wr: W,
+    hub: Arc<Hub>,
+    local_uid: Option<u32>,
+) -> Result<(), WtpError>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let mut rd: BoxRd = Box::new(rd);
+    let mut wr: BoxWr = Box::new(wr);
+    if let Some(uid) = local_uid
+        && uid != unsafe { libc::geteuid() }
+    {
         return Err(WtpError::Denied {
             grant_gap: "peer uid != daemon uid".into(),
         });
     }
-    let (mut rd, mut wr) = stream.into_split();
     let hello = tokio::time::timeout(std::time::Duration::from_secs(10), read_client(&mut rd))
         .await
         .map_err(|_| WtpError::RetryAfter { ms: 0 })?
@@ -177,20 +266,47 @@ async fn serve_conn(stream: tokio::net::UnixStream, hub: Arc<Hub>) -> Result<(),
         Auth::Enroll {
             display_name,
             pairing,
+            pair_code,
         } => {
-            // 本機同 uid 的 Enroll = Interactive 全權（§5.4 佔位過渡為正式語意）
+            // 本機 UDS 的 Enroll = Interactive 全權；TLS 連線必須帶配對碼（§1.2）
             let token = if pairing.is_empty() {
                 Uuid::new_v4().to_string()
             } else {
                 pairing.clone()
             };
-            hub.new_session(
-                token,
-                crate::agent::SessionKind::Interactive,
-                bw_agent::GrantSet::default_full(),
-                None,
-                serde_json::json!({"kind": "local", "uid": peer_uid, "name": display_name}),
-            )
+            match pair_code {
+                None => {
+                    if local_uid.is_none() {
+                        return Err(WtpError::Denied {
+                            grant_gap: "跨機連線需要配對碼".into(),
+                        });
+                    }
+                    hub.new_session(
+                        token,
+                        crate::agent::SessionKind::Interactive,
+                        bw_agent::GrantSet::default_full(),
+                        None,
+                        serde_json::json!({"kind": "local", "uid": local_uid, "name": display_name}),
+                    )
+                }
+                Some(code) => match hub.consume_pairing(&code) {
+                    Some(spec) => {
+                        let expires = hub.store.now_ms() + spec.ttl_secs * 1000;
+                        hub.new_session(
+                            token,
+                            crate::agent::SessionKind::Device,
+                            spec.grants,
+                            Some(expires),
+                            serde_json::json!({"kind": "device", "name": spec.name}),
+                        )
+                    }
+                    None => {
+                        return Err(WtpError::Denied {
+                            grant_gap: "配對碼無效或已過期".into(),
+                        });
+                    }
+                },
+            }
         }
         Auth::Session { token } => {
             hub.sessions

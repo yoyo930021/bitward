@@ -63,6 +63,12 @@ pub struct Hub {
     pub sessions: Arc<Mutex<HashMap<String, Arc<crate::agent::LiveSession>>>>,
     /// 等待人工核准的請求（§2.3 Enrollment/Approval）
     pub pending: Mutex<HashMap<bw_proto::ApprovalId, crate::agent::PendingApproval>>,
+    /// 未消耗的一次性配對碼（§1.2）
+    pub pairings: Mutex<HashMap<String, crate::agent::PairingSpec>>,
+    /// ntfy 信令 URL（None = 不發）；只傳不透明信令，明文永不上通道
+    pub ntfy_url: Option<String>,
+    /// TLS listener 啟動後快取的 SPKI pin（pair start 顯示用）
+    pub tls_pin: std::sync::OnceLock<String>,
 }
 
 pub type DispatchResult = Result<Response, WtpError>;
@@ -80,7 +86,7 @@ fn drift(detail: impl std::fmt::Display) -> WtpError {
 }
 
 impl Hub {
-    pub async fn open(data_dir: &Path) -> Result<Arc<Hub>, String> {
+    pub async fn open(data_dir: &Path, ntfy_url: Option<String>) -> Result<Arc<Hub>, String> {
         std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
         #[cfg(unix)]
         {
@@ -127,6 +133,9 @@ impl Hub {
             last_sync_ms: std::sync::atomic::AtomicU64::new(0),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             pending: Mutex::new(HashMap::new()),
+            pairings: Mutex::new(HashMap::new()),
+            ntfy_url,
+            tls_pin: std::sync::OnceLock::new(),
         });
         if let Some(a) = account {
             let client = std::sync::Arc::new(
@@ -136,6 +145,25 @@ impl Hub {
                 client.set_access_token(&t).await;
             }
             hub.server.write().await.replace(ServerHandle { client });
+        }
+        // 重啟不踢已配對裝置：從持久層重建活 session（§2.3，token 即 id）
+        for row in hub.store.session_list().unwrap_or_default() {
+            if row.state != bw_store::SessionState::Active {
+                continue;
+            }
+            let kind = match row.principal.get("kind").and_then(Value::as_str) {
+                Some("agent") => crate::agent::SessionKind::Agent,
+                Some("device") => crate::agent::SessionKind::Device,
+                _ => crate::agent::SessionKind::Interactive,
+            };
+            let parsed: bw_agent::GrantSet =
+                serde_json::from_value(row.grants.clone()).unwrap_or_default();
+            let grants = if parsed.0.is_empty() && kind == crate::agent::SessionKind::Interactive {
+                bw_agent::GrantSet::default_full()
+            } else {
+                parsed
+            };
+            hub.restore_session(row, kind, grants);
         }
         Ok(hub)
     }
@@ -295,6 +323,13 @@ impl Hub {
                 let _ = std::fs::remove_file(self.data_dir.join("account.json"));
                 Ok(Response::Status(self.status_info().await))
             }
+            Call::Auth(AuthCall::PairStart {
+                name,
+                grant,
+                ttl_secs,
+            }) => self.pair_start(name, grant, *ttl_secs),
+            Call::Auth(AuthCall::PairList) => Ok(self.pair_list()),
+            Call::Auth(AuthCall::PairRevoke { code }) => self.pair_revoke_code(code),
             Call::Auth(AuthCall::Lock) => {
                 let epoch = self.machine.lock(LockReason::User);
                 let n = self.store.sessions_revoke_before(epoch.0).unwrap_or(0);
@@ -372,6 +407,9 @@ impl Hub {
                 Ok(resp)
             }
             Call::Use(UseCall::Run { plan }) => self.run_plan(sess, plan).await,
+            Call::Fill(FillCall::AutoType { id, template }) => {
+                self.autotype(*id, template.as_deref()).await
+            }
             Call::Fill(_) => Err(WtpError::Unsupported {
                 feature: "P1：fill 在 P4".into(),
             }),
@@ -573,7 +611,11 @@ impl Hub {
             Some(m) => m,
             None => return Ok(None),
         };
-        if view == View::Metadata || !self.machine.is_unlocked() {
+        // 請求 secret 級視窗但未解鎖：明確回 Locked，不靜默降級成 metadata
+        if view != View::Metadata && !self.machine.is_unlocked() {
+            return Err(WtpError::Locked);
+        }
+        if view == View::Metadata {
             return Ok(Some(ItemView::metadata(base)));
         }
         let row = self.store.item(id).map_err(denied)?;
@@ -604,6 +646,58 @@ impl Hub {
             View::Metadata => ItemView::metadata(base),
         };
         Ok(Some(v))
+    }
+
+    /// AutoType：明文只進 blocking 執行緒化作按鍵事件，回應僅含計數（§2.1 出口紀律）。
+    /// 倒數 + 鍵距全程 ~3s，放 `spawn_blocking` 餵養事件迴圈不被餓死。
+    async fn autotype(&self, id: ItemId, template: Option<&str>) -> DispatchResult {
+        if !self.machine.is_unlocked() {
+            return Err(WtpError::Locked);
+        }
+        let tpl =
+            bw_autotype::TypeTemplate::parse(template.unwrap_or(bw_autotype::DEFAULT_TEMPLATE))
+                .map_err(denied)?;
+        let row = self.store.item(id).map_err(denied)?;
+        let row = row.ok_or(WtpError::NotFound)?;
+        let (username, password) = self
+            .machine
+            .with_keys(|kb| {
+                let dec = |field: &str| {
+                    row.enc_cipher
+                        .pointer(&format!("/login/{field}"))
+                        .and_then(Value::as_str)
+                        .and_then(|e| bw_crypto::decrypt(kb.user_key(), &e.to_string()).ok())
+                };
+                (
+                    Zeroizing::new(dec("username").unwrap_or_default()),
+                    Zeroizing::new(dec("password").unwrap_or_default()),
+                )
+            })
+            // 先過 is_unlocked 後仍失敗＝中途被鎖：語意同 Locked（totp 同款處理）
+            .map_err(|_| WtpError::Locked)?;
+        if username.is_empty() && password.is_empty() {
+            return Err(denied("item 無 username/password 可打字"));
+        }
+        let stats = tokio::task::spawn_blocking(move || -> Result<_, WtpError> {
+            let mut sink = bw_autotype::MacSink::new().ok_or_else(|| WtpError::Unsupported {
+                feature: "按鍵注入不可用（非 macOS 或 CGEventSource 建立失敗）".into(),
+            })?;
+            bw_autotype::countdown(
+                |rem| {
+                    tracing::info!(remaining_secs = rem, "AutoType 倒數：請切到目標視窗");
+                    eprintln!("autotype: {rem} 秒後開始打字，請切到目標視窗");
+                },
+                std::thread::sleep,
+            );
+            Ok(bw_autotype::emit(&mut sink, &tpl, &username, &password))
+        })
+        .await
+        // 外層是 JoinError（任務掛掉）→ Denied；內層已是 WtpError（如 sink 不可用）原樣上拋
+        .map_err(denied)??;
+        Ok(Response::Json(json!({
+            "typed": stats.typed,
+            "fields": stats.fields,
+        })))
     }
 
     fn totp(&self, id: ItemId) -> DispatchResult {
@@ -765,6 +859,9 @@ fn action_tag(c: &Call) -> String {
         Call::Auth(AuthCall::Unlock { .. }) => "Auth.Unlock",
         Call::Auth(AuthCall::Lock) => "Auth.Lock",
         Call::Auth(AuthCall::SignOut) => "Auth.SignOut",
+        Call::Auth(AuthCall::PairStart { .. }) => "Auth.PairStart",
+        Call::Auth(AuthCall::PairList) => "Auth.PairList",
+        Call::Auth(AuthCall::PairRevoke { .. }) => "Auth.PairRevoke",
         Call::Auth(AuthCall::WhoAmI) => "Auth.WhoAmI",
         Call::Vault(VaultCall::List { view, .. }) => return format!("Vault.List.{view:?}"),
         Call::Vault(VaultCall::Get { view, .. }) => return format!("Vault.Get.{view:?}"),
