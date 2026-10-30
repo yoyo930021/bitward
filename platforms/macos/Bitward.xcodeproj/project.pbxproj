@@ -13,6 +13,7 @@
 		59CBAD684FE91E440E48AA56 /* BitwardGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E75116995D1D6A3D6ECC3E3 /* BitwardGroup.swift */; };
 		645807D23E2C009A86E2575A /* BTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25C3BDA637D74D9057065DED /* BTPClient.swift */; };
 		82BD21D47DD27EFDD277B291 /* ProviderViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 974EF14296AB1177D31C53AD /* ProviderViewController.swift */; };
+		9658780B3D2890E47C590F00 /* BitwardProvider.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = EBAA0AE3E2826BF329591F74 /* BitwardProvider.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -24,6 +25,20 @@
 			remoteInfo = BitwardProvider;
 		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		9547A3339CFA64A5A35A3975 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				9658780B3D2890E47C590F00 /* BitwardProvider.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		0A7B5F02CAB65867EBC45312 /* Bitward.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Bitward.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -120,7 +135,7 @@
 			buildConfigurationList = 8B8A5CFB97450C7D2427A2FC /* Build configuration list for PBXNativeTarget "Bitward" */;
 			buildPhases = (
 				BD606DC7845B367143C5D1CC /* Sources */,
-				B42973DB65992D92D9A2941B /* Embed and ad-hoc sign */,
+				9547A3339CFA64A5A35A3975 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
@@ -144,12 +159,12 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					6DD3C5585C1F077AEFCFB47B = {
-						DevelopmentTeam = "";
-						ProvisioningStyle = Manual;
+						DevelopmentTeam = 7Z94595PW7;
+						ProvisioningStyle = Automatic;
 					};
 					7C4C439A9D12C2B6A276BB1C = {
-						DevelopmentTeam = "";
-						ProvisioningStyle = Manual;
+						DevelopmentTeam = 7Z94595PW7;
+						ProvisioningStyle = Automatic;
 					};
 				};
 			};
@@ -172,29 +187,6 @@
 			);
 		};
 /* End PBXProject section */
-
-/* Begin PBXShellScriptBuildPhase section */
-		B42973DB65992D92D9A2941B /* Embed and ad-hoc sign */ = {
-			isa = PBXShellScriptBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputFileListPaths = (
-			);
-			inputPaths = (
-			);
-			name = "Embed and ad-hoc sign";
-			outputFileListPaths = (
-			);
-			outputPaths = (
-				"$(BUILT_PRODUCTS_DIR)/$(PRODUCT_NAME).app/Contents/PlugIns/BitwardProvider.appex/Contents/_CodeSignature",
-				"$(BUILT_PRODUCTS_DIR)/$(PRODUCT_NAME).app/Contents/_CodeSignature",
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "set -euo pipefail\nAPP=\"${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app\"\n# codesign --strict 要求 Resources 目錄存在，否則 \"code has no resources\"。\nmkdir -p \"${APP}/Contents/Resources\" \\\n  \"${BUILT_PRODUCTS_DIR}/BitwardProvider.appex/Contents/Resources\"\nrm -rf \"${APP}/Contents/PlugIns/BitwardProvider.appex\"\nmkdir -p \"${APP}/Contents/PlugIns\"\nditto \"${BUILT_PRODUCTS_DIR}/BitwardProvider.appex\" \\\n  \"${APP}/Contents/PlugIns/BitwardProvider.appex\"\ncodesign --force --sign - --timestamp=none \\\n  --entitlements \"${SRCROOT}/BitwardProvider/BitwardProvider.entitlements\" \\\n  \"${APP}/Contents/PlugIns/BitwardProvider.appex\"\ncodesign --force --sign - --timestamp=none \\\n  --entitlements \"${SRCROOT}/Bitward/Bitward.entitlements\" \\\n  \"${APP}\"\n";
-		};
-/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		BD606DC7845B367143C5D1CC /* Sources */ = {
@@ -312,15 +304,13 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
-				CODE_SIGNING_ALLOWED = NO;
-				CODE_SIGN_IDENTITY = "-";
-				CODE_SIGN_STYLE = Manual;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 7Z94595PW7;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
@@ -334,7 +324,6 @@
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
@@ -375,15 +364,13 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
-				CODE_SIGNING_ALLOWED = NO;
-				CODE_SIGN_IDENTITY = "-";
-				CODE_SIGN_STYLE = Manual;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 7Z94595PW7;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -404,7 +391,6 @@
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
