@@ -231,6 +231,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
 				PRODUCT_BUNDLE_IDENTIFIER = io.bitward.dev;
 				PRODUCT_NAME = Bitward;
 				PROVISIONING_PROFILE_SPECIFIER = "Bitward Mac Dev";
@@ -412,6 +413,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
 				PRODUCT_BUNDLE_IDENTIFIER = io.bitward.dev;
 				PRODUCT_NAME = Bitward;
 				PROVISIONING_PROFILE_SPECIFIER = "Bitward Mac Dev";

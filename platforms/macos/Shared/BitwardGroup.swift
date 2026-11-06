@@ -31,3 +31,19 @@ enum BitwardGroup {
         return fresh
     }
 }
+
+/// WebAuthn 線格式：base64url（RFC 4648 §5，無填充）。
+extension Data {
+    var b64url: String {
+        base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    init?(b64url: String) {
+        var s = b64url.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        s += String(repeating: "=", count: (4 - s.count % 4) % 4)
+        self.init(base64Encoded: s)
+    }
+}

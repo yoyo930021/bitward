@@ -168,6 +168,89 @@ final class BTPClient {
         return true
     }
 
+    // MARK: - Passkey（Call::Passkey，worker 契約幀形）
+
+    /// GetPasskeys：回 (credentialID, userHandle, userName) 全為 b64url 字串。
+    func passkeys(rpID: String?) throws -> [(credentialId: String, userHandle: String, userName: String, rpId: String)] {
+        try ensureEnrolled()
+        let call: [String: Any] = ["Passkey": ["GetPasskeys": ["rp_id": rpID as Any]]]
+        let response = try invoke(rid: 7, call: call)
+        guard let arr = response["Passkeys"] as? [[String: Any]] else { return [] }
+        return arr.compactMap { row in
+            guard let cid = row["credential_id"] as? String else { return nil }
+            return (cid, row["user_handle"] as? String ?? "", row["user_name"] as? String ?? "",
+                    row["rp_id"] as? String ?? "")
+        }
+    }
+
+    /// RegisterPasskey → attestation object（b64url）＋新 credential id。
+    func registerPasskey(rpID: String, challenge: String, userName: String,
+                         userHandle: String, displayName: String) throws -> (credentialId: String, attestationObject: String) {
+        try ensureEnrolled()
+        let call: [String: Any] = ["Passkey": ["RegisterPasskey": [
+            "rp_id": rpID, "challenge": challenge, "user_name": userName,
+            "user_handle": userHandle, "display_name": displayName, "item_id": NSNull(),
+        ]]]
+        let response = try invoke(rid: 8, call: call)
+        guard let att = response["PasskeyAttestation"] as? [String: Any],
+              let cid = att["credential_id"] as? String, let obj = att["attestation_object"] as? String else {
+            throw BTPError.protocolError("Reply Ok is not PasskeyAttestation")
+        }
+        return (cid, obj)
+    }
+
+    /// AssertPasskey → 簽名材料（全 b64url）。challenge 傳的是 b64url(clientDataHash)
+    /// ——Apple 紀律：provider 以 clientDataHash raw bytes 充當 challenge。
+    func assertPasskey(credentialId: String, challenge: String, rpID: String) throws -> (authData: String, clientDataJSON: String, signature: String) {
+        try ensureEnrolled()
+        let call: [String: Any] = ["Passkey": ["AssertPasskey": [
+            "credential_id": credentialId, "challenge": challenge, "rp_id": rpID,
+        ]]]
+        let response = try invoke(rid: 9, call: call)
+        guard let a = response["PasskeyAssertion"] as? [String: Any],
+              let ad = a["authenticator_data"] as? String,
+              let cd = a["client_data_json"] as? String,
+              let sig = a["signature"] as? String else {
+            throw BTPError.protocolError("Reply Ok is not PasskeyAssertion")
+        }
+        return (ad, cd, sig)
+    }
+
+    /// 授權治理類（ListPending／Approve）：批准中心用。
+    func listPending() throws -> [(id: String, summary: String)] {
+        try invoke(rid: 5, call: ["Agent": ["ListPending": NSNull()]])
+        // Response::Sessions([{id, summary}])
+        guard let arr = lastResponse?["Sessions"] as? [[String: Any]] else { return [] }
+        return arr.compactMap { row in
+            guard let id = row["id"] as? String else { return nil }
+            return (id, row["summary"] as? String ?? "")
+        }
+    }
+
+    func approve(id: String) throws {
+        _ = try invoke(rid: 6, call: ["Agent": ["Approve": ["id": id, "grants": NSNull()]]])
+    }
+
+    func deny(id: String) throws {
+        _ = try invoke(rid: 10, call: ["Agent": ["Deny": ["id": id]]])
+    }
+
+    private var lastResponse: [String: Any]?
+
+    /// 通用 Invoke：回傳 Reply outcome 的 Ok 內容（rid 由呼叫端分配，避開清單流 1/2/3/4）。
+    @discardableResult
+    func invoke(rid: Int, call: [String: Any]) throws -> [String: Any] {
+        try ensureEnrolled()
+        try sendJSON(["Invoke": ["rid": rid, "call": call]])
+        let reply = try readFrames(until: { frame in
+            guard let invoke = frame["Reply"] as? [String: Any], let id = invoke["rid"] as? Int else { return false }
+            return id == rid
+        })
+        let response = try response(fromReply: reply)
+        lastResponse = response
+        return response
+    }
+
     /// 凍結流：Hello(Enroll) → List(Metadata by uri) → 取首筆 → Get(Reveal)。
     func autofill(uri: String) throws -> BTPCandidate {
         let items = try list(uri: uri, limit: 5)

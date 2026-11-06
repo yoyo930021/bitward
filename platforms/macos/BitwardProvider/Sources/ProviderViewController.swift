@@ -14,6 +14,30 @@ final class ProviderViewController: ASCredentialProviderViewController {
     }
 
     override func provideCredentialWithoutUserInteraction(for credentialRequest: any ASCredentialRequest) {
+        if #available(macOS 14.0, *), let request = credentialRequest as? ASPasskeyCredentialRequest {
+            // Passkey 斷言靜默路徑：daemon 持鑰現簽，thin 端只搬運材料。
+            guard let identity = request.credentialIdentity as? ASPasskeyCredentialIdentity else {
+                extensionContext.cancelRequest(withError: ASExtensionError(.failed))
+                return
+            }
+            let rpID = identity.relyingPartyIdentifier
+            let clientDataHash = request.clientDataHash
+            log.notice("silent passkey rp=\(rpID, privacy: .public)")
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { return }
+                do {
+                    let credential = try Self.assertPasskey(rpID: rpID, clientDataHash: clientDataHash,
+                                                            allowed: identity.credentialID,
+                                                            fallbackHandle: identity.userHandle,
+                                                            fallbackUser: identity.userName)
+                    self.extensionContext.completeAssertionRequest(using: credential, completionHandler: nil)
+                } catch {
+                    log.notice("silent passkey cancel \(String(describing: error), privacy: .public)")
+                    self.extensionContext.cancelRequest(withError: ASExtensionError(.userInteractionRequired))
+                }
+            }
+            return
+        }
         if #available(macOS 15.0, *), let request = credentialRequest as? ASOneTimeCodeCredentialRequest {
             // OTP 走靜默路徑：代碼由 daemon 現算（TotpCode），thin 端不碰 seed。
             let uri = request.credentialIdentity.serviceIdentifier.identifier
@@ -237,6 +261,119 @@ final class ProviderViewController: ASCredentialProviderViewController {
                 self.extensionContext.cancelRequest(withError: ASExtensionError(.userInteractionRequired))
             }
         }
+    }
+
+    /// Passkey 註冊：骨架無確認 UI，直接經 daemon 生成並回 credential
+    /// （批准/UV 確認 UI 屬後續批次；本機 Interactive 連線本來就是「人」）。
+    /// macOS 27 實測：走互動 sheet 路徑會命中系統 Helper 的 AppKit 斷言崩潰
+    /// （NSViewControllerSheetTransition 無宿主窗），而我們的語意本就是自動同意，
+    /// 故優先接 interactonless 入口（macOS 15+），prepareInterface 留作回退。
+    @available(macOS 15.0, *)
+    override func performWithoutUserInteractionIfPossible(passkeyRegistration registrationRequest: ASPasskeyCredentialRequest) {
+        log.notice("passkey registration (interactionless)")
+        runRegistration(registrationRequest)
+    }
+
+    override func prepareInterface(forPasskeyRegistration registrationRequest: any ASCredentialRequest) {
+        guard #available(macOS 14.0, *), let request = registrationRequest as? ASPasskeyCredentialRequest else {
+            extensionContext.cancelRequest(withError: ASExtensionError(.failed))
+            return
+        }
+        log.notice("passkey registration (interactive fallback)")
+        // 不能立即 complete：系統在等「人同意」，搶跑會被判定 user denied。
+        // 給一個確認按鈕（Apple 官方 sample 同形），按下才走 daemon。
+        pendingRegistration = request
+        showRegistrationConfirm()
+    }
+
+    private var pendingRegistration: (any ASCredentialRequest)?
+
+    @MainActor
+    private func showRegistrationConfirm() {
+        view.subviews.forEach { $0.removeFromSuperview() }
+        let label = NSTextField(labelWithString: "要把此站的 passkey 存进 Bitward 吗？")
+        let button = NSButton(title: "储存 passkey", target: self, action: #selector(confirmRegistration))
+        button.bezelStyle = .rounded
+        button.keyEquivalent = "\r"
+        label.translatesAutoresizingMaskIntoConstraints = false
+        button.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(label)
+        view.addSubview(button)
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: view.centerYAnchor, constant: -16),
+            button.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            button.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 10),
+            view.widthAnchor.constraint(equalToConstant: 460),
+            view.heightAnchor.constraint(equalToConstant: 140),
+        ])
+        preferredContentSize = NSSize(width: 460, height: 140)
+    }
+
+    @objc private func confirmRegistration() {
+        guard #available(macOS 14.0, *), let request = pendingRegistration as? ASPasskeyCredentialRequest else {
+            extensionContext.cancelRequest(withError: ASExtensionError(.failed))
+            return
+        }
+        pendingRegistration = nil
+        runRegistration(request)
+    }
+
+    @available(macOS 14.0, *)
+    private func runRegistration(_ request: ASPasskeyCredentialRequest) {
+        guard let identity = request.credentialIdentity as? ASPasskeyCredentialIdentity else {
+            extensionContext.cancelRequest(withError: ASExtensionError(.failed))
+            return
+        }
+        let rpID = identity.relyingPartyIdentifier
+        let clientDataHash = request.clientDataHash
+        let userName = identity.userName
+        let userHandle = identity.userHandle
+        let uv = request.userVerificationPreference.rawValue
+        log.notice("passkey registration rp=\(rpID, privacy: .public) user=\(userName, privacy: .public) uv=\(uv, privacy: .public)")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                let client = try Self.connect(budget: 5.0)
+                let (cid, attestation) = try client.registerPasskey(
+                    rpID: rpID, challenge: clientDataHash.b64url,
+                    userName: userName, userHandle: userHandle.b64url, displayName: userName)
+                guard let credentialID = Data(b64url: cid), let attObj = Data(b64url: attestation) else {
+                    throw BTPError.protocolError("attestation not b64url")
+                }
+                if #available(macOS 14.0, *) {
+                    let credential = ASPasskeyRegistrationCredential(
+                        relyingParty: rpID, clientDataHash: clientDataHash,
+                        credentialID: credentialID, attestationObject: attObj)
+                    self.extensionContext.completeRegistrationRequest(using: credential, completionHandler: { expired in
+                        log.notice("registration completeRequest expired=\(expired)")
+                    })
+                }
+            } catch {
+                log.notice("registration failed \(String(describing: error), privacy: .public)")
+                self.extensionContext.cancelRequest(withError: ASExtensionError(.failed))
+            }
+        }
+    }
+
+    @available(macOS 14.0, *)
+    private static func assertPasskey(rpID: String, clientDataHash: Data, allowed: Data?,
+                                      fallbackHandle: Data?, fallbackUser: String) throws -> ASPasskeyAssertionCredential {
+        let client = try connect(budget: 1.5)
+        let entries = try client.passkeys(rpID: rpID)
+        guard !entries.isEmpty else { throw BTPError.noCredentials }
+        // allowedCredentials 有給就對齐（b64url 比對），否則取首筆。
+        let picked = allowed.flatMap { a in entries.first { $0.credentialId == a.b64url } } ?? entries[0]
+        let (authData, _, signature) = try client.assertPasskey(credentialId: picked.credentialId,
+                                                                challenge: clientDataHash.b64url, rpID: rpID)
+        guard let ad = Data(b64url: authData), let sig = Data(b64url: signature),
+              let cid = Data(b64url: picked.credentialId) else {
+            throw BTPError.protocolError("assertion material not b64url")
+        }
+        let userHandle = Data(b64url: picked.userHandle) ?? fallbackHandle ?? Data()
+        return ASPasskeyAssertionCredential(userHandle: userHandle, relyingParty: rpID,
+                                            signature: sig, clientDataHash: clientDataHash,
+                                            authenticatorData: ad, credentialID: cid)
     }
 
     private static func resolve(uri: String) throws -> BTPCandidate {

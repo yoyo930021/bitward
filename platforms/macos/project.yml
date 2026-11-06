@@ -27,6 +27,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.bitward.dev
         PRODUCT_NAME: Bitward
+        MACOSX_DEPLOYMENT_TARGET: "15.0"
         INFOPLIST_FILE: Bitward/Info.plist
         CODE_SIGN_ENTITLEMENTS: Bitward/Bitward.entitlements
         PROVISIONING_PROFILE_SPECIFIER: Bitward Mac Dev
