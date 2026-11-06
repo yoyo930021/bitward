@@ -222,9 +222,17 @@ pub enum ServerMsg { Welcome{epoch, server: ServerProfile, state, events_from},
                      Reply{rid, outcome}, Event{topic, seq, payload},   // payload 只有 Opaque/Identity 級
                      NeedApproval{..}, Challenge{..} }
 pub enum Call { Auth(..), Vault(..), Use(..), Fill(..), Sync(..), Agent(..), Admin(..), Passkey(..) }
-// Passkey：WebAuthn 三操作（GetPasskeys=Metadata 級；Register/Assert 需 use:passkey，
-// 私鑰用而不讀）。憑證存 Bitwarden cipher 的 login.fido2Credentials[]，
-// keyValue 走 type 2 信封；斷言 counter++ 經 outbox 推回（macOS autofill 契約）。
+// Passkey：WebAuthn 操作（GetPasskeys=Metadata 級，附 public_key=SPKI b64url；
+// Register/Assert 需 use:passkey，私鑰用而不讀）。憑證存 Bitwarden cipher 的
+// login.fido2Credentials[]，keyValue 走 type 2 信封：軟體流明文=32B 標量 b64
+// （authenticationType=enterprise）；SE 流明文=DER SPKI b64url（Swift 在 appex
+// 以 Secure Enclave 生物綁定金鑰生成，authenticationType=platform-aaguid+aaguid，
+// UV 由金鑰本身強制）。SE 流註冊/斷言各拆兩步事務解金鑰進程邊界：
+// BeginRegister(簽發 credential id 作 SecKey tag)→FinishRegister(交回 SPKI 轉
+// COSE 出 attestation)；BeginAssert(回 authData+client_data_hash 回顯，counter
+// 只暫存)→FinishAssert(驗 `authData‖hash` DER 簽名，過則 counter 持久化經
+// outbox 推回、敗則 Denied counter 不動)。attestation/assertion authData 恆含
+// BE|BS flags（Apple provider 強制，缺失=系統丟棄憑證）。macOS autofill 契約。
 pub enum WtpError { StaleEpoch, Locked, NeedsApproval, ApprovalExpired, Denied{grant_gap},
                     NotFound, HubOffline{last_seen},
                     Conflict{ours,theirs}, Unsupported{feature}, ServerDrift, RetryAfter }

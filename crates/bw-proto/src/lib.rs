@@ -272,8 +272,10 @@ pub enum VaultCall {
 }
 
 /// WebAuthn passkey 操作（macOS autofill 契約 §1）：金鑰與業務全在 daemon，
-/// Swift 端只做翻譯。GetPasskeys 是 Metadata 級（回傳不含任何密鑰材料）；
-/// Register/Assert 需取用私鑰（授權分級見 agent §2.1 表）。
+/// Swift 端只做翻譯。GetPasskeys 是 Metadata 級（public_key 是公開材料，
+/// 私鑰/信封 keyValue 永不進回應）；Register/Assert 需取用私鑰（授權分級見 agent §2.1 表）。
+/// SE 生物綁定金鑰的私鑰運算在 appex 內（Rust 碰不到 Secure Enclave），
+/// 故註冊走「Swift 匯入公鑰」+ 斷言走「BeginAssert/FinishAssert 兩步事務」。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum PasskeyCall {
     GetPasskeys {
@@ -288,6 +290,14 @@ pub enum PasskeyCall {
         display_name: String,
         /// None = 新建 login item；Some = 附加到既有 item
         item_id: Option<ItemId>,
+        /// SE 流：Swift 由 SecKey（Secure Enclave 生物綁定金鑰）匯出的
+        /// b64url DER SubjectPublicKeyInfo。Some = daemon 不生成私鑰，
+        /// keyValue 改存此公鑰、attestation COSE 段由 SPKI 轉出。
+        /// id 由本呼叫隨機生成——Swift 整合請用 BeginRegister/FinishRegister
+        /// （tag 先行協商）；單步 SE 流留給 CLI/測試。
+        /// None = 既有純軟體流（測試/相容用）。
+        #[serde(default)]
+        credential_public_key: Option<String>,
     },
     AssertPasskey {
         credential_id: String,
@@ -298,16 +308,75 @@ pub enum PasskeyCall {
         /// 否則 RP 以系統 JSON 驗簽必敗（真機實測 NotAllowedError 根因）。
         #[serde(default)]
         client_data_hash: Option<String>,
+        /// Some = 簽名已在 Swift 側由 SE 金鑰完成：daemon 不簽名，只做
+        /// 「找憑證 → 以 authData‖clientDataHash 驗簽 → 通過才 counter++
+        /// 持久化進 outbox」。簽名對的 authData 由 daemon 決定，呼叫端須先
+        /// 跑 BeginAssert 取得（或接受 daemon 以本次 counter 現算）。
+        /// None = 軟體鑰流：daemon 以 keyValue 私鑰自簽（既有行為）。
+        #[serde(default)]
+        signature: Option<String>,
+        /// Swift 側 keychain item 的不透明標籤（SE 金鑰識別）；daemon 不解釋，
+        /// 僅隨呼叫接收。與 `signature` 成對出現。
+        #[serde(default)]
+        key_id: Option<String>,
+    },
+    /// 兩步斷言事務·第一步：daemon 以儲存公鑰流找憑證、算 counter+1、
+    /// 產生 authData 並暫存 pending（不持久化 counter）。冪等：同 credential
+    /// 重複 Begin 覆蓋 pending。
+    BeginAssert {
+        credential_id: String,
+        /// b64url(32B)。rp_id 不再傳：以憑證內儲存的 rpId 為準。
+        client_data_hash: String,
+    },
+    /// 兩步斷言事務·第二步：daemon 用 pending 的 authData‖clientDataHash
+    /// 驗 `signature`（b64url DER，Swift 由 SE 金鑰產生）→ 通過才 counter
+    /// 持久化進 outbox；不符 → Err(Denied) 且 counter 不動。
+    FinishAssert {
+        credential_id: String,
+        signature: String,
+    },
+    /// 兩步註冊事務·第一步：簽發 credential id（32B 隨機 → b64url）。
+    /// 解掉「SE 金鑰 tag 必須先於註冊協商」的循環依賴：Swift 拿 id 作
+    /// SecKey tag 生金鑰，再以 FinishRegister 交回公鑰。無狀態：重複
+    /// Begin 只是再抽一個 id，以最後取得的為準。
+    BeginRegister {
+        rp_id: String,
+        user_name: String,
+        user_handle: String,
+        display_name: String,
+        /// None = 新建 login item；Some = 附加到既有 item
+        item_id: Option<ItemId>,
+    },
+    /// 兩步註冊事務·第二步：幀自含全部欄位（daemon 重啟不影响 Finish）。
+    /// daemon 校驗 credential_id 格式（32B）與唯一性，以 SPKI 轉 COSE 組
+    /// attestation（counter=1），存 fido2Credentials（keyValue=SPKI b64url
+    /// 信封、authenticationType=platform-aaguid）→ 回 PasskeyAttestation。
+    FinishRegister {
+        /// BeginRegister 簽發的 b64url id（同時是 Swift 側 SecKey tag）
+        credential_id: String,
+        /// b64url DER SubjectPublicKeyInfo（SE 公鑰）
+        credential_public_key: String,
+        rp_id: String,
+        challenge: String,
+        user_name: String,
+        user_handle: String,
+        display_name: String,
+        item_id: Option<ItemId>,
     },
 }
 
-/// passkey 條目的 Metadata 級視圖：b64url 識別材料，無密鑰。
+/// passkey 條目的 Metadata 級視圖：b64url 識別材料 + 公鑰，無密鑰。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PasskeyEntry {
     pub credential_id: String,
     pub user_handle: String,
     pub user_name: String,
     pub rp_id: String,
+    /// b64url DER SubjectPublicKeyInfo（公開材料；Swift 直接匯入 SecKey 比對）。
+    /// 選 SPKI 而非 COSE：SecKey 匯入端點只認 SPKI/PKCS#8，免 Swift 端再拆 CBOR。
+    /// 舊資料無此欄 → 空字串。
+    #[serde(default)]
+    pub public_key: String,
 }
 
 /// overlay 操作（tags/pin/last-used）：協定無這些欄位，本地權威（§2.4）。
@@ -528,6 +597,26 @@ pub enum Response {
         client_data_json: String,
         signature: String,
     },
+    /// BeginAssert 回應：authData 已含新 counter，Swift 簽 `authData‖client_data_hash`
+    /// 後以 FinishAssert 交回（事務語意見 PasskeyCall::BeginAssert 註解）。
+    AssertBegin {
+        credential_id: String,
+        rp_id: String,
+        /// b64url(authenticatorData)，flags=UP|UV|BE|BS、counter=本次新值
+        authenticator_data: String,
+        /// 回顯待簽名的 hash（b64url，同 BeginAssert 輸入）：Swift 直接
+        /// 拼 `authenticator_data ‖ 此欄位解碼位元組` 作簽名輸入。
+        client_data_hash: String,
+        /// 固定提示：簽名輸入 = authenticator_data 原始位元組 ‖ client_data_hash 原始位元組，
+        /// 演算法 ES256（ECDSA-P256-SHA256），出棧 DER。
+        signing_input_note: String,
+        counter: u32,
+    },
+    /// BeginRegister 回應：簽發的 credential id（b64url 32B）。
+    /// 同時是 Swift 側 SecKey 的 tag；FinishRegister 以它交回公鑰。
+    RegisterBegin {
+        credential_id: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -731,6 +820,7 @@ mod tests {
                 user_handle: "h".into(),
                 display_name: "U".into(),
                 item_id: None,
+                credential_public_key: Some("MIIBvzCCAW".into()),
             }),
         };
         // externally tagged 形態（Swift 端契约）：幀例見 docs 回報
@@ -747,6 +837,69 @@ mod tests {
         };
         let r2 = postcard::from_bytes::<Response>(&postcard::to_allocvec(&resp).unwrap()).unwrap();
         assert!(matches!(r2, Response::PasskeyAssertion { .. }));
+
+        for call in [
+            PasskeyCall::AssertPasskey {
+                credential_id: "cid".into(),
+                challenge: "ch".into(),
+                rp_id: "webauthn.test".into(),
+                client_data_hash: Some("hash".into()),
+                signature: Some("der-sig".into()),
+                key_id: Some("se-key-1".into()),
+            },
+            PasskeyCall::BeginAssert {
+                credential_id: "cid".into(),
+                client_data_hash: "hash".into(),
+            },
+            PasskeyCall::FinishAssert {
+                credential_id: "cid".into(),
+                signature: "der-sig".into(),
+            },
+            PasskeyCall::BeginRegister {
+                rp_id: "webauthn.test".into(),
+                user_name: "u".into(),
+                user_handle: "h".into(),
+                display_name: "U".into(),
+                item_id: None,
+            },
+            PasskeyCall::FinishRegister {
+                credential_id: "cid".into(),
+                credential_public_key: "MIIBvzCCAW".into(),
+                rp_id: "webauthn.test".into(),
+                challenge: "ch".into(),
+                user_name: "u".into(),
+                user_handle: "h".into(),
+                display_name: "U".into(),
+                item_id: None,
+            },
+        ] {
+            let msg = ClientMsg::Invoke {
+                rid: 10,
+                call: Call::Passkey(call),
+            };
+            let j = serde_json::to_vec(&msg).unwrap();
+            assert_eq!(serde_json::from_slice::<ClientMsg>(&j).unwrap().rid(), 10);
+            let b = postcard::to_allocvec(&msg).unwrap();
+            assert_eq!(postcard::from_bytes::<ClientMsg>(&b).unwrap().rid(), 10);
+        }
+        let begin = Response::AssertBegin {
+            credential_id: "cid".into(),
+            rp_id: "webauthn.test".into(),
+            authenticator_data: "ad".into(),
+            client_data_hash: "hash".into(),
+            signing_input_note: "note".into(),
+            counter: 42,
+        };
+        let back =
+            postcard::from_bytes::<Response>(&postcard::to_allocvec(&begin).unwrap()).unwrap();
+        assert!(matches!(back, Response::AssertBegin { counter: 42, .. }));
+        let j = serde_json::to_string(&begin).unwrap();
+        assert!(j.contains("\"counter\":42"));
+        let rb = Response::RegisterBegin {
+            credential_id: "cid".into(),
+        };
+        let back = postcard::from_bytes::<Response>(&postcard::to_allocvec(&rb).unwrap()).unwrap();
+        assert!(matches!(back, Response::RegisterBegin { .. }));
     }
 
     #[test]

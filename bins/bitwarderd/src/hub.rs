@@ -63,6 +63,9 @@ pub struct Hub {
     pub sessions: Arc<Mutex<HashMap<String, Arc<crate::agent::LiveSession>>>>,
     /// 等待人工核准的請求（§2.3 Enrollment/Approval）
     pub pending: Mutex<HashMap<bw_proto::ApprovalId, crate::agent::PendingApproval>>,
+    /// BeginAssert→FinishAssert 事務的暫存 authData/hash/counter（鍵=規範化 credentialId）。
+    /// 記憶體態：daemon 重啟即失，Swift 端須重跑 Begin（冪等）。
+    pub pending_asserts: Mutex<HashMap<String, crate::passkey::PendingAssert>>,
     /// 未消耗的一次性配對碼（§1.2）
     pub pairings: Mutex<HashMap<String, crate::agent::PairingSpec>>,
     /// ntfy 信令 URL（None = 不發）；只傳不透明信令，明文永不上通道
@@ -133,6 +136,7 @@ impl Hub {
             last_sync_ms: std::sync::atomic::AtomicU64::new(0),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             pending: Mutex::new(HashMap::new()),
+            pending_asserts: Mutex::new(HashMap::new()),
             pairings: Mutex::new(HashMap::new()),
             ntfy_url,
             tls_pin: std::sync::OnceLock::new(),
@@ -411,6 +415,21 @@ impl Hub {
                 PasskeyCall::GetPasskeys { rp_id } => self.passkey_list(rp_id.as_deref()),
                 PasskeyCall::RegisterPasskey { .. } => self.passkey_register(session, pc).await,
                 PasskeyCall::AssertPasskey { .. } => self.passkey_assert(session, pc).await,
+                PasskeyCall::BeginAssert {
+                    credential_id,
+                    client_data_hash,
+                } => self.passkey_begin_assert(credential_id, client_data_hash),
+                PasskeyCall::FinishAssert {
+                    credential_id,
+                    signature,
+                } => {
+                    self.passkey_finish_assert(session, credential_id, signature)
+                        .await
+                }
+                PasskeyCall::BeginRegister { .. } => self.passkey_begin_register(),
+                PasskeyCall::FinishRegister { .. } => {
+                    self.passkey_finish_register(session, pc).await
+                }
             },
             Call::Fill(FillCall::AutoType { id, template }) => {
                 self.autotype(*id, template.as_deref()).await
@@ -899,6 +918,10 @@ fn action_tag(c: &Call) -> String {
         Call::Passkey(PasskeyCall::GetPasskeys { .. }) => "Passkey.GetPasskeys",
         Call::Passkey(PasskeyCall::RegisterPasskey { .. }) => "Passkey.RegisterPasskey",
         Call::Passkey(PasskeyCall::AssertPasskey { .. }) => "Passkey.AssertPasskey",
+        Call::Passkey(PasskeyCall::BeginAssert { .. }) => "Passkey.BeginAssert",
+        Call::Passkey(PasskeyCall::FinishAssert { .. }) => "Passkey.FinishAssert",
+        Call::Passkey(PasskeyCall::BeginRegister { .. }) => "Passkey.BeginRegister",
+        Call::Passkey(PasskeyCall::FinishRegister { .. }) => "Passkey.FinishRegister",
         Call::Use(UseCall::TotpCode { .. }) => "Use.TotpCode",
         Call::Use(UseCall::GeneratePassword { .. }) => "Use.GeneratePassword",
         Call::Use(UseCall::ResolveRef { .. }) => "Use.ResolveRef",

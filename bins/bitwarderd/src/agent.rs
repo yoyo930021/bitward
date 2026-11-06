@@ -234,6 +234,15 @@ impl Hub {
             Call::Passkey(PasskeyCall::AssertPasskey { .. }) => {
                 (Access::Use(UseKind::Passkey), None)
             }
+            Call::Passkey(PasskeyCall::BeginAssert { .. } | PasskeyCall::FinishAssert { .. }) => {
+                (Access::Use(UseKind::Passkey), None)
+            }
+            Call::Passkey(PasskeyCall::BeginRegister { item_id, .. }) => {
+                (Access::Use(UseKind::Passkey), *item_id)
+            }
+            Call::Passkey(PasskeyCall::FinishRegister { item_id, .. }) => {
+                (Access::Use(UseKind::Passkey), *item_id)
+            }
             Call::Use(UseCall::TotpCode { id }) => (Access::Use(UseKind::TotpCode), Some(*id)),
             Call::Use(UseCall::ResolveRef { .. }) => {
                 (Access::Reveal(bw_proto::Sensitivity::Secret), None)
@@ -666,6 +675,12 @@ pub fn item_of(call: &Call) -> Option<uuid::Uuid> {
         | Call::Use(UseCall::TotpCode { id }) => Some(*id),
         Call::Vault(VaultCall::Delete { ids }) => ids.first().copied(),
         Call::Passkey(PasskeyCall::RegisterPasskey {
+            item_id: Some(id), ..
+        })
+        | Call::Passkey(PasskeyCall::BeginRegister {
+            item_id: Some(id), ..
+        })
+        | Call::Passkey(PasskeyCall::FinishRegister {
             item_id: Some(id), ..
         }) => Some(*id),
         _ => None,

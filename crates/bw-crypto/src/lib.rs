@@ -30,9 +30,11 @@ pub use kdf::{
     argon2id_raw, pbkdf2_sha256_raw,
 };
 pub use passkey::{
-    AssertionParts, FLAG_AT, FLAG_UP, FLAG_UV, FLAGS_ASSERT, FLAGS_REGISTER, assertion,
-    assertion_with_hash, attestation_object, b64url, b64url_decode, client_data_json,
-    cose_public_key, generate_private_key, public_key_sec1, registration_auth_data, verify_es256,
+    AssertionParts, FLAG_AT, FLAG_BE, FLAG_BS, FLAG_UP, FLAG_UV, FLAGS_ASSERT, FLAGS_REGISTER,
+    assertion, assertion_auth_data, assertion_with_hash, attestation_object,
+    attestation_object_from_spki, b64url, b64url_decode, client_data_json, cose_public_key,
+    cose_public_key_from_spki, generate_private_key, public_key_sec1, registration_auth_data,
+    sign_es256, spki_from_scalar, verify_es256, verify_es256_signing_input,
 };
 pub use rsa::{
     OaepHash, RsaKeyPair, decrypt_private_key, generate_rsa_keypair, rsa_decrypt, rsa_encrypt,

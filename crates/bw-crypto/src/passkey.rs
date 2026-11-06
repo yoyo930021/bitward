@@ -24,13 +24,21 @@ use crate::CryptoError;
 pub const FLAG_UP: u8 = 0x01;
 /// User Verified（本 daemon 以解鎖態作為 UV 的等價證明）。
 pub const FLAG_UV: u8 = 0x04;
+/// Backup Eligibility（FIDO2 L3 §6.1，bit 3，此前 reserved 留 0）。
+pub const FLAG_BE: u8 = 0x08;
+/// Backup State（bit 4；本實作憑證經 vault sync 備份，BE=BS=1 為真）。
+pub const FLAG_BS: u8 = 0x10;
 /// attestedCredentialData 存在（僅註冊）。
 pub const FLAG_AT: u8 = 0x40;
 
-/// 註冊用 flags：UP|UV|AT。
-pub const FLAGS_REGISTER: u8 = FLAG_UP | FLAG_UV | FLAG_AT;
-/// 斷言用 flags：UP|UV。
-pub const FLAGS_ASSERT: u8 = FLAG_UP | FLAG_UV;
+/// 註冊用 flags：UP|UV|BE|BS|AT = 0x5D。
+/// 斷言用 flags：UP|UV|BE|BS = 0x1D。
+/// Apple provider（AuthenticationServicesCore）對第三方憑證強制 BE=1、BS=1：
+/// 缺失 → 系統直接丟棄憑證、finishRegistration 不下發、頁面 NotAllowedError
+/// （真機實測；KeePassium #444 實測矩陣、Apple 論壇 742209/813844；
+/// 官方 Bitwarden/1Password/Dashlane 皆 0x5D/0x1D）。
+pub const FLAGS_REGISTER: u8 = FLAG_UP | FLAG_UV | FLAG_BE | FLAG_BS | FLAG_AT;
+pub const FLAGS_ASSERT: u8 = FLAG_UP | FLAG_UV | FLAG_BE | FLAG_BS;
 
 /// b64url（無 padding）：WebAuthn 各欄位的傳輸形態。
 pub fn b64url(bytes: &[u8]) -> String {
@@ -59,13 +67,31 @@ fn signing_key(scalar: &[u8]) -> Result<p256::ecdsa::SigningKey, CryptoError> {
     p256::ecdsa::SigningKey::from_slice(scalar).map_err(|_| CryptoError::InvalidKey)
 }
 
-/// 私鑰 → COSE_Key（EC2/P-256/ES256）的 CBOR bytes。
-/// 手寫 canonical 鍵序（RFC 8949 §4.2.1：鍵編碼位元組字典序 01,03,20,21,22）；
-/// 77 bytes 定長。serde_cbor 的 BTreeMap 按整數值排序（-3,-2,-1,1,3）非 canonical。
-pub fn cose_public_key(scalar: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    let vk = signing_key(scalar)?.verifying_key().to_encoded_point(false);
-    let x = vk.x().ok_or(CryptoError::InvalidKey)?.to_vec();
-    let y = vk.y().ok_or(CryptoError::InvalidKey)?.to_vec();
+/// 公鑰位元組（SEC1 未壓縮/壓縮點，或 DER SubjectPublicKeyInfo）→ VerifyingKey。
+/// SE 註冊流的 keyValue 是 SPKI；軟體流匯出的也是 SPKI——兩條路徑共用此解析。
+fn verifying_key(bytes: &[u8]) -> Result<p256::ecdsa::VerifyingKey, CryptoError> {
+    use p256::pkcs8::DecodePublicKey;
+    if let Ok(vk) = p256::ecdsa::VerifyingKey::from_sec1_bytes(bytes) {
+        return Ok(vk);
+    }
+    p256::ecdsa::VerifyingKey::from_public_key_der(bytes).map_err(|_| CryptoError::InvalidKey)
+}
+
+/// 私鑰標量 → DER SubjectPublicKeyInfo（P-256 公鑰，91 bytes）。
+/// Swift 端由 SecKey 匯出的正是同一形態；GetPasskeys.public_key 用它。
+pub fn spki_from_scalar(scalar: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    use p256::pkcs8::EncodePublicKey;
+    let doc = signing_key(scalar)?
+        .verifying_key()
+        .to_public_key_der()
+        .map_err(|_| CryptoError::InvalidKey)?;
+    Ok(doc.as_bytes().to_vec())
+}
+
+fn cose_from_verifying_key(vk: &p256::ecdsa::VerifyingKey) -> Result<Vec<u8>, CryptoError> {
+    let pt = vk.to_encoded_point(false);
+    let x = pt.x().ok_or(CryptoError::InvalidKey)?.to_vec();
+    let y = pt.y().ok_or(CryptoError::InvalidKey)?.to_vec();
     if x.len() != 32 || y.len() != 32 {
         return Err(CryptoError::InvalidKey);
     }
@@ -83,6 +109,18 @@ pub fn cose_public_key(scalar: &[u8]) -> Result<Vec<u8>, CryptoError> {
     Ok(out)
 }
 
+/// 私鑰 → COSE_Key（EC2/P-256/ES256）的 CBOR bytes。
+/// 手寫 canonical 鍵序（RFC 8949 §4.2.1：鍵編碼位元組字典序 01,03,20,21,22）；
+/// 77 bytes 定長。serde_cbor 的 BTreeMap 按整數值排序（-3,-2,-1,1,3）非 canonical。
+pub fn cose_public_key(scalar: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    cose_from_verifying_key(signing_key(scalar)?.verifying_key())
+}
+
+/// DER SPKI（Swift 匯出的 SE 公鑰）→ 同上 COSE_Key bytes。
+pub fn cose_public_key_from_spki(spki_der: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    cose_from_verifying_key(&verifying_key(spki_der)?)
+}
+
 fn rp_id_hash(rp_id: &str) -> [u8; 32] {
     Sha256::digest(rp_id.as_bytes()).into()
 }
@@ -90,14 +128,13 @@ fn rp_id_hash(rp_id: &str) -> [u8; 32] {
 /// attestedCredentialData（L3 §6.1）：AAGUID(16) ‖ credIdLen(16be) ‖ credId ‖ COSE_Key。
 /// AAGUID 取全零（本 daemon 無認證的 attester id）；rpIdHash 屬 authData 頭部，
 /// 不在這裡重複（Safari 嚴格解析：多 32B 或長度欄 4B 都會整包拒收）。
-fn attested_credential_data(credential_id: &[u8], scalar: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    let cose = cose_public_key(scalar)?;
+fn attested_credential_data(credential_id: &[u8], cose: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(18 + credential_id.len() + cose.len());
     out.extend_from_slice(&[0u8; 16]); // AAGUID
     out.extend_from_slice(&(credential_id.len() as u16).to_be_bytes()); // credIdLen: 16 位
     out.extend_from_slice(credential_id);
-    out.extend_from_slice(&cose);
-    Ok(out)
+    out.extend_from_slice(cose);
+    out
 }
 
 fn auth_data_prefix(rp_id_hash: &[u8; 32], flags: u8, counter: u32) -> Vec<u8> {
@@ -115,9 +152,33 @@ pub fn registration_auth_data(
     scalar: &[u8],
     counter: u32,
 ) -> Result<Vec<u8>, CryptoError> {
+    registration_auth_data_cose(rp_id, credential_id, &cose_public_key(scalar)?, counter)
+}
+
+/// 註冊（SE 公鑰流）：COSE 段由 DER SPKI 匯入的 P-256 公鑰產生。
+pub fn registration_auth_data_from_spki(
+    rp_id: &str,
+    credential_id: &[u8],
+    spki_der: &[u8],
+    counter: u32,
+) -> Result<Vec<u8>, CryptoError> {
+    registration_auth_data_cose(
+        rp_id,
+        credential_id,
+        &cose_public_key_from_spki(spki_der)?,
+        counter,
+    )
+}
+
+fn registration_auth_data_cose(
+    rp_id: &str,
+    credential_id: &[u8],
+    cose: &[u8],
+    counter: u32,
+) -> Result<Vec<u8>, CryptoError> {
     let h = rp_id_hash(rp_id);
     let mut ad = auth_data_prefix(&h, FLAGS_REGISTER, counter);
-    ad.extend_from_slice(&attested_credential_data(credential_id, scalar)?);
+    ad.extend_from_slice(&attested_credential_data(credential_id, cose));
     Ok(ad)
 }
 
@@ -129,7 +190,31 @@ pub fn attestation_object(
     scalar: &[u8],
     counter: u32,
 ) -> Result<String, CryptoError> {
-    let ad = registration_auth_data(rp_id, credential_id, scalar, counter)?;
+    attestation_object_from_ad(&registration_auth_data(
+        rp_id,
+        credential_id,
+        scalar,
+        counter,
+    )?)
+}
+
+/// 註冊（SE 公鑰流）：同 `attestation_object`，但 attestedCredentialData 的
+/// COSE 段取自 Swift 匯出的 DER SPKI（私鑰在 Secure Enclave，daemon 從未見過）。
+pub fn attestation_object_from_spki(
+    rp_id: &str,
+    credential_id: &[u8],
+    spki_der: &[u8],
+    counter: u32,
+) -> Result<String, CryptoError> {
+    attestation_object_from_ad(&registration_auth_data_from_spki(
+        rp_id,
+        credential_id,
+        spki_der,
+        counter,
+    )?)
+}
+
+fn attestation_object_from_ad(ad: &[u8]) -> Result<String, CryptoError> {
     let mut obj = BTreeMap::new();
     obj.insert(
         CborValue::Text("fmt".into()),
@@ -139,7 +224,10 @@ pub fn attestation_object(
         CborValue::Text("attStmt".into()),
         CborValue::Map(BTreeMap::new()),
     );
-    obj.insert(CborValue::Text("authData".into()), CborValue::Bytes(ad));
+    obj.insert(
+        CborValue::Text("authData".into()),
+        CborValue::Bytes(ad.to_vec()),
+    );
     let cbor = serde_cbor::to_vec(&CborValue::Map(obj)).map_err(|_| CryptoError::InvalidKey)?;
     Ok(b64url(&cbor))
 }
@@ -180,17 +268,32 @@ pub fn verify_es256(
     client_data_json: &[u8],
     sig_raw: &[u8],
 ) -> bool {
-    use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
-    let Ok(vk) = VerifyingKey::from_sec1_bytes(pub_sec1) else {
+    let mut msg = auth_data.to_vec();
+    msg.extend_from_slice(&Sha256::digest(client_data_json));
+    verify_es256_signing_input(pub_sec1, &msg, sig_raw)
+}
+
+/// 驗證「原始簽名輸入」：msg = authenticator_data ‖ clientDataHash(32B 本體)。
+/// 這是 Apple provider 流 / Swift SE 簽名的校驗入口——與 `verify_es256`
+/// 的「對 JSON 再雜湊」不同，混用必錯（hash 多雜湊一次 → 驗簽必敗）。
+/// pub_key 收 SEC1 點或 DER SPKI；sig 收 DER（WebAuthn 出棧形態）或 raw r‖s。
+pub fn verify_es256_signing_input(pub_key: &[u8], signing_input: &[u8], sig: &[u8]) -> bool {
+    use p256::ecdsa::{Signature, signature::Verifier};
+    let Ok(vk) = verifying_key(pub_key) else {
         return false;
     };
     // WebAuthn 出棧是 DER；測試/內部路徑可能給 raw——兩種都收。
-    let Ok(sig) = Signature::from_der(sig_raw).or_else(|_| Signature::from_slice(sig_raw)) else {
+    let Ok(sig) = Signature::from_der(sig).or_else(|_| Signature::from_slice(sig)) else {
         return false;
     };
-    let mut msg = auth_data.to_vec();
-    msg.extend_from_slice(&Sha256::digest(client_data_json));
-    vk.verify(&msg, &sig).is_ok()
+    vk.verify(signing_input, &sig).is_ok()
+}
+
+/// 私鑰標量 → 對任意簽名輸入的 ECDSA-P256-SHA256 DER 簽名。
+/// 兩步斷言流中測試/CLI 模擬 Swift 側的 SE 簽名用；出棧形態同 WebAuthn（DER）。
+pub fn sign_es256(scalar: &[u8], signing_input: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let sig: p256::ecdsa::Signature = signing_key(scalar)?.sign(signing_input);
+    Ok(sig.to_der().as_bytes().to_vec())
 }
 
 /// 斷言：authData(flags=UP|UV, counter++)、clientDataJSON、raw r‖s 簽名。
@@ -213,6 +316,12 @@ pub fn assertion(
         client_data_json: b64url(cdj.as_bytes()),
         signature: b64url(&sig),
     })
+}
+
+/// 斷言用 authenticatorData（flags=UP|UV，無 attestedCredentialData）。
+/// 兩步流（BeginAssert）先回給 Swift 簽，FinishAssert 驗完才持久化 counter。
+pub fn assertion_auth_data(rp_id: &str, counter: u32) -> Vec<u8> {
+    auth_data_prefix(&rp_id_hash(rp_id), FLAGS_ASSERT, counter)
 }
 
 /// Apple provider 流：系統只給 clientDataHash（32B，即 sha256(系統將送 RP 的
@@ -249,7 +358,7 @@ mod tests {
         // 標頭：rpIdHash(32) ‖ flags(1) ‖ counter(4)
         let expect_total = 32 + 1 + 4 + 16 + 2 + 32 + cose_len;
         assert_eq!(ad.len(), expect_total, "authData 總長");
-        assert_eq!(ad[32], 0x45, "flags = UP|UV|AT（字面值）");
+        assert_eq!(ad[32], 0x5D, "flags = UP|UV|BE|BS|AT（字面值）");
         assert_eq!(&ad[33..37], &[0x00, 0x00, 0x00, 0x01], "counter=1（32be）");
         // attestedCredentialData：AAGUID(16) ‖ credIdLen(2) ‖ credId(32) ‖ COSE
         assert_eq!(&ad[37..53], &[0u8; 16][..], "AAGUID 全零");
@@ -388,7 +497,7 @@ mod tests {
         // 斷言 authData（無 AT）：恰好 37B，佈局不受註冊端修復波及
         assert_eq!(ad_bytes.len(), 37, "assertion authData = 32+1+4，無 ACD");
         assert_eq!(&ad_bytes[0..32], &Sha256::digest(b"webauthn.test")[..]);
-        assert_eq!(ad_bytes[32], 0x05, "flags = UP|UV（字面值）");
+        assert_eq!(ad_bytes[32], 0x1D, "flags = UP|UV|BE|BS（字面值）");
         assert_eq!(&ad_bytes[33..37], &[0x00, 0x00, 0x00, 0x02]);
         let cdj = b64url_decode(&parts.client_data_json).unwrap();
         assert_eq!(
@@ -428,6 +537,68 @@ mod tests {
         assert_eq!(
             b64url_decode(&format!("{s}==")).unwrap(),
             vec![0xff, 0xfe, 0x00]
+        );
+    }
+
+    #[test]
+    fn spki_export_import_is_lossless() {
+        let sk = generate_private_key();
+        let spki = spki_from_scalar(&sk).unwrap();
+        // SPKI → COSE 與標量直出 COSE 逐位元組相同（x/y 一致）
+        assert_eq!(
+            cose_public_key_from_spki(&spki).unwrap(),
+            cose_public_key(&sk).unwrap()
+        );
+        // SPKI 可被 SEC1 路徑解析（verifying_key 兩形態都吃）
+        let sec1 = public_key_sec1(&sk).unwrap();
+        let vk_from_spki = verifying_key(&spki).unwrap();
+        let vk_from_sec1 = verifying_key(&sec1).unwrap();
+        assert_eq!(vk_from_spki.to_sec1_bytes(), vk_from_sec1.to_sec1_bytes());
+    }
+
+    #[test]
+    fn signing_input_verify_distinguishes_raw_hash_from_json_hash() {
+        let sk = generate_private_key();
+        let spki = spki_from_scalar(&sk).unwrap();
+        let hash = [3u8; 32];
+        let ad = assertion_auth_data("webauthn.test", 7);
+        let mut input = ad.clone();
+        input.extend_from_slice(&hash);
+        let sig = sign_es256(&sk, &input).unwrap();
+        assert!(
+            verify_es256_signing_input(&spki, &input, &sig),
+            "SPKI 驗 SE 流簽名"
+        );
+        assert!(verify_es256_signing_input(
+            &public_key_sec1(&sk).unwrap(),
+            &input,
+            &sig
+        ));
+        // 混用「對 JSON 再雜湊」的舊訊息必須驗不過（事務根因防護）
+        let cdj = client_data_json(&b64url(&hash), "webauthn.test");
+        assert!(
+            !verify_es256_signing_input(&spki, &ad, &sig),
+            "少了 hash 尾段的訊息不得誤通過"
+        );
+        assert!(!verify_es256(&spki, &ad, cdj.as_bytes(), &sig));
+        // counter 欄被改 → authData 不同 → 驗不過
+        let mut tampered = ad.clone();
+        tampered[36] ^= 0x01;
+        let mut tampered_input = tampered.clone();
+        tampered_input.extend_from_slice(&hash);
+        assert!(!verify_es256_signing_input(&spki, &tampered_input, &sig));
+    }
+
+    #[test]
+    fn attestation_from_spki_matches_software_attestation() {
+        let sk = generate_private_key();
+        let spki = spki_from_scalar(&sk).unwrap();
+        let cred = [9u8; 32];
+        let a = attestation_object("webauthn.test", &cred, &sk, 1).unwrap();
+        let b = attestation_object_from_spki("webauthn.test", &cred, &spki, 1).unwrap();
+        assert_eq!(
+            a, b,
+            "SPKI 流 attestation 與軟體流逐位元組同（COSE 段同源）"
         );
     }
 }

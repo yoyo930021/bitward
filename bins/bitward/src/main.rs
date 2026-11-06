@@ -235,7 +235,8 @@ enum PasskeyCmd {
         #[arg(long)]
         rp: Option<String>,
     },
-    /// 註冊 passkey：daemon 生成 P-256 私鑰，輸出 attestation（JSON）
+    /// 註冊 passkey：預設 daemon 生成 P-256 私鑰（純軟體流）；
+    /// 帶 --public-key = SE 公鑰單步流（keyValue 存 SPKI）。輸出 attestation（JSON）
     Register {
         #[arg(long)]
         rp: String,
@@ -251,8 +252,46 @@ enum PasskeyCmd {
         /// 附加到既有 item（預設新建 login item）
         #[arg(long)]
         item: Option<String>,
+        /// b64url DER SubjectPublicKeyInfo（Swift/SE 匯出的公鑰）
+        #[arg(long)]
+        public_key: Option<String>,
     },
-    /// 簽發 assertion（counter++ 進 outbox）
+    /// 兩步註冊·第一步：daemon 簽發 credential_id（b64url 32B，SecKey tag 用）
+    BeginRegister {
+        #[arg(long)]
+        rp: String,
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        handle: Option<String>,
+        #[arg(long)]
+        display: Option<String>,
+        #[arg(long)]
+        item: Option<String>,
+    },
+    /// 兩步註冊·第二步：以 BeginRegister 的 id + SPKI 公鑰完成註冊（輸出 attestation JSON）
+    FinishRegister {
+        /// BeginRegister 回傳的 b64url credential id
+        #[arg(long)]
+        credential: String,
+        /// b64url DER SubjectPublicKeyInfo
+        #[arg(long)]
+        public_key: String,
+        #[arg(long)]
+        rp: String,
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        challenge: String,
+        #[arg(long)]
+        handle: Option<String>,
+        #[arg(long)]
+        display: Option<String>,
+        #[arg(long)]
+        item: Option<String>,
+    },
+    /// 簽發 assertion（counter++ 進 outbox）。純軟體流由 daemon 自簽；
+    /// 帶 --signature = 簽名校驗流（Swift 已簽，驗過才提交 counter）。
     Assert {
         #[arg(long)]
         credential: String,
@@ -260,6 +299,30 @@ enum PasskeyCmd {
         challenge: String,
         #[arg(long)]
         rp: String,
+        /// b64url(32B)：Apple provider 流的 clientDataHash
+        #[arg(long)]
+        hash: Option<String>,
+        /// b64url DER ECDSA 簽名（對 authData‖hash）
+        #[arg(long)]
+        signature: Option<String>,
+        /// Swift 側 keychain item 標籤（不透明，隨 audit 記錄）
+        #[arg(long)]
+        key_id: Option<String>,
+    },
+    /// 兩步斷言·第一步：取本次 authData（含新 counter；不持久化）
+    Begin {
+        #[arg(long)]
+        credential: String,
+        /// b64url(32B) clientDataHash
+        #[arg(long)]
+        hash: String,
+    },
+    /// 兩步斷言·第二步：交回 DER 簽名（b64url），驗過才持久化 counter
+    Finish {
+        #[arg(long)]
+        credential: String,
+        #[arg(long)]
+        signature: String,
     },
 }
 
@@ -727,7 +790,41 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                 handle,
                 display,
                 item,
+                public_key,
             } => Call::Passkey(PasskeyCall::RegisterPasskey {
+                rp_id: rp.clone(),
+                challenge: challenge.clone(),
+                user_name: user.clone(),
+                user_handle: handle.clone().unwrap_or_else(|| user.clone()),
+                display_name: display.clone().unwrap_or_else(|| user.clone()),
+                item_id: item.as_deref().map(parse_id).transpose()?,
+                credential_public_key: public_key.clone(),
+            }),
+            PasskeyCmd::BeginRegister {
+                rp,
+                user,
+                handle,
+                display,
+                item,
+            } => Call::Passkey(PasskeyCall::BeginRegister {
+                rp_id: rp.clone(),
+                user_name: user.clone(),
+                user_handle: handle.clone().unwrap_or_else(|| user.clone()),
+                display_name: display.clone().unwrap_or_else(|| user.clone()),
+                item_id: item.as_deref().map(parse_id).transpose()?,
+            }),
+            PasskeyCmd::FinishRegister {
+                credential,
+                public_key,
+                rp,
+                user,
+                challenge,
+                handle,
+                display,
+                item,
+            } => Call::Passkey(PasskeyCall::FinishRegister {
+                credential_id: credential.clone(),
+                credential_public_key: public_key.clone(),
                 rp_id: rp.clone(),
                 challenge: challenge.clone(),
                 user_name: user.clone(),
@@ -739,12 +836,29 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                 credential,
                 challenge,
                 rp,
+                hash,
+                signature,
+                key_id,
             } => Call::Passkey(PasskeyCall::AssertPasskey {
                 credential_id: credential.clone(),
                 challenge: challenge.clone(),
                 rp_id: rp.clone(),
                 // CLI 走標準流（自組 JSON）；Apple provider 流由 Swift 端帶 hash。
-                client_data_hash: None,
+                client_data_hash: hash.clone(),
+                // Some = 簽名已在呼叫端（模擬 Swift SE 簽名路徑）
+                signature: signature.clone(),
+                key_id: key_id.clone(),
+            }),
+            PasskeyCmd::Begin { credential, hash } => Call::Passkey(PasskeyCall::BeginAssert {
+                credential_id: credential.clone(),
+                client_data_hash: hash.clone(),
+            }),
+            PasskeyCmd::Finish {
+                credential,
+                signature,
+            } => Call::Passkey(PasskeyCall::FinishAssert {
+                credential_id: credential.clone(),
+                signature: signature.clone(),
             }),
         },
         Cmd::Audit { tail, verify } => {
@@ -1010,6 +1124,27 @@ fn print_response(resp: &Response, json: bool) {
                 "signature": signature,
             })
         ),
+        Response::AssertBegin {
+            credential_id,
+            rp_id,
+            authenticator_data,
+            client_data_hash,
+            signing_input_note,
+            counter,
+        } => println!(
+            "{}",
+            json!({
+                "credential_id": credential_id,
+                "rp_id": rp_id,
+                "authenticator_data": authenticator_data,
+                "client_data_hash": client_data_hash,
+                "signing_input_note": signing_input_note,
+                "counter": counter,
+            })
+        ),
+        Response::RegisterBegin { credential_id } => {
+            println!("{}", json!({"credential_id": credential_id}));
+        }
         Response::Version(s) => println!("{s}"),
         Response::Profile(p) => println!("{}", json!(p)),
         Response::Ok => println!("ok"),
