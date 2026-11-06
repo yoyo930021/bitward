@@ -178,6 +178,8 @@ pub enum Call {
     Sync(SyncCall),
     Agent(AgentCall),
     Admin(AdminCall),
+    /// 置尾：postcard 變體索引追加（P2 主線是 postcard，插在中间會移位舊變體）
+    Passkey(PasskeyCall),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -267,6 +269,40 @@ pub enum VaultCall {
         org: Option<String>,
         collections: Vec<String>,
     },
+}
+
+/// WebAuthn passkey 操作（macOS autofill 契約 §1）：金鑰與業務全在 daemon，
+/// Swift 端只做翻譯。GetPasskeys 是 Metadata 級（回傳不含任何密鑰材料）；
+/// Register/Assert 需取用私鑰（授權分級見 agent §2.1 表）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum PasskeyCall {
+    GetPasskeys {
+        /// None = 全 vault；Some = 只列該 relying party
+        rp_id: Option<String>,
+    },
+    RegisterPasskey {
+        rp_id: String,
+        challenge: String,
+        user_name: String,
+        user_handle: String,
+        display_name: String,
+        /// None = 新建 login item；Some = 附加到既有 item
+        item_id: Option<ItemId>,
+    },
+    AssertPasskey {
+        credential_id: String,
+        challenge: String,
+        rp_id: String,
+    },
+}
+
+/// passkey 條目的 Metadata 級視圖：b64url 識別材料，無密鑰。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PasskeyEntry {
+    pub credential_id: String,
+    pub user_handle: String,
+    pub user_name: String,
+    pub rp_id: String,
 }
 
 /// overlay 操作（tags/pin/last-used）：協定無這些欄位，本地權威（§2.4）。
@@ -470,6 +506,18 @@ pub enum Response {
     /// 自構 JSON 結果（如 AutoType 計數）。值限字串/整數，無 f64——postcard-safe，見 Audit。
     Json(serde_json::Value),
     Ok,
+    // —— passkey（macOS autofill 契約 §1；置尾保 postcard 變體索引）——
+    Passkeys(Vec<PasskeyEntry>),
+    PasskeyAttestation {
+        credential_id: String,
+        attestation_object: String,
+    },
+    PasskeyAssertion {
+        credential_id: String,
+        authenticator_data: String,
+        client_data_json: String,
+        signature: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -660,6 +708,35 @@ mod tests {
                 _ => u64::MAX,
             }
         }
+    }
+
+    #[test]
+    fn passkey_calls_roundtrip_json_and_postcard() {
+        let msg = ClientMsg::Invoke {
+            rid: 9,
+            call: Call::Passkey(PasskeyCall::RegisterPasskey {
+                rp_id: "webauthn.test".into(),
+                challenge: "A-_b".into(),
+                user_name: "u".into(),
+                user_handle: "h".into(),
+                display_name: "U".into(),
+                item_id: None,
+            }),
+        };
+        // externally tagged 形態（Swift 端契约）：幀例見 docs 回報
+        let j = serde_json::to_vec(&msg).unwrap();
+        assert_eq!(serde_json::from_slice::<ClientMsg>(&j).unwrap().rid(), 9);
+        assert!(String::from_utf8(j).unwrap().contains("\"Passkey\""));
+        let bytes = postcard::to_allocvec(&msg).unwrap();
+        assert_eq!(postcard::from_bytes::<ClientMsg>(&bytes).unwrap().rid(), 9);
+        let resp = Response::PasskeyAssertion {
+            credential_id: "cid".into(),
+            authenticator_data: "ad".into(),
+            client_data_json: "cd".into(),
+            signature: "sig".into(),
+        };
+        let r2 = postcard::from_bytes::<Response>(&postcard::to_allocvec(&resp).unwrap()).unwrap();
+        assert!(matches!(r2, Response::PasskeyAssertion { .. }));
     }
 
     #[test]

@@ -221,7 +221,10 @@ pub enum ClientMsg { Hello{version, auth, wants, caps}, Invoke{rid, call}, Cance
 pub enum ServerMsg { Welcome{epoch, server: ServerProfile, state, events_from},
                      Reply{rid, outcome}, Event{topic, seq, payload},   // payload 只有 Opaque/Identity 級
                      NeedApproval{..}, Challenge{..} }
-pub enum Call { Auth(..), Vault(..), Use(..), Fill(..), Sync(..), Agent(..), Admin(..) }
+pub enum Call { Auth(..), Vault(..), Use(..), Fill(..), Sync(..), Agent(..), Admin(..), Passkey(..) }
+// Passkey：WebAuthn 三操作（GetPasskeys=Metadata 級；Register/Assert 需 use:passkey，
+// 私鑰用而不讀）。憑證存 Bitwarden cipher 的 login.fido2Credentials[]，
+// keyValue 走 type 2 信封；斷言 counter++ 經 outbox 推回（macOS autofill 契約）。
 pub enum WtpError { StaleEpoch, Locked, NeedsApproval, ApprovalExpired, Denied{grant_gap},
                     NotFound, HubOffline{last_seen},
                     Conflict{ours,theirs}, Unsupported{feature}, ServerDrift, RetryAfter }

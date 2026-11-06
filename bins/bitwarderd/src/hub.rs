@@ -17,8 +17,8 @@ use bw_keys::{
 };
 use bw_proto::{
     AccountInfo, AdminCall, AgentCall, AuditChainInfo, AuthCall, Call, FillCall, ItemId, ItemView,
-    OutboxCounts, PROTO_VERSION, Query, Response, StatusInfo, SyncCall, UseCall, VaultCall, View,
-    WtpError,
+    OutboxCounts, PROTO_VERSION, PasskeyCall, Query, Response, StatusInfo, SyncCall, UseCall,
+    VaultCall, View, WtpError,
 };
 use bw_server::{Client, PasswordLogin, ServerError};
 use bw_store::{AuditFilter, AuditRecord, Store};
@@ -407,6 +407,11 @@ impl Hub {
                 Ok(resp)
             }
             Call::Use(UseCall::Run { plan }) => self.run_plan(sess, plan).await,
+            Call::Passkey(pc) => match pc {
+                PasskeyCall::GetPasskeys { rp_id } => self.passkey_list(rp_id.as_deref()),
+                PasskeyCall::RegisterPasskey { .. } => self.passkey_register(session, pc).await,
+                PasskeyCall::AssertPasskey { .. } => self.passkey_assert(session, pc).await,
+            },
             Call::Fill(FillCall::AutoType { id, template }) => {
                 self.autotype(*id, template.as_deref()).await
             }
@@ -712,7 +717,12 @@ impl Hub {
         let row = self.store.item(id).map_err(denied)?;
         let row = row.ok_or(WtpError::NotFound)?;
         // seed 存在性不需金鑰：先擋「無 seed」，別讓它折進下面的 Locked 映射。
-        if row.enc_cipher.pointer("/login/totp").and_then(Value::as_str).is_none() {
+        if row
+            .enc_cipher
+            .pointer("/login/totp")
+            .and_then(Value::as_str)
+            .is_none()
+        {
             return Err(denied("此項目沒有 TOTP seed"));
         }
         let now = std::time::SystemTime::now()
@@ -885,6 +895,9 @@ fn action_tag(c: &Call) -> String {
         Call::Vault(VaultCall::FindDuplicates) => "Vault.FindDuplicates",
         Call::Vault(VaultCall::Merge { .. }) => "Vault.Merge",
         Call::Vault(VaultCall::MoveToOrg { .. }) => "Vault.MoveToOrg",
+        Call::Passkey(PasskeyCall::GetPasskeys { .. }) => "Passkey.GetPasskeys",
+        Call::Passkey(PasskeyCall::RegisterPasskey { .. }) => "Passkey.RegisterPasskey",
+        Call::Passkey(PasskeyCall::AssertPasskey { .. }) => "Passkey.AssertPasskey",
         Call::Use(UseCall::TotpCode { .. }) => "Use.TotpCode",
         Call::Use(UseCall::GeneratePassword { .. }) => "Use.GeneratePassword",
         Call::Use(UseCall::ResolveRef { .. }) => "Use.ResolveRef",
@@ -941,6 +954,9 @@ fn sensitivity_of_call(c: &Call, resp: Option<&Response>) -> bw_proto::Sensitivi
         | Call::Use(UseCall::Run { .. })
         | Call::Use(UseCall::ResolveRef { .. })
         | Call::Use(UseCall::GeneratePassword { .. }) => Secret,
+        // 列表只投影 Metadata 級識別欄；Register/Assert 出口由私鑰簽出，比照 Use 級
+        Call::Passkey(PasskeyCall::GetPasskeys { .. }) => Identity,
+        Call::Passkey(_) => Secret,
         Call::Auth(_) | Call::Admin(_) | Call::Sync(_) | Call::Agent(_) | Call::Fill(_) => Opaque,
     }
 }

@@ -12,10 +12,12 @@
 mod envelope;
 mod generator;
 mod kdf;
+mod passkey;
 mod rsa;
 mod totp;
 
-pub(crate) use kdf::{b64, b64_decode};
+// b64/b64url helper（base64 crate 手寫包裝）：daemon 的 keyValue 明文形態用 b64。
+pub use kdf::{b64, b64_decode};
 
 pub use envelope::{
     CipherType, EncParts, decrypt_bytes, decrypt_with_raw_key, encrypt_bytes, encrypt_with_iv,
@@ -26,6 +28,11 @@ pub use kdf::{
     DEFAULT_ARGON2_M_MIB, DEFAULT_ARGON2_P, DEFAULT_ARGON2_T, DEFAULT_PBKDF2_ITERATIONS,
     MAX_PBKDF2_ITERATIONS, MIN_ARGON2_M_MIB, MIN_ARGON2_P, MIN_ARGON2_T, MIN_PBKDF2_ITERATIONS,
     argon2id_raw, pbkdf2_sha256_raw,
+};
+pub use passkey::{
+    AssertionParts, FLAG_AT, FLAG_UP, FLAG_UV, FLAGS_ASSERT, FLAGS_REGISTER, assertion,
+    attestation_object, b64url, b64url_decode, client_data_json, cose_public_key,
+    generate_private_key, public_key_sec1, registration_auth_data, verify_es256,
 };
 pub use rsa::{
     OaepHash, RsaKeyPair, decrypt_private_key, generate_rsa_keypair, rsa_decrypt, rsa_encrypt,

@@ -15,7 +15,7 @@ pub const REDACTED: &str = "«redacted»";
 pub enum Access {
     /// 讀 metadata；floor 決定能看到多高敏感度的欄位
     See(Sensitivity),
-    /// 用而不讀
+    /// 用而不讀（§2.1 分級：totp/passkey 簽名同屬 Use 級——密鑰材料不出進程）
     Use(UseKind),
     /// 取明文（會進 context）
     Reveal(Sensitivity),
@@ -27,6 +27,8 @@ pub enum UseKind {
     TotpCode,
     InjectEnv,
     Run,
+    /// WebAuthn 簽名：私鑰用而不讀（Register/Assert；§2.1 分級同 use:totp）
+    Passkey,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -82,6 +84,7 @@ impl GrantSet {
             g(Access::Use(UseKind::TotpCode)),
             g(Access::Use(UseKind::InjectEnv)),
             g(Access::Use(UseKind::Run)),
+            g(Access::Use(UseKind::Passkey)),
             g(Access::Mutate(MutateOp::Create)),
             g(Access::Mutate(MutateOp::Patch)),
             g(Access::Mutate(MutateOp::Delete)),
@@ -105,7 +108,7 @@ pub enum ParseError {
 }
 
 /// DSL：`;` 分隔多條。每條 `<access> <target> [uses=N] [bytes=N] [approve]`。
-/// access ∈ `see:identity|see:secret|use:totp|use:env|use:run|reveal:identity|reveal:secret|mutate:create|...`
+/// access ∈ `see:identity|see:secret|use:totp|use:env|use:run|use:passkey|reveal:identity|reveal:secret|mutate:create|...`
 /// target ∈ `all|item:<uuid>|folder:<uuid>|collection:<uuid>|tag:<name>|uri:<domain>`
 /// 範例：`see:identity all; use:totp item:<uuid> uses=50; reveal:secret item:<uuid> uses=1 approve`
 pub fn parse_grants(spec: &str) -> Result<GrantSet, ParseError> {
@@ -180,6 +183,7 @@ fn parse_access(tok: &str) -> Result<Access, ParseError> {
             "totp" => Ok(Access::Use(UseKind::TotpCode)),
             "env" => Ok(Access::Use(UseKind::InjectEnv)),
             "run" => Ok(Access::Use(UseKind::Run)),
+            "passkey" => Ok(Access::Use(UseKind::Passkey)),
             _ => Err(ParseError::UnknownAccess(tok.to_string())),
         },
         "mutate" => match arg {

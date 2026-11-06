@@ -11,8 +11,8 @@ use bw_agent::{
     parse_grants, parse_ref,
 };
 use bw_proto::{
-    AgentCall, ApprovalId, AuthCall, Call, EventTopic, Response, RunPlan, SessionId, SyncCall,
-    UseCall, VaultCall, View, WtpError,
+    AgentCall, ApprovalId, AuthCall, Call, EventTopic, PasskeyCall, Response, RunPlan, SessionId,
+    SyncCall, UseCall, VaultCall, View, WtpError,
 };
 use bw_store::{SessionRow, SessionState};
 
@@ -210,6 +210,17 @@ impl Hub {
             }
             Call::Vault(VaultCall::MoveToOrg { item, .. }) => {
                 (Access::Mutate(MutateOp::Move), Some(*item))
+            }
+            // passkey 分級（契約 §4）：列表＝Metadata（Identity floor）；
+            // Register/Assert 取用私鑰＝Use(UseKind::Passkey)（用而不讀，同 totp 級）
+            Call::Passkey(PasskeyCall::GetPasskeys { .. }) => {
+                (Access::See(bw_proto::Sensitivity::Identity), None)
+            }
+            Call::Passkey(PasskeyCall::RegisterPasskey { item_id, .. }) => {
+                (Access::Use(UseKind::Passkey), *item_id)
+            }
+            Call::Passkey(PasskeyCall::AssertPasskey { .. }) => {
+                (Access::Use(UseKind::Passkey), None)
             }
             Call::Use(UseCall::TotpCode { id }) => (Access::Use(UseKind::TotpCode), Some(*id)),
             Call::Use(UseCall::ResolveRef { .. }) => {
@@ -627,6 +638,9 @@ pub fn item_of(call: &Call) -> Option<uuid::Uuid> {
         | Call::Vault(VaultCall::Restore { id })
         | Call::Use(UseCall::TotpCode { id }) => Some(*id),
         Call::Vault(VaultCall::Delete { ids }) => ids.first().copied(),
+        Call::Passkey(PasskeyCall::RegisterPasskey {
+            item_id: Some(id), ..
+        }) => Some(*id),
         _ => None,
     }
 }

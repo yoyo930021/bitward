@@ -152,12 +152,12 @@ pub fn argon2id_raw(
     )
 }
 
-pub(crate) fn b64(bytes: &[u8]) -> String {
+pub fn b64(bytes: &[u8]) -> String {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     STANDARD.encode(bytes)
 }
 
-pub(crate) fn b64_decode(s: &str) -> Result<Vec<u8>, CryptoError> {
+pub fn b64_decode(s: &str) -> Result<Vec<u8>, CryptoError> {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     STANDARD.decode(s).map_err(|_| CryptoError::BadB64)
 }

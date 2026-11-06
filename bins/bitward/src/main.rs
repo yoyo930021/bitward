@@ -11,8 +11,9 @@ use uuid::Uuid;
 use bw_btp::{read_server, write_client};
 use bw_proto::{
     AdminCall, AgentCall, Auth, AuthCall, Call, CipherDraft, ClientMsg, FieldEdit, FillCall,
-    ItemId, ItemKind, MutationId, OverlayOpWire, PROTO_VERSION, ProtoVersion, Query, Resolution,
-    Response, ServerMsg, SessionToken, SortKey, SyncCall, UseCall, VaultCall, View, WtpError,
+    ItemId, ItemKind, MutationId, OverlayOpWire, PROTO_VERSION, PasskeyCall, ProtoVersion, Query,
+    Resolution, Response, ServerMsg, SessionToken, SortKey, SyncCall, UseCall, VaultCall, View,
+    WtpError,
 };
 
 #[derive(Parser)]
@@ -77,6 +78,11 @@ enum Cmd {
         /// 模板，預設 {username}{TAB}{password}{TAB}{enter}
         #[arg(long)]
         template: Option<String>,
+    },
+    /// WebAuthn passkey（macOS autofill 的 daemon 端核心）
+    Passkey {
+        #[command(subcommand)]
+        cmd: PasskeyCmd,
     },
     Audit {
         #[arg(long, default_value_t = 50)]
@@ -215,6 +221,41 @@ enum TagCmd {
         id: String,
         #[arg(default_value = "true")]
         on: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum PasskeyCmd {
+    /// 列 passkey（Metadata 級：只含識別欄，無密鑰材料）
+    List {
+        #[arg(long)]
+        rp: Option<String>,
+    },
+    /// 註冊 passkey：daemon 生成 P-256 私鑰，輸出 attestation（JSON）
+    Register {
+        #[arg(long)]
+        rp: String,
+        #[arg(long)]
+        user: String,
+        /// b64url challenge
+        #[arg(long)]
+        challenge: String,
+        #[arg(long)]
+        handle: Option<String>,
+        #[arg(long)]
+        display: Option<String>,
+        /// 附加到既有 item（預設新建 login item）
+        #[arg(long)]
+        item: Option<String>,
+    },
+    /// 簽發 assertion（counter++ 進 outbox）
+    Assert {
+        #[arg(long)]
+        credential: String,
+        #[arg(long)]
+        challenge: String,
+        #[arg(long)]
+        rp: String,
     },
 }
 
@@ -671,6 +712,35 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             id: parse_id(id)?,
             template: template.clone(),
         }),
+        Cmd::Passkey { cmd } => match cmd {
+            PasskeyCmd::List { rp } => {
+                Call::Passkey(PasskeyCall::GetPasskeys { rp_id: rp.clone() })
+            }
+            PasskeyCmd::Register {
+                rp,
+                user,
+                challenge,
+                handle,
+                display,
+                item,
+            } => Call::Passkey(PasskeyCall::RegisterPasskey {
+                rp_id: rp.clone(),
+                challenge: challenge.clone(),
+                user_name: user.clone(),
+                user_handle: handle.clone().unwrap_or_else(|| user.clone()),
+                display_name: display.clone().unwrap_or_else(|| user.clone()),
+                item_id: item.as_deref().map(parse_id).transpose()?,
+            }),
+            PasskeyCmd::Assert {
+                credential,
+                challenge,
+                rp,
+            } => Call::Passkey(PasskeyCall::AssertPasskey {
+                credential_id: credential.clone(),
+                challenge: challenge.clone(),
+                rp_id: rp.clone(),
+            }),
+        },
         Cmd::Audit { tail, verify } => {
             if *verify {
                 Call::Agent(AgentCall::AuditVerify)
@@ -908,6 +978,29 @@ fn print_response(resp: &Response, json: bool) {
         }
         // AutoType 等計數類結果：扁平 JSON，無外殼（jq 直接命中 .typed）
         Response::Json(v) => println!("{}", serde_json::to_string_pretty(v).unwrap()),
+        // passkey：恆為扁平 JSON（Swift/測試端直接解析，無 --json 分支）
+        Response::Passkeys(v) => println!("{}", serde_json::to_string_pretty(v).unwrap()),
+        Response::PasskeyAttestation {
+            credential_id,
+            attestation_object,
+        } => println!(
+            "{}",
+            json!({"credential_id": credential_id, "attestation_object": attestation_object})
+        ),
+        Response::PasskeyAssertion {
+            credential_id,
+            authenticator_data,
+            client_data_json,
+            signature,
+        } => println!(
+            "{}",
+            json!({
+                "credential_id": credential_id,
+                "authenticator_data": authenticator_data,
+                "client_data_json": client_data_json,
+                "signature": signature,
+            })
+        ),
         Response::Version(s) => println!("{s}"),
         Response::Profile(p) => println!("{}", json!(p)),
         Response::Ok => println!("ok"),

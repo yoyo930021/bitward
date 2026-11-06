@@ -18,6 +18,9 @@ cbc.workspace = true
 hkdf.workspace = true
 rand.workspace = true
 base64.workspace = true
+p256.workspace = true
+serde_cbor.workspace = true
+serde_json.workspace = true
 # rsa 需 sha1 feature（OAEP-SHA1 是官方 org key 包裝演算法，見 NOTES.md）
 rsa = { version = "0.9", features = ["sha1", "sha2", "std"] }
 
