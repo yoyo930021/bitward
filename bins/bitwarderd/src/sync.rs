@@ -104,16 +104,22 @@ impl Hub {
             .iter()
             .map(|e| (e.path.clone(), e.value.clone()))
             .collect();
+        // 寫側金鑰＝cipher 歸屬：共享項目以 org 對稱金鑰重新加密（見
+        // `Hub::cipher_write_key`）；org key 未派生時拒絕，不產生壞密文。
+        let org_keys = self.org_key_map();
         let ours = self
             .machine
-            .with_keys(|kb| {
-                bw_vault::apply_merged(&base, &map, &|v| {
-                    bw_crypto::encrypt(kb.user_key(), v)
-                        .map(|e| e.to_string())
-                        .unwrap_or_default()
-                })
+            .with_keys(|kb| -> Option<Value> {
+                let key = self.cipher_write_key(kb, &base, &org_keys)?;
+                Some(bw_vault::apply_merged(&base, &map, &|v| {
+                    bw_crypto::encrypt_bytes_key(key, v.as_bytes()).unwrap_or_default()
+                }))
             })
-            .map_err(denied)?;
+            .map_err(denied)?
+            .ok_or_else(|| WtpError::Denied {
+                grant_gap: "共享項目寫入需所屬 org 對稱金鑰（akey 未解出，請 sync/重解鎖）"
+                    .to_owned(),
+            })?;
         let touched: Vec<&str> = edits.iter().map(|e| e.path.as_str()).collect();
         let payload = json!({"op": "patch", "base": base, "ours": ours, "touched": touched});
         let raw = self.store.raw(id).map_err(denied)?;
@@ -395,28 +401,46 @@ impl Hub {
         }
 
         // 漂移：欄位級三方合併。明文域比較（IV 隨機，密文不可比）。
+        // 金鑰按 theirs（伺服器現態）的 cipher 歸屬選：共享項目 base/ours/theirs
+        // 攤平與 PUT 重加密全走 org 對稱金鑰（`Hub::cipher_write_key`）。
+        // org key 未派生 → 結算回 Queued 等 sync 補齊 akey 後重試，
+        // 絕不以 user key 強解強加密（那會把解不開的密文推回伺服器）。
+        let org_keys = self.org_key_map();
         let merged = self
             .machine
-            .with_keys(|kb| {
-                let uk = kb.user_key();
-                let dec =
-                    |s: &str| -> Option<String> { bw_crypto::decrypt(uk, &s.to_string()).ok() };
+            .with_keys(|kb| -> Option<Result<Option<Value>, Vec<String>>> {
+                let key = self.cipher_write_key(kb, &theirs, &org_keys)?;
+                let dec = |s: &str| -> Option<String> {
+                    bw_crypto::decrypt_bytes_with_key(key, s)
+                        .ok()
+                        .and_then(|b| String::from_utf8(b).ok())
+                };
                 let base = bw_vault::flatten(&base_enc, &dec);
                 let ours = bw_vault::flatten(&ours_enc, &dec);
                 let theirs_m = bw_vault::flatten(&theirs, &dec);
-                match bw_vault::three_way(&base, &ours, &theirs_m) {
+                Some(match bw_vault::three_way(&base, &ours, &theirs_m) {
                     bw_vault::Merge::Push(map) => {
                         Ok(Some(bw_vault::apply_merged(&theirs, &map, &|v| {
-                            bw_crypto::encrypt(uk, v)
-                                .map(|e| e.to_string())
-                                .unwrap_or_default()
+                            bw_crypto::encrypt_bytes_key(key, v.as_bytes()).unwrap_or_default()
                         })))
                     }
                     bw_vault::Merge::Noop => Ok(None),
                     bw_vault::Merge::Conflict { fields } => Err(fields),
-                }
+                })
             })
             .map_err(|e| (bw_server::ServerError::Rejected(e.to_string()), true))?;
+        let merged = match merged {
+            None => {
+                let _ = self.store.settle(m.id, MutState::Queued);
+                return Err((
+                    bw_server::ServerError::Rejected(
+                        "org key not derived for shared cipher".into(),
+                    ),
+                    true,
+                ));
+            }
+            Some(v) => v,
+        };
         match merged {
             Ok(Some(body)) => {
                 let resp = client
@@ -577,20 +601,31 @@ impl Hub {
         for r in rows {
             let fields = match (&client, r.ours.get("base"), r.ours.get("ours")) {
                 (Some(c), Some(base), Some(ours)) => match c.cipher_get(r.item).await {
-                    Ok(theirs) => self
-                        .machine
-                        .with_keys(|kb| {
-                            let uk = kb.user_key();
-                            let dec = |s: &str| bw_crypto::decrypt(uk, &s.to_string()).ok();
-                            let b = bw_vault::flatten(base, &dec);
-                            let o = bw_vault::flatten(ours, &dec);
-                            let t = bw_vault::flatten(&theirs, &dec);
-                            match bw_vault::three_way(&b, &o, &t) {
-                                bw_vault::Merge::Conflict { fields } => fields,
-                                _ => vec![],
-                            }
-                        })
-                        .unwrap_or_default(),
+                    Ok(theirs) => {
+                        let org_keys = self.org_key_map();
+                        self.machine
+                            .with_keys(|kb| {
+                                // 衝突欄位顯示同寫側口徑：按 cipher 歸屬選鑰攤平。
+                                // org key 缺 → 退回 user key（純顯示路徑，最壞是
+                                // 欄位清單為空，不觸伺服器）。
+                                let key = self
+                                    .cipher_write_key(kb, ours, &org_keys)
+                                    .unwrap_or_else(|| kb.user_key().as_bytes());
+                                let dec = |s: &str| -> Option<String> {
+                                    bw_crypto::decrypt_bytes_with_key(key, s)
+                                        .ok()
+                                        .and_then(|b| String::from_utf8(b).ok())
+                                };
+                                let b = bw_vault::flatten(base, &dec);
+                                let o = bw_vault::flatten(ours, &dec);
+                                let t = bw_vault::flatten(&theirs, &dec);
+                                match bw_vault::three_way(&b, &o, &t) {
+                                    bw_vault::Merge::Conflict { fields } => fields,
+                                    _ => vec![],
+                                }
+                            })
+                            .unwrap_or_default()
+                    }
                     Err(_) => vec![],
                 },
                 _ => vec![],
@@ -720,4 +755,219 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::passkey::tests::unlocked_hub;
+
+    fn enc(key: &[u8], pt: &str) -> String {
+        bw_crypto::encrypt_bytes_key(key, pt.as_bytes()).unwrap()
+    }
+    fn dec(key: &[u8], ct: &str) -> Option<String> {
+        bw_crypto::decrypt_bytes_with_key(key, ct)
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+    }
+
+    /// 共享寫側鏡像 fixture：org（owner `2.` akey 可解）＋ collection ＋
+    /// org key 加密的共享 cipher。`with_akey=false` 模擬 akey 解不出的 org。
+    /// 回 (hub, dir, shared id, coll id, org key bytes, user key bytes)。
+    async fn fixture(
+        tag: &str,
+        with_akey: bool,
+    ) -> (
+        std::sync::Arc<Hub>,
+        std::path::PathBuf,
+        Uuid,
+        Uuid,
+        Vec<u8>,
+        Vec<u8>,
+    ) {
+        let (hub, dir) = unlocked_hub(tag).await;
+        let org_key = bw_crypto::OrgKey::from_bytes((100u8..164).collect()).unwrap();
+        let org_bytes = org_key.as_bytes().to_vec();
+        let user_bytes = hub
+            .machine
+            .with_keys(|kb| kb.user_key().as_bytes().to_vec())
+            .unwrap();
+        let akey = if with_akey {
+            Some(
+                hub.machine
+                    .with_keys(|kb| org_key.encrypt_with_user_key(kb.user_key()))
+                    .unwrap()
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        let org = Uuid::new_v4();
+        let coll = Uuid::new_v4();
+        let shared = Uuid::new_v4();
+        hub.store
+            .apply_sync(&json!({
+                "ciphers": [{
+                    "id": shared.to_string(),
+                    "type": 1,
+                    "organizationId": org.to_string(),
+                    "collectionIds": [coll.to_string()],
+                    "name": enc(&org_bytes, "Shared Name"),
+                    "login": {
+                        "username": enc(&org_bytes, "shared-user"),
+                        "password": enc(&org_bytes, "shared-pw"),
+                    },
+                    "revisionDate": "2026-11-07T00:00:00.000Z",
+                }],
+                "organizations": [{
+                    "id": org.to_string(), "name": "2.x|y|z", "key": akey,
+                    "status": 0, "type": 0,
+                }],
+                "collections": [{
+                    "id": coll.to_string(),
+                    "organizationId": org.to_string(),
+                    "name": enc(&org_bytes, "Coll"),
+                }],
+            }))
+            .unwrap();
+        (hub, dir, shared, coll, org_bytes, user_bytes)
+    }
+
+    /// 共享項目 patch：重加密必須用所屬 org 對稱金鑰，未觸及欄位原樣保留。
+    #[tokio::test]
+    async fn patch_shared_cipher_reencrypts_with_org_key() {
+        let (hub, _d, shared, _c, org_bytes, user_bytes) = fixture("w1", true).await;
+        hub.write_patch(
+            "s",
+            shared,
+            &[FieldEdit {
+                path: "password".into(),
+                value: Some("new-pw".into()),
+            }],
+        )
+        .await
+        .unwrap();
+        let mirror = hub.store.item(shared).unwrap().unwrap().enc_cipher;
+        let ct = mirror["login"]["password"].as_str().unwrap();
+        assert_eq!(
+            dec(&org_bytes, ct).as_deref(),
+            Some("new-pw"),
+            "共享項目欄位必須以 org 金鑰加密"
+        );
+        assert_eq!(
+            dec(&user_bytes, ct),
+            None,
+            "防回歸：不可再以 user key 加密（舊寫側行為）"
+        );
+        assert_eq!(
+            dec(&org_bytes, mirror["login"]["username"].as_str().unwrap()).as_deref(),
+            Some("shared-user"),
+            "未觸及欄位的 org 密文必須原樣保留"
+        );
+    }
+
+    /// 歸屬判定：organizationId 缺席時，collectionIds 非空 → 仍按集合反查所屬 org。
+    #[tokio::test]
+    async fn collection_ids_without_org_id_still_uses_org_key() {
+        let (hub, _d, shared, coll, org_bytes, user_bytes) = fixture("w2", true).await;
+        hub.store
+            .put_mirror(
+                shared,
+                &json!({
+                    "id": shared.to_string(),
+                    "type": 1,
+                    "organizationId": Value::Null,
+                    "collectionIds": [coll.to_string()],
+                    "name": enc(&org_bytes, "Shared Name"),
+                    "login": {"password": enc(&org_bytes, "shared-pw")},
+                }),
+            )
+            .unwrap();
+        hub.write_patch(
+            "s",
+            shared,
+            &[FieldEdit {
+                path: "notes".into(),
+                value: Some("note-me".into()),
+            }],
+        )
+        .await
+        .unwrap();
+        let mirror = hub.store.item(shared).unwrap().unwrap().enc_cipher;
+        let ct = mirror["notes"].as_str().unwrap();
+        assert_eq!(dec(&org_bytes, ct).as_deref(), Some("note-me"));
+        assert_eq!(dec(&user_bytes, ct), None);
+    }
+
+    /// akey 解不出（org key 未派生）時共享項目寫入必須被拒，而非退回
+    /// user key 產生其他裝置解不開的密文。
+    #[tokio::test]
+    async fn patch_shared_cipher_without_org_key_is_denied() {
+        let (hub, _d, shared, _c, org_bytes, _u) = fixture("w3", false).await;
+        let e = hub
+            .write_patch(
+                "s",
+                shared,
+                &[FieldEdit {
+                    path: "password".into(),
+                    value: Some("x".into()),
+                }],
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(e, WtpError::Denied { .. }),
+            "org key 未派生應拒絕寫入，got {e:?}"
+        );
+        let mirror = hub.store.item(shared).unwrap().unwrap().enc_cipher;
+        assert_eq!(
+            dec(&org_bytes, mirror["login"]["password"].as_str().unwrap()).as_deref(),
+            Some("shared-pw"),
+            "拒絕後鏡像不得被污染"
+        );
+        assert_eq!(
+            hub.store
+                .take_due(16)
+                .unwrap()
+                .iter()
+                .filter(|m| m.item == shared)
+                .count(),
+            0,
+            "拒絕後不得有 mutation 入列"
+        );
+    }
+
+    /// 個人項目不受影響：仍走 user key。
+    #[tokio::test]
+    async fn patch_personal_cipher_still_uses_user_key() {
+        let (hub, _d, shared, _c, _o, user_bytes) = fixture("w4", true).await;
+        let personal = Uuid::new_v4();
+        hub.store
+            .put_mirror(
+                personal,
+                &json!({
+                    "id": personal.to_string(), "type": 1,
+                    "organizationId": Value::Null, "collectionIds": [],
+                    "name": enc(&user_bytes, "Mine"),
+                    "revisionDate": "2026-11-07T00:00:00.000Z",
+                }),
+            )
+            .unwrap();
+        hub.write_patch(
+            "s",
+            personal,
+            &[FieldEdit {
+                path: "notes".into(),
+                value: Some("p-note".into()),
+            }],
+        )
+        .await
+        .unwrap();
+        let mirror = hub.store.item(personal).unwrap().unwrap().enc_cipher;
+        assert_eq!(
+            dec(&user_bytes, mirror["notes"].as_str().unwrap()).as_deref(),
+            Some("p-note")
+        );
+        let _ = shared;
+    }
 }

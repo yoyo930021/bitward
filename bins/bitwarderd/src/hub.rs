@@ -644,6 +644,53 @@ impl Hub {
             .unwrap_or_default()
     }
 
+    /// cipher 的歸屬 org（共享寫側契約：`collectionIds` 非空 → 所屬 org）。
+    /// `organizationId` 是直接證據（VW `/sync` 與 `GET /ciphers/{id}` 都帶，
+    /// 見 `crates/bw-sync/fixtures/sync_org_owner_vw.json`）；缺該欄但
+    /// `collectionIds` 非空時，以 collections 鏡像反查所屬 org。
+    /// 個人項目（兩皆空）→ `None`。
+    pub(crate) fn cipher_owner_org(&self, cipher: &Value) -> Option<Uuid> {
+        if let Some(o) = cipher
+            .get("organizationId")
+            .and_then(Value::as_str)
+            .and_then(|s| Uuid::parse_str(s).ok())
+        {
+            return Some(o);
+        }
+        let cols = cipher.get("collectionIds").and_then(Value::as_array)?;
+        if cols.is_empty() {
+            return None;
+        }
+        let listed: Vec<Uuid> = cols
+            .iter()
+            .filter_map(Value::as_str)
+            .filter_map(|s| Uuid::parse_str(s).ok())
+            .collect();
+        self.store
+            .collection_list()
+            .ok()?
+            .into_iter()
+            .find(|c| listed.contains(&c.id))
+            .map(|c| c.org)
+    }
+
+    /// 寫路徑欄位金鑰（base/ours/theirs 攤平與重新加密共用一把）：個人項目
+    /// 用 user key；共享項目（[`Self::cipher_owner_org`]）必須用所屬 org 的
+    /// 對稱金鑰——該 key 尚未派生（akey 解不出）時回 `None`，呼叫端**不得**
+    /// 退回 user key（那會把其他裝置解不開的密文推回伺服器，比不寫更糟）。
+    /// 讀路徑的同口徑容錯版見 [`cipher_field_decryptor`]。
+    pub(crate) fn cipher_write_key<'k>(
+        &self,
+        kb: &'k bw_keys::KeyBundle,
+        cipher: &Value,
+        org_keys: &'k HashMap<Uuid, bw_crypto::OrgKey>,
+    ) -> Option<&'k [u8]> {
+        match self.cipher_owner_org(cipher) {
+            None => Some(kb.user_key().as_bytes()),
+            Some(org) => org_keys.get(&org).map(|k| k.as_bytes()),
+        }
+    }
+
     /// 明文索引回填（全鏡像）。
     fn reindex_all(&self) -> Result<(), WtpError> {
         let metas = self

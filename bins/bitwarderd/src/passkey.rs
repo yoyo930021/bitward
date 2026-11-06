@@ -745,7 +745,7 @@ impl Hub {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::Arc;
 
@@ -753,7 +753,7 @@ mod tests {
     use bw_keys::UnlockMaterial;
     use bw_proto::PasskeyCall;
 
-    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+    pub(crate) fn tmp_dir(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!(
             "bw-passkey-{}-{}-{tag}",
             std::process::id(),
@@ -770,7 +770,7 @@ mod tests {
 
     /// 合成帳號（PBKDF2 iter=1）落 account.json → Hub::open → MasterPassword 解鎖。
     /// server URL 是擺設：這些測試不碰網路（drain 無消費者）。
-    async fn unlocked_hub(tag: &str) -> (Arc<Hub>, std::path::PathBuf) {
+    pub(crate) async fn unlocked_hub(tag: &str) -> (Arc<Hub>, std::path::PathBuf) {
         let dir = tmp_dir(tag);
         let email = "t@example.com";
         let pw = "test-master-pw".to_string();

@@ -157,7 +157,9 @@ fn aes_cbc128_decrypt(key: &[u8], iv: &[u8], ct: &[u8]) -> Result<Vec<u8>, Crypt
 }
 
 /// type 2 生成（key 必須是 64 bytes composite）。隨機 IV。
-pub(crate) fn encrypt_bytes_key(key: &[u8], plaintext: &[u8]) -> Result<String, CryptoError> {
+/// 對稱於 [`decrypt_bytes_with_key`]：org 對稱金鑰與 user key 同為 64 bytes
+/// composite，寫路徑按 cipher 歸屬選鑰後都走這裡。
+pub fn encrypt_bytes_key(key: &[u8], plaintext: &[u8]) -> Result<String, CryptoError> {
     let mut iv = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut iv);
     encrypt_with_iv(key, &iv, plaintext)

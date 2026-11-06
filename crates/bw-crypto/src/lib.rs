@@ -21,7 +21,7 @@ pub use kdf::{b64, b64_decode};
 
 pub use envelope::{
     CipherType, EncParts, decrypt_bytes, decrypt_bytes_with_key, decrypt_with_raw_key,
-    encrypt_bytes, encrypt_with_iv, parse_enc_str,
+    encrypt_bytes, encrypt_bytes_key, encrypt_with_iv, parse_enc_str,
 };
 pub use generator::{PasswordOptions, generate_password};
 pub use kdf::{

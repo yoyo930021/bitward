@@ -5,7 +5,9 @@
 # org key）→ A 建 collection 並指派 B → A POST 共享 cipher（org key 加密）+
 # 個人 cipher → 兩台 daemon 各自 login+sync。
 # 斷言：org/collection 落庫、ls --collection 過濾、owner/成員兩條解密鏈各自
-# 解出共享項目明文、metadata 不洩密、個人項目不外洩、collection grant 授權。
+# 解出共享項目明文、metadata 不洩密、個人項目不外洩、collection grant 授權、
+# 共享**寫側**（A 改 → org key 重加密 → B 收通知收斂；B 離線改（stale base）
+# → 上線欄位級三方合併，雙欄各自存活且兩端可解）。
 # 用法：dev/e2e/orgpath.sh [vaultwarden-url]
 #   預設 http://127.0.0.1:18095（demo e2e 共用实例）；不可達時自起容器（CI 路徑）。
 #   RECORD_FIXTURES=1 時把 A/B 的真實 /sync 錄進 crates/bw-sync/fixtures/。
@@ -289,5 +291,59 @@ pass "collection 維度授權（命中放行、floor 與錯集合拒絕）"
 grep -a "$WP" "$DATA_A/vault.db" "$DATA_A/vault.db-wal" 2>/dev/null && fail "A vault.db 含主密碼明文" || true
 grep -ra "$WP" "$DATA_B/keys" 2>/dev/null && fail "B keys 目錄含主密碼明文" || true
 pass "盤上無主密碼明文"
+
+# —— 共享寫側（mutation 三方合併與 patch 加密按 cipher 歸屬選 org key）——
+PENDING='(.outbox.queued + .outbox.in_flight + .outbox.awaiting + .outbox.conflict)'
+
+# 8. A 改共享項目 → B（不同帳號、不同 user key）經 notifications 收斂：
+#    若 A 端誤以 user key 重加密，B 只持 org key，reveal 必然解不出新值。
+NEW_PW="Sh@red-Pw-8y!x"
+NEW_NAME="E2E Shared Login v2"
+BA edit "$CIPHER_ID" --set name="$NEW_NAME" --set password="$NEW_PW" >/dev/null
+for i in $(seq 1 60); do [[ "$(BA outbox | jq "$PENDING")" == "0" ]] && break; sleep 1; done
+[[ "$(BA outbox | jq "$PENDING")" == "0" ]] || fail "A 共享項目 patch 未收斂（outbox 未清）"
+BA reveal "$CIPHER_ID" | jq -e --arg pw "$NEW_PW" '.password == $pw' >/dev/null \
+  || fail "A 寫回後自己解不開（重加密金鑰錯？）"
+SEEN=no
+for i in $(seq 1 45); do
+  # B 不手動 sync：靠 notifications targeted pull 收 theirs
+  BB reveal "$CIPHER_ID" 2>/dev/null | jq -e --arg pw "$NEW_PW" '.password == $pw' >/dev/null \
+    && { SEEN=yes; break; }
+  sleep 1
+done
+[[ "$SEEN" == yes ]] || fail "B 45 秒內未收斂新密碼（org key 重加密或通知鏈路斷）"
+BA ls | jq -e --arg id "$CIPHER_ID" --arg name "$NEW_NAME" \
+  'any(.meta.id == $id and .meta.name == $name)' >/dev/null \
+  || fail "共享項目 name 未在 A 收斂"
+pass "共享寫側：A 編輯 → org key 重加密 → B 通知收斂（跨帳號金鑰隔離自證）"
+
+# 9. B 離線改 → 上線欄位級合併：B daemon 先死（鏡像凍在舊 rev，等價離線；
+#    notifications 不回補），A 改 username 收斂後 B 重生改 password。
+#    B 的 CAS 必然落空 → push_patch 以 org key 做 base/ours/theirs 三方合併，
+#    不相交欄位自動合體、不進衝突收件匣。
+BB sync >/dev/null
+kill -9 "$DAEMON_B" 2>/dev/null || true
+sleep 0.5
+BA edit "$CIPHER_ID" --set username=alice-org >/dev/null
+for i in $(seq 1 60); do [[ "$(BA outbox | jq "$PENDING")" == "0" ]] && break; sleep 1; done
+[[ "$(BA outbox | jq "$PENDING")" == "0" ]] || fail "A 的 username 編輯未收斂"
+./target/debug/bitwarderd --data-dir "$DATA_B" --sock "$SOCK_B" &
+DAEMON_B=$!
+for i in $(seq 1 20); do [[ -S "$SOCK_B" ]] && break; sleep 0.2; done
+[[ -S "$SOCK_B" ]] || fail "B daemon 重啟 socket 未就緒"
+rm -f "$DATA_B/cli_session"   # 重啟後記憶體 session 消失；取新 session
+BB unlock >/dev/null
+FINAL_PW="Sh@red-Pw-9z!x"
+BB edit "$CIPHER_ID" --set password="$FINAL_PW" >/dev/null
+for i in $(seq 1 60); do [[ "$(BB outbox | jq "$PENDING")" == "0" ]] && break; sleep 1; done
+[[ "$(BB outbox | jq "$PENDING")" == "0" ]] || fail "B stale-base patch 未收斂（合併路徑卡死）"
+[[ "$(BB conflicts | jq 'length')" == "0" ]] || fail "不相交欄位合併不應進衝突收件匣"
+BA sync >/dev/null
+for WHO in A B; do
+  B$WHO reveal "$CIPHER_ID" | jq -e --arg pw "$FINAL_PW" '
+    .password == $pw and .username == "alice-org"' >/dev/null \
+    || fail "$WHO 端合併後欄位缺失（username/password 應各自存活）"
+done
+pass "共享寫側：B 離線改（stale base）→ 上線欄位級 org key 合併，雙欄存活"
 
 echo "ORGPATH E2E: ALL PASS"

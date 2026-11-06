@@ -1,8 +1,9 @@
 //! 欄位級三方合併（契約 §2.4）：純函數，不做加解密、不碰 IO。
 //!
 //! 座標系是**欄位路徑字串**（文法見 bw_proto::FieldEdit 文件）：
-//! daemon 先用 user key 把三個密文形態（base/ours/theirs）攤平成
-//! `FieldMap`（明文），這裡只比較與合併明文；回傳「哪些路徑要推什麼值」。
+//! daemon 先按 cipher 歸屬選鑰（個人＝user key；共享＝所屬 org 對稱金鑰，
+//! 見 bitwarderd `Hub::cipher_write_key`）把三個密文形態（base/ours/theirs）
+//! 攤平成 `FieldMap`（明文），這裡只比較與合併明文；回傳「哪些路徑要推什麼值」。
 //!
 //! 為什麼不用密文比較：信封 IV 隨機，同一明文每次加密都不同，
 //! 密文相等 ⇏ 內容相等；必須在明文域判定（來源：bitwarden 信封格式，
