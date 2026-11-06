@@ -452,6 +452,7 @@ async fn open_session(
                 }
                 return Ok((rd, wr));
             }
+            Ok(ServerMsg::Error { message }) => return Err(message),
             Ok(other) => return Err(format!("expected Welcome, got {other:?}")),
             Err(e) if attempt == 0 => {
                 // 撤銷/失效必須留痕（readpath A6 的可觀察性）：靜默重 Enroll 會把

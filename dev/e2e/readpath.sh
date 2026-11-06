@@ -85,15 +85,35 @@ cp "$DATA/cli_session" "$DATA/session_a"
 rm -f "$DATA/cli_session"          # 第二次指令另開新 session
 B unlock >/dev/null                # session B（冪等：已解鎖不该撤銷 A）
 cp "$DATA/cli_session" "$DATA/session_b"
+cp "$DATA/session_a" "$DATA/session_a_real"   # raw 重放用（mv 會搬走原檔）
 A_OUT=$(./target/debug/bitward --sock "$SOCK" --json ls 2>&1 </dev/null || true)   # 用 cli_session(=B)
 [[ "$A_OUT" != *"stale"* && "$A_OUT" != *"StaleEpoch"* ]] || fail "A6 unlock 互毀"
 B lock >/dev/null
 mv "$DATA/session_a" "$DATA/cli_session"
-# CLI 對撤銷 session 會自我癒合（重 Enroll）但必須留 stderr 痕；
-# 無痕＝lock 級聯語意被洗掉（readpath A6 的原始把關點）。
+# A6-1（daemon 側實證，與 CLI 措辭無關）：raw 重放撤銷中的舊 token，
+# Hello 必須收到 ServerMsg::Error 且原因指向撤銷——刪掉撤銷碼此斷言即紅。
+python3 - "$SOCK" "$(cat "$DATA/session_a_real")" <<'PYEOF'
+import socket, struct, json, sys
+sock, token = sys.argv[1], sys.argv[2]
+def send(s, m):
+    b = json.dumps(m).encode(); s.sendall(struct.pack("<I", len(b)) + b)
+def recv(s):
+    h = s.recv(4)
+    if len(h) < 4: raise SystemExit("A6-1: daemon 靜默關閉，未回錯誤框架（撤銷原因未上車）")
+    n = struct.unpack("<I", h)[0]
+    buf = b""
+    while len(buf) < n: buf += s.recv(n - len(buf))
+    return json.loads(buf)
+s = socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect(sock)
+send(s, {"Hello": {"version": 1, "auth": {"Session": {"token": token}}, "wants": []}})
+r = recv(s)
+assert "Error" in r, f"A6-1: 舊 token 竟被接受: {list(r)}"
+assert "撤銷" in r["Error"]["message"] or "revoked" in r["Error"]["message"], r
+PYEOF
+# A6-2：CLI 對撤銷 token 癒合重入會且留 stderr 痕
 A6_ERR=$(B ls 2>&1 >/dev/null || true)
-echo "$A6_ERR" | grep -qiE '撤銷|失效|revoked|enroll' || fail "A6 lock 級聯無撤銷痕跡"
-pass "A6 unlock 冪等 + lock 級聯撤銷（CLI 癒合留痕）"
+echo "$A6_ERR" | grep -qiE '撤銷|revoked' || fail "A6-2 CLI 癒合未帶撤銷原因"
+pass "A6 unlock 冪等 + lock 級聯撤銷（raw 重放拒斥＋CLI 癒合留痕）"
 
 # A8：每個 Call 都落 audit 且 hash 鏈可驗證
 rm -f "$DATA/cli_session"   # A6 用過的 token 已被 lock 撤銷，取新 session

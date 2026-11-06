@@ -714,6 +714,12 @@ pub enum ServerMsg {
     Challenge {
         kind: String,
     },
+    /// 握手層拒絕（Hello 前無 rid 可用）：原因必須上車而非靜默 close，
+    /// 否則 thin 端把「撤銷」誤歸因「daemon 重啟」（readpath A6 教訓）。
+    /// 附加在 enum 尾端，postcard variant 索引紀律同 §2.6。
+    Error {
+        message: String,
+    },
 }
 
 /// 協定級錯誤。serde 表示穩定：JSON 用 externally-tagged，postcard 同。

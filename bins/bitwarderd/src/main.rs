@@ -319,90 +319,104 @@ where
         .map_err(|_| WtpError::Denied {
             grant_gap: "hello unreadable".into(),
         })?;
-    let ClientMsg::Hello {
-        version,
-        auth,
-        wants,
-    } = hello
-    else {
-        return Err(WtpError::Denied {
-            grant_gap: "first message must be Hello".into(),
-        });
-    };
-    if version.0 > PROTO_VERSION {
-        return Err(WtpError::Unsupported {
-            feature: format!("peer proto {} > daemon {PROTO_VERSION}", version.0),
-        });
-    }
-    let sess = match auth {
-        Auth::Enroll {
-            display_name,
-            pairing,
-            pair_code,
-        } => {
-            // 本機 UDS 的 Enroll = Interactive 全權；TLS 連線必須帶配對碼（§1.2）
-            let token = if pairing.is_empty() {
-                Uuid::new_v4().to_string()
-            } else {
-                pairing.clone()
-            };
-            match pair_code {
-                None => {
-                    if local_uid.is_none() {
-                        return Err(WtpError::Denied {
-                            grant_gap: "跨機連線需要配對碼".into(),
-                        });
-                    }
-                    hub.new_session(
+    let auth_out: Result<_, WtpError> = 'auth: {
+        let ClientMsg::Hello {
+            version,
+            auth,
+            wants,
+        } = hello
+        else {
+            break 'auth Err(WtpError::Denied {
+                grant_gap: "first message must be Hello".into(),
+            });
+        };
+        if version.0 > PROTO_VERSION {
+            break 'auth Err(WtpError::Unsupported {
+                feature: format!("peer proto {} > daemon {PROTO_VERSION}", version.0),
+            });
+        }
+        let sess = match auth {
+            Auth::Enroll {
+                display_name,
+                pairing,
+                pair_code,
+            } => {
+                // 本機 UDS 的 Enroll = Interactive 全權；TLS 連線必須帶配對碼（§1.2）
+                let token = if pairing.is_empty() {
+                    Uuid::new_v4().to_string()
+                } else {
+                    pairing.clone()
+                };
+                match pair_code {
+                    None => {
+                        if local_uid.is_none() {
+                            break 'auth Err(WtpError::Denied {
+                                grant_gap: "跨機連線需要配對碼".into(),
+                            });
+                        }
+                        hub.new_session(
                         token,
                         crate::agent::SessionKind::Interactive,
                         bw_agent::GrantSet::default_full(),
                         None,
                         serde_json::json!({"kind": "local", "uid": local_uid, "name": display_name}),
                     )
+                    }
+                    Some(code) => match hub.consume_pairing(&code) {
+                        Some(spec) => {
+                            let expires = hub.store.now_ms() + spec.ttl_secs * 1000;
+                            hub.new_session(
+                                token,
+                                crate::agent::SessionKind::Device,
+                                spec.grants,
+                                Some(expires),
+                                serde_json::json!({"kind": "device", "name": spec.name}),
+                            )
+                        }
+                        None => {
+                            break 'auth Err(WtpError::Denied {
+                                grant_gap: "配對碼無效或已過期".into(),
+                            });
+                        }
+                    },
                 }
-                Some(code) => match hub.consume_pairing(&code) {
-                    Some(spec) => {
-                        let expires = hub.store.now_ms() + spec.ttl_secs * 1000;
-                        hub.new_session(
-                            token,
-                            crate::agent::SessionKind::Device,
-                            spec.grants,
-                            Some(expires),
-                            serde_json::json!({"kind": "device", "name": spec.name}),
-                        )
-                    }
-                    None => {
-                        return Err(WtpError::Denied {
-                            grant_gap: "配對碼無效或已過期".into(),
-                        });
-                    }
-                },
             }
-        }
-        Auth::Session { token } => {
-            let sess =
-                hub.sessions
-                    .lock()
-                    .unwrap()
-                    .get(&token)
-                    .cloned()
-                    .ok_or(WtpError::Denied {
+            Auth::Session { token } => {
+                let Some(sess) = hub.sessions.lock().unwrap().get(&token).cloned() else {
+                    break 'auth Err(WtpError::Denied {
                         grant_gap: "unknown session".into(),
-                    })?;
-            // lock 撤銷的 session 在 Hello 就拒（A6），讓 thin 端的「重 Enroll 一次」
-            // 路徑接住；拖到 Invoke 才回 StaleEpoch 会让 client 快取殭屍 token 永世復活失敗。
-            if sess.revoked.load(std::sync::atomic::Ordering::Relaxed) {
-                return Err(WtpError::Denied {
-                    grant_gap: "session 已隨鎖撤銷".into(),
+                    });
+                };
+                // lock 撤銷的 session 在 Hello 就拒（A6），讓 thin 端的「重 Enroll 一次」
+                // 路徑接住；拖到 Invoke 才回 StaleEpoch 会让 client 快取殭屍 token 永世復活失敗。
+                if sess.revoked.load(std::sync::atomic::Ordering::Relaxed) {
+                    break 'auth Err(WtpError::Denied {
+                        grant_gap: "session 已隨鎖撤銷".into(),
+                    });
+                }
+                sess
+            }
+            Auth::Resume { .. } => {
+                break 'auth Err(WtpError::Unsupported {
+                    feature: "Resume 在 P4".into(),
                 });
             }
-            sess
-        }
-        Auth::Resume { .. } => {
-            return Err(WtpError::Unsupported {
-                feature: "Resume 在 P4".into(),
-            });
+        };
+        Ok((sess, wants))
+    };
+    let (sess, wants) = match auth_out {
+        Ok(v) => v,
+        // 拒絕原因必須上車（readpath A6 raw 重放的依據）：只 close 不回應，
+        // thin 端會把「撤銷」誤歸因成「daemon 重啟」。
+        Err(e) => {
+            let _ = write_server(
+                &mut wr,
+                &ServerMsg::Error {
+                    message: e.to_string(),
+                },
+            )
+            .await;
+            return Err(e);
         }
     };
 
