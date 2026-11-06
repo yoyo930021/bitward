@@ -5,7 +5,7 @@ use std::path::Path;
 
 use bw_proto::{ItemKind, Query, SortKey};
 use bw_store::{AuditRecord, MutState, MutationDraft, Overlay, OverlayOp, Store, StoreError};
-use serde_json::json;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 fn tmp_vault(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -631,4 +631,260 @@ fn query_uri_host_anchoring() {
         })
         .unwrap();
     assert!(hits.is_empty());
+}
+
+fn org_fixture(id: &str, key: &str) -> serde_json::Value {
+    json!({
+        "id": id,
+        "name": "2.orgname|ct|mac",
+        "key": key,
+        "status": 2,
+        "type": 0,
+        "keys": {
+            "publicKey": "MIIBIjAN-PUB",
+            "encryptedPrivateKey": "2.orgpriv|ct|mac"
+        },
+        "object": "profileOrganization"
+    })
+}
+
+fn collection_fixture(id: &str, org: &str) -> serde_json::Value {
+    json!({
+        "id": id,
+        "organizationId": org,
+        "name": "2.collname|ct|mac",
+        "object": "collection"
+    })
+}
+
+fn shared_cipher(id: &str, org: &str, cols: &[String]) -> serde_json::Value {
+    let mut c = cipher(id, "2.shared|ct|mac", "2026-10-01T00:00:00.000Z", false);
+    c["organizationId"] = json!(org);
+    c["collectionIds"] = json!(cols);
+    c
+}
+
+#[test]
+fn apply_sync_lands_orgs_collections_and_membership() {
+    let (_d, path) = tmp_vault("org_sync");
+    let store = Store::open(&path).unwrap();
+    let org = Uuid::new_v4().to_string();
+    let col = Uuid::new_v4().to_string();
+    let shared = Uuid::new_v4().to_string();
+    let personal = Uuid::new_v4().to_string();
+    let akey = format!("2.{org}|ct|mac");
+    store
+        .apply_sync(&json!({
+            "ciphers": [
+                shared_cipher(&shared, &org, std::slice::from_ref(&col)),
+                cipher(&personal, "2.p|c|m", "2026-10-01T00:00:00.000Z", false),
+            ],
+            "collections": [collection_fixture(&col, &org)],
+            "profile": { "organizations": [org_fixture(&org, &akey)] },
+        }))
+        .unwrap();
+
+    assert_eq!(store.org_count().unwrap(), 1);
+    let o = store.org(Uuid::parse_str(&org).unwrap()).unwrap().unwrap();
+    assert_eq!(o.key.as_deref(), Some(akey.as_str()));
+    assert_eq!(o.public_key.as_deref(), Some("MIIBIjAN-PUB"));
+    assert_eq!(o.enc_private_key.as_deref(), Some("2.orgpriv|ct|mac"));
+    assert_eq!(o.status, Some(2));
+    assert!(!o.key_verified);
+    let cols = store.collection_list().unwrap();
+    assert_eq!(cols.len(), 1);
+    assert_eq!(cols[0].org, Uuid::parse_str(&org).unwrap());
+
+    // 共享項目 metadata 帶 org/collection 歸屬；個人項目恆空
+    let m = store
+        .meta(Uuid::parse_str(&shared).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.organization_id, Some(Uuid::parse_str(&org).unwrap()));
+    assert_eq!(m.collections, vec![Uuid::parse_str(&col).unwrap()]);
+    let p = store
+        .meta(Uuid::parse_str(&personal).unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(p.collections.is_empty() && p.organization_id.is_none());
+
+    // Query.collection 過濾只回該集合的項目
+    let hits = store
+        .query(&Query {
+            collection: Some(Uuid::parse_str(&col).unwrap()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, Uuid::parse_str(&shared).unwrap());
+
+    // 全量替換語意：再同步缺 org/collection → 表清空
+    store
+        .apply_sync(&json!({
+            "ciphers": [cipher(&personal, "2.p|c|m", "2026-10-02T00:00:00.000Z", false)],
+        }))
+        .unwrap();
+    assert_eq!(store.org_count().unwrap(), 0);
+    assert!(store.collection_list().unwrap().is_empty());
+    assert!(
+        store
+            .meta(Uuid::parse_str(&personal).unwrap())
+            .unwrap()
+            .unwrap()
+            .collections
+            .is_empty()
+    );
+}
+
+#[test]
+fn apply_sync_accepts_v2_objects_shape() {
+    let (_d, path) = tmp_vault("org_sync_v2");
+    let store = Store::open(&path).unwrap();
+    let org = Uuid::new_v4().to_string();
+    let col = Uuid::new_v4().to_string();
+    let shared = Uuid::new_v4().to_string();
+    store
+        .apply_sync(&json!({
+            "version": 1,
+            "objects": {
+                "ciphers": [shared_cipher(&shared, &org, std::slice::from_ref(&col))],
+                "collections": [collection_fixture(&col, &org)],
+                "organizations": [org_fixture(&org, "4.rsawrapped")],
+            },
+        }))
+        .unwrap();
+    assert_eq!(store.org_count().unwrap(), 1);
+    assert_eq!(store.collection_list().unwrap().len(), 1);
+    assert_eq!(
+        store
+            .query(&Query {
+                collection: Some(Uuid::parse_str(&col).unwrap()),
+                ..Default::default()
+            })
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn put_mirror_replaces_collection_membership() {
+    let (_d, path) = tmp_vault("org_mirror");
+    let store = Store::open(&path).unwrap();
+    let org = Uuid::new_v4();
+    let col_a = Uuid::new_v4();
+    let col_b = Uuid::new_v4();
+    let id = Uuid::new_v4();
+    store
+        .apply_sync(&json!({
+            "ciphers": [shared_cipher(
+                &id.to_string(),
+                &org.to_string(),
+                &[col_a.to_string()],
+            )],
+            "collections": [collection_fixture(&col_a.to_string(), &org.to_string())],
+            "profile": { "organizations": [org_fixture(&org.to_string(), "2.k|c|m")] },
+        }))
+        .unwrap();
+    assert_eq!(store.meta(id).unwrap().unwrap().collections, vec![col_a]);
+    // unshare：同一 cipher 換成 col_b 歸屬（move 後 put_mirror 的形態）
+    store
+        .put_mirror(
+            id,
+            &shared_cipher(&id.to_string(), &org.to_string(), &[col_b.to_string()]),
+        )
+        .unwrap();
+    assert_eq!(store.meta(id).unwrap().unwrap().collections, vec![col_b]);
+    // 完全撤出集合 → 個人項目
+    store
+        .put_mirror(
+            id,
+            &cipher(
+                &id.to_string(),
+                "2.p|c|m",
+                "2026-10-03T00:00:00.000Z",
+                false,
+            ),
+        )
+        .unwrap();
+    assert!(store.meta(id).unwrap().unwrap().collections.is_empty());
+}
+
+#[test]
+fn org_key_verified_survives_sync_rebuild() {
+    let (_d, path) = tmp_vault("org_verify");
+    let store = Store::open(&path).unwrap();
+    let org = Uuid::new_v4();
+    let payload = json!({
+        "ciphers": [],
+        "collections": [],
+        "profile": { "organizations": [org_fixture(&org.to_string(), "2.k|c|m")] },
+    });
+    store.apply_sync(&payload).unwrap();
+    store.org_mark_verified(org, true).unwrap();
+    // 重放同一 /sync：驗證結果不被鏡像重建抹除（避免每次 sync 重驗 RSA）
+    store.apply_sync(&payload).unwrap();
+    assert!(store.org(org).unwrap().unwrap().key_verified);
+    // 換成新 org（不同 id）→ 從 0 開始
+    let org2 = Uuid::new_v4();
+    store
+        .apply_sync(&json!({
+            "ciphers": [],
+            "profile": { "organizations": [org_fixture(&org2.to_string(), "2.k2|c|m")] },
+        }))
+        .unwrap();
+    assert!(!store.org(org2).unwrap().unwrap().key_verified);
+}
+
+/// 真實錄製的 VW 1.37.2 org /sync（`dev/e2e/orgpath.sh` RECORD_FIXTURES=1 產出）。
+fn recorded_sync(name: &str) -> serde_json::Value {
+    let p = format!("{}/../bw-sync/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+    serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap()
+}
+
+#[test]
+fn apply_sync_replays_recorded_org_sync() {
+    for fixture in ["sync_org_owner_vw.json", "sync_org_member_vw.json"] {
+        let (_d, path) = tmp_vault("org_replay");
+        let store = Store::open(&path).unwrap();
+        let sync = recorded_sync(fixture);
+        let shared = sync
+            .get("ciphers")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .find(|c| !c["collectionIds"].as_array().unwrap().is_empty())
+            .unwrap();
+        let org_id = shared["organizationId"].as_str().unwrap();
+        let col_id = shared["collectionIds"][0].as_str().unwrap();
+        store.apply_sync(&sync).unwrap();
+
+        assert_eq!(store.org_count().unwrap(), 1, "{fixture}");
+        let o = store
+            .org(Uuid::parse_str(org_id).unwrap())
+            .unwrap()
+            .unwrap();
+        // owner 落 `2.` 對稱 akey、成員落 `4.` RSA akey（協定兩態都要如實鏡像）
+        let prefix = o.key.as_deref().unwrap().chars().next().unwrap();
+        assert!(matches!(prefix, '2' | '4'), "{fixture} akey={prefix}");
+        assert!(o.public_key.is_none(), "VW 的 /sync 不含 org 公開金鑰");
+        assert!(!store.collection_list().unwrap().is_empty(), "{fixture}");
+
+        let hits = store
+            .query(&Query {
+                collection: Some(Uuid::parse_str(col_id).unwrap()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(hits.len(), 1, "{fixture}");
+        assert_eq!(
+            hits[0].id,
+            Uuid::parse_str(shared["id"].as_str().unwrap()).unwrap()
+        );
+        assert_eq!(
+            hits[0].organization_id,
+            Some(Uuid::parse_str(org_id).unwrap())
+        );
+        assert_eq!(hits[0].collections, vec![Uuid::parse_str(col_id).unwrap()]);
+    }
 }

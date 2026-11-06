@@ -48,8 +48,15 @@ pub fn decrypt_private_key(
     Ok(Zeroizing::new(der))
 }
 
-fn parse_public_key(spki_b64: &str) -> Result<RsaPublicKey, CryptoError> {
-    let der = b64_decode(spki_b64)?;
+/// 解析 RSA 公開金鑰：接受 b64 DER(SPKI) 或 PEM 裝甲（伺服器上使用者/org
+/// 公開金鑰的實際形態是 `-----BEGIN PUBLIC KEY-----` PEM；官方 client
+/// `CryptoFunctionService.rsaDeserializePublicKey` 同样是去頭尾再 b64）。
+fn parse_public_key(s: &str) -> Result<RsaPublicKey, CryptoError> {
+    let body: String = s
+        .lines()
+        .filter(|l| !l.trim().starts_with("-----"))
+        .collect::<String>();
+    let der = b64_decode(body.trim())?;
     RsaPublicKey::from_public_key_der(&der).map_err(|_| CryptoError::Rsa)
 }
 
@@ -154,5 +161,25 @@ mod tests {
         let w = rsa_encrypt(&pair.public_key_b64, OaepHash::Sha256, b"seed").unwrap();
         assert!(w.starts_with("3."));
         assert_eq!(rsa_decrypt(&pkcs8, &w).unwrap(), b"seed");
+    }
+
+    #[test]
+    fn public_key_accepts_pem_armor() {
+        // 伺服器實際存的公開金鑰是 PEM 裝甲（GET /public-key/{email}）；
+        // 同一把鑰的 b64 與 PEM 兩種形態必須都能包。
+        let uk = key64();
+        let pair = generate_rsa_keypair(&uk).unwrap();
+        let der = b64_decode(&pair.public_key_b64).unwrap();
+        let pem = format!(
+            "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----",
+            b64(&der)
+        );
+        let org = OrgKey::from_bytes((100u8..164).collect()).unwrap();
+        let from_pem = wrap_org_key(&pem, &org).unwrap();
+        let pkcs8 = decrypt_private_key(&uk, &pair.encrypted_private_key).unwrap();
+        assert_eq!(
+            unwrap_org_key_rsa(&pkcs8, &from_pem).unwrap().as_bytes(),
+            org.as_bytes()
+        );
     }
 }

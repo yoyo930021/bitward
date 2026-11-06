@@ -139,6 +139,23 @@ impl Client {
         Ok(SyncResponse::parse(&self.sync().await?))
     }
 
+    /// `GET /organizations/{id}/crypto/keys`：org RSA 公開/私鑰信封。
+    /// 舊 server 無 `/crypto/` 前綴（Vaultwarden 1.37.2 只有
+    /// `GET /organizations/{id}/keys`，且僅回 publicKey），缺 route 時退回。
+    /// 來源：https://github.com/dani-garcia/vaultwarden/blob/1.37.2/src/api/core/organizations.rs
+    /// （`get_organization_keys`，OrgMemberHeaders＝任何成員可讀）。
+    pub async fn org_keys(&self, org_id: ItemId) -> Result<Value, ServerError> {
+        match self
+            .get_json(&format!("organizations/{org_id}/crypto/keys"))
+            .await
+        {
+            Err(e) if is_route_missing_err(&e) => {
+                self.get_json(&format!("organizations/{org_id}/keys")).await
+            }
+            other => other,
+        }
+    }
+
     /// `GET /ciphers`（列表；`GET /sync` 的輕量替代）。
     pub async fn ciphers_list(&self) -> Result<Value, ServerError> {
         self.get_json("ciphers").await

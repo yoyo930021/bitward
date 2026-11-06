@@ -83,6 +83,9 @@ pub struct ItemMeta {
     pub uris: Vec<String>,
     pub folder_id: Option<FolderId>,
     pub organization_id: Option<CollectionId>,
+    /// 共享歸屬（P4b）：cipher 所屬 collection id 集合；個人項目恆為空
+    #[serde(default)]
+    pub collections: Vec<CollectionId>,
     pub favorite: bool,
     pub tags: Vec<String>,
     pub updated_at: Option<String>,
@@ -220,6 +223,9 @@ pub struct Query {
     pub kind: Option<ItemKind>,
     pub sort: SortKey,
     pub limit: u32,
+    /// 只列該 collection 的項目（P4b org 共享語意；`serde(default)` 保舊形相容）
+    #[serde(default)]
+    pub collection: Option<CollectionId>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -642,6 +648,8 @@ pub struct StatusInfo {
     pub outbox: OutboxCounts,
     pub needs_reauth: bool,
     pub proto: u16,
+    /// 已落庫的 organization 數（P4b 讀側；含邀請中/已接受全部狀態）
+    pub orgs: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -757,6 +765,7 @@ mod tests {
             uris: vec!["https://github.com".into()],
             folder_id: None,
             organization_id: None,
+            collections: vec![],
             favorite: false,
             tags: vec!["dev".into()],
             updated_at: None,
@@ -789,6 +798,7 @@ mod tests {
             call: Call::Vault(VaultCall::List {
                 query: Query {
                     text: Some("git".into()),
+                    collection: Some(Uuid::new_v4()),
                     ..Default::default()
                 },
                 view: View::Metadata,
@@ -907,5 +917,19 @@ mod tests {
         let e = WtpError::StaleEpoch { seen: 3, now: 5 };
         let j = serde_json::to_string(&e).unwrap();
         assert_eq!(serde_json::from_str::<WtpError>(&j).unwrap(), e);
+    }
+
+    #[test]
+    fn query_and_meta_accept_old_json_without_new_fields() {
+        // P4b 前形態的旧形訊息：collection/collections 欄位缺失 → serde default
+        let q: Query = serde_json::from_str(r#"{"text":null,"sort":"Name","limit":10}"#).unwrap();
+        assert_eq!(q.collection, None);
+        let m: ItemMeta = serde_json::from_str(
+            r#"{"id":"0f0d0000-0000-4000-8000-0000000000c1","kind":"Login","name":null,
+               "uris":[],"folder_id":null,"organization_id":null,"favorite":false,
+               "tags":[],"updated_at":null,"pending":false}"#,
+        )
+        .unwrap();
+        assert!(m.collections.is_empty());
     }
 }

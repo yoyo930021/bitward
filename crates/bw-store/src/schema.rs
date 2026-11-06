@@ -1,9 +1,14 @@
 /// schema 版本；每次加表/改表就 +1 並在本檔補一段遷移 SQL。
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// v1→v2：值搜尋明文索引欄。舊庫 ALTER；新庫 V1 已含，Duplicate column 容忍。
 pub const V2: &str = "ALTER TABLE meta_plain ADD COLUMN username_plain TEXT;
 ALTER TABLE meta_plain ADD COLUMN password_plain TEXT;";
+
+/// v2→v3（P4b org 共享語意讀側）：org/collection 鏡像表與歸屬關聯。
+/// V1 每次開庫都跑（CREATE IF NOT EXISTS 冪等），舊庫補表即經 V1 生效；
+/// 版本號提升只為 schema_version_guard 的可見性，無額外 SQL。
+pub const V3: &str = "";
 
 /// v1：鏡像（密文原樣）+ 明文 metadata 索引（FTS5）+ overlay + outbox +
 /// audit（append-only hash 鏈）+ sessions + blobs 登記 + meta。
@@ -30,6 +35,34 @@ CREATE TABLE IF NOT EXISTS meta_plain(
   username_plain TEXT,        -- v2：值搜尋索引（FR 11941），明文僅存於 0600 檔（§2.7 R3）
   password_plain TEXT         -- 同上
 );
+
+-- v3（P4b org 共享語意讀側）：/sync 的 organizations[] / collections[] 鏡像。
+-- 信封欄位（name/key/encryptedPrivateKey）存伺服器原樣密文；金鑰語意在 daemon。
+CREATE TABLE IF NOT EXISTS orgs(
+  id              TEXT PRIMARY KEY,
+  raw             BLOB NOT NULL,          -- profileOrganization JSON 原樣
+  name            TEXT,                   -- 信封字串（org key 加密）
+  key             TEXT,                   -- akey：org 對稱金鑰的包裝（2.=owner 對稱、4.=成員 RSA）
+  public_key      TEXT,                   -- org RSA 公開金鑰（b64 SPKI）
+  enc_private_key TEXT,                   -- org RSA 私鑰信封（user 對稱金鑰包裝，僅 owner 解得開）
+  key_verified    INTEGER NOT NULL DEFAULT 0,  -- daemon 私鑰往返驗證通過
+  status          INTEGER,                -- 0 Invited | 1 Accepted | 2 Confirmed（-1 Revoked）
+  atype           INTEGER                 -- 0 Owner | 1 Admin | 2 User | 3 Manager/Custom
+);
+
+CREATE TABLE IF NOT EXISTS collections(
+  id   TEXT PRIMARY KEY,
+  org  TEXT NOT NULL,
+  name TEXT,                  -- 信封字串（org key 加密）
+  raw  BLOB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cipher_collections(
+  cipher     TEXT NOT NULL,
+  collection TEXT NOT NULL,
+  PRIMARY KEY (cipher, collection)
+);
+CREATE INDEX IF NOT EXISTS cipher_collections_col ON cipher_collections(collection);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS meta_fts USING fts5(
   name, uris,

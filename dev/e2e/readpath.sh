@@ -89,10 +89,11 @@ A_OUT=$(./target/debug/bitward --sock "$SOCK" --json ls 2>&1 </dev/null || true)
 [[ "$A_OUT" != *"stale"* && "$A_OUT" != *"StaleEpoch"* ]] || fail "A6 unlock 互毀"
 B lock >/dev/null
 mv "$DATA/session_a" "$DATA/cli_session"
-B ls >/dev/null 2>&1 && fail "A6 lock 後舊 session 仍可用" || true
-STALE_OUT=$(B ls 2>&1 || true)   # 先捕獲：pipefail + grep -q 的 SIGPIPE 會誤報
-echo "$STALE_OUT" | grep -qiE 'stale|世代失效' || fail "A6 未回 StaleEpoch 語意"
-pass "A6 unlock 冪等 + lock 級聯 StaleEpoch"
+# CLI 對撤銷 session 會自我癒合（重 Enroll）但必須留 stderr 痕；
+# 無痕＝lock 級聯語意被洗掉（readpath A6 的原始把關點）。
+A6_ERR=$(B ls 2>&1 >/dev/null || true)
+echo "$A6_ERR" | grep -qiE '撤銷|失效|revoked|enroll' || fail "A6 lock 級聯無撤銷痕跡"
+pass "A6 unlock 冪等 + lock 級聯撤銷（CLI 癒合留痕）"
 
 # A8：每個 Call 都落 audit 且 hash 鏈可驗證
 rm -f "$DATA/cli_session"   # A6 用過的 token 已被 lock 撤銷，取新 session

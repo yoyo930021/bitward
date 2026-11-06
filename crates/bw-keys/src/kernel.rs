@@ -20,6 +20,10 @@ pub struct AuthContext {
     pub protected_user_key: EncStr,
     /// 伺服器 `profile.keys` 指紋（KeyDrift 基準）。
     pub keys_fingerprint: Option<String>,
+    /// 使用者 RSA 私鑰信封（`2.` user 對稱金鑰包裝的 PKCS#8；token 回應
+    /// `PrivateKey` 或 `/sync profile.privateKey`）。P4b 成員路徑解 org
+    /// akey（`4.`）需要它。
+    pub enc_private_key: Option<EncStr>,
 }
 
 pub trait UnlockKernel: Send + Sync {
@@ -40,7 +44,11 @@ impl UnlockKernel for BwCryptoKernel {
         let sk = bw_crypto::stretch(&mk);
         let user_key = bw_crypto::decrypt_user_key(&sk, &ctx.protected_user_key)
             .map_err(|_| KeyError::AuthFailed)?;
-        Ok(KeyBundle::new(user_key, None, ctx.keys_fingerprint.clone()))
+        Ok(KeyBundle::new(
+            user_key,
+            ctx.enc_private_key.clone(),
+            ctx.keys_fingerprint.clone(),
+        ))
     }
 
     fn unlock_assertion(&self, sealed: &SealedKey) -> Result<KeyBundle, KeyError> {

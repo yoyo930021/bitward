@@ -36,6 +36,7 @@ fn item(id: &str, name: &str, uris: &[&str]) -> ItemView {
         uris: uris.iter().map(|s| s.to_string()).collect(),
         folder_id: None,
         organization_id: None,
+        collections: vec![],
         favorite: false,
         tags: vec![],
         updated_at: None,

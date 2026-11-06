@@ -116,7 +116,12 @@ fn split_key(key: &[u8], t: CipherType) -> Result<(&[u8], Option<&[u8]>), Crypto
     }
 }
 
-pub(crate) fn decrypt_bytes_with_key(key: &[u8], c: &str) -> Result<Vec<u8>, CryptoError> {
+/// 以原始金鑰位元組解 type 2 信封（MAC 先驗）。金鑰型別已在上游校驗，
+/// 這裡是 `UserKey`/`OrgKey`/stretched key 共用的底層入口。
+///
+/// # Errors
+/// 前綴形態不支援、base64 損壞、MAC 不符或 padding 非法時回 `CryptoError`。
+pub fn decrypt_bytes_with_key(key: &[u8], c: &str) -> Result<Vec<u8>, CryptoError> {
     let parsed = parse_enc_str(c)?;
     decrypt_with_raw_key(key, &parsed)
 }

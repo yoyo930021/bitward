@@ -19,7 +19,7 @@ use thiserror::Error;
 
 pub use audit::{AuditFilter, AuditRecord};
 pub use blobs::BlobRef;
-pub use ciphers::CipherRow;
+pub use ciphers::{CipherRow, CollectionRow, OrgRow};
 pub use outbox::{ConflictRecord, LEASE_MS, MutState, Mutation, MutationDraft, OutboxDepth};
 pub use overlay::{Overlay, OverlayOp};
 pub use sessions::{SessionRow, SessionState};
@@ -131,6 +131,10 @@ impl Store {
             for stmt in schema::V2.split(';').filter(|s| !s.trim().is_empty()) {
                 let _ = conn.execute_batch(&format!("{stmt};"));
             }
+        }
+        if version < 3 {
+            // v3 的新表全在 V1（CREATE IF NOT EXISTS 冪等），此處留遷移掛鉤
+            conn.execute_batch(schema::V3)?;
         }
         if version < schema::SCHEMA_VERSION {
             conn.execute_batch(&format!(

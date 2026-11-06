@@ -83,6 +83,17 @@ jobs:
       - run: cargo build -q -p bitwarderd -p bitward
       - run: ./dev/e2e/datamanagement.sh
 
+  orgpath:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # orgflow 的 type-2 信封/RSA-OAEP 用 python cryptography（ubuntu runner 內建 pip 可裝）
+      - run: python3 -c "import cryptography" || pip install --break-system-packages cryptography
+      - run: cargo build -q -p bitwarderd -p bitward
+      - run: ./dev/e2e/orgpath.sh
+
   remotepath:
     runs-on: ubuntu-latest
     steps:

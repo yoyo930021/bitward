@@ -133,6 +133,7 @@ pub fn map_call(name: &str, args: &Value) -> Result<bw_proto::Call, ToolError> {
                 kind: None,
                 sort: SortKey::default(),
                 limit: get_limit(args, 100)?,
+                collection: None,
             },
             view: View::Metadata,
         }),

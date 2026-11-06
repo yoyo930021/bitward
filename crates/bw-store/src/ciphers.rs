@@ -17,21 +17,54 @@ pub struct CipherRow {
     pub deleted: bool,
 }
 
+/// `orgs` 表的一列（P4b）：金鑰材料全部是伺服器原樣信封，本層不做金鑰語意。
+#[derive(Clone, Debug)]
+pub struct OrgRow {
+    pub id: ItemId,
+    pub raw: Value,
+    /// 信封字串（org key 加密的組織名）。
+    pub name: Option<String>,
+    /// akey：org 對稱金鑰的包裝。`2.` = owner 對稱路徑、`4.` = 成員 RSA 路徑。
+    pub key: Option<String>,
+    pub public_key: Option<String>,
+    pub enc_private_key: Option<String>,
+    pub key_verified: bool,
+    pub status: Option<i64>,
+    pub atype: Option<i64>,
+}
+
+/// `collections` 表的一列。
+#[derive(Clone, Debug)]
+pub struct CollectionRow {
+    pub id: ItemId,
+    pub org: ItemId,
+    /// 信封字串（org key 加密的集合名）。
+    pub name: Option<String>,
+}
+
 impl Store {
     /// 全量 `/sync` 回應落盤：整批在同一個 transaction 內完成，
     /// 任何一列解析失敗即全批回滾（崩壞 halfway 不留在半套鏡像）。
+    /// ciphers、organizations、collections 都是全量替換語意。
     /// 回傳新游標。
     pub fn apply_sync(&self, sync: &Value) -> StoreResult<u64> {
         let ciphers = sync
             .get("ciphers")
             .and_then(Value::as_array)
+            .or_else(|| sync.pointer("/objects/ciphers").and_then(Value::as_array))
             .or_else(|| sync.pointer("/data/ciphers").and_then(Value::as_array))
             .ok_or_else(|| {
                 StoreError::Invalid("sync response has no `ciphers` array".to_string())
             })?;
         let conn = self.conn.lock().expect("store mutex poisoned");
         let tx = conn.unchecked_transaction()?;
-        tx.execute_batch("DELETE FROM meta_plain; DELETE FROM ciphers;")?;
+        // 全量重建前先快照 daemon 補寫過的 org 金鑰材料（VW 的 /sync 不含
+        // encryptedPrivateKey；補齊結果要能活過每次 rebuild）。
+        let preserved = snapshot_org_key_state(&tx)?;
+        tx.execute_batch(
+            "DELETE FROM meta_plain; DELETE FROM ciphers;
+             DELETE FROM orgs; DELETE FROM collections; DELETE FROM cipher_collections;",
+        )?;
         for c in ciphers {
             let id_s = c
                 .get("id")
@@ -40,6 +73,31 @@ impl Store {
             let id = Uuid::parse_str(id_s)
                 .map_err(|e| StoreError::Invalid(format!("cipher id {id_s}: {e}")))?;
             write_cipher(&tx, id, c)?;
+        }
+        for o in sync_array(
+            sync,
+            &[
+                "organizations",
+                "profile.organizations",
+                "objects.organizations",
+            ],
+        ) {
+            let id_s = o
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| StoreError::Invalid("organization missing `id`".to_string()))?;
+            let id = Uuid::parse_str(id_s)
+                .map_err(|e| StoreError::Invalid(format!("organization id {id_s}: {e}")))?;
+            write_org(&tx, id, o, &preserved)?;
+        }
+        for c in sync_array(sync, &["collections", "objects.collections"]) {
+            let id_s = c
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| StoreError::Invalid("collection missing `id`".to_string()))?;
+            let id = Uuid::parse_str(id_s)
+                .map_err(|e| StoreError::Invalid(format!("collection id {id_s}: {e}")))?;
+            write_collection(&tx, id, c)?;
         }
         if let Some(sd) = sync.get("serverDate").and_then(Value::as_str) {
             tx.execute(
@@ -148,6 +206,90 @@ impl Store {
     pub fn now_ms(&self) -> u64 {
         unix_ms()
     }
+
+    // —— org / collection 鏡像（P4b 讀側）——
+
+    pub fn org_count(&self) -> StoreResult<u32> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM orgs", [], |r| r.get(0))?;
+        Ok(n as u32)
+    }
+
+    pub fn org_list(&self) -> StoreResult<Vec<OrgRow>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(ORG_SELECT)?;
+        let rows = stmt.query_map([], org_row_from)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn org(&self, id: ItemId) -> StoreResult<Option<OrgRow>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(&format!("{ORG_SELECT} WHERE o.id = ?1"))?;
+        stmt.query_row([id.to_string()], org_row_from)
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// 補寫 org RSA 公開/私鑰信封（daemon 自 `GET /organizations/{id}/crypto/keys`
+    /// 之類的端點撈回；`None` 欄位不動）。
+    pub fn org_set_keys(
+        &self,
+        id: ItemId,
+        public_key: Option<&str>,
+        enc_private_key: Option<&str>,
+    ) -> StoreResult<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "UPDATE orgs SET
+               public_key = COALESCE(?2, public_key),
+               enc_private_key = COALESCE(?3, enc_private_key)
+             WHERE id = ?1",
+            rusqlite::params![id.to_string(), public_key, enc_private_key],
+        )?;
+        Ok(())
+    }
+
+    /// 私鑰往返驗證結果（daemon 在 `with_keys` 內用 bw-crypto 原語驗完落庫）。
+    pub fn org_mark_verified(&self, id: ItemId, verified: bool) -> StoreResult<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "UPDATE orgs SET key_verified = ?2 WHERE id = ?1",
+            rusqlite::params![id.to_string(), verified as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn collection_list(&self) -> StoreResult<Vec<CollectionRow>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt =
+            conn.prepare("SELECT id, org, name FROM collections ORDER BY name COLLATE NOCASE ASC")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(CollectionRow {
+                id: Uuid::parse_str(&r.get::<_, String>(0)?).unwrap_or_default(),
+                org: Uuid::parse_str(&r.get::<_, String>(1)?).unwrap_or_default(),
+                name: r.get::<_, Option<String>>(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+}
+
+const ORG_SELECT: &str = "SELECT id, raw, name, key, public_key, enc_private_key,
+                                 key_verified, status, atype
+                          FROM orgs o";
+
+fn org_row_from(r: &rusqlite::Row<'_>) -> Result<OrgRow, rusqlite::Error> {
+    Ok(OrgRow {
+        id: Uuid::parse_str(&r.get::<_, String>(0)?).unwrap_or_default(),
+        raw: serde_json::from_slice(&r.get::<_, Vec<u8>>(1)?).unwrap_or(Value::Null),
+        name: r.get::<_, Option<String>>(2)?,
+        key: r.get::<_, Option<String>>(3)?,
+        public_key: r.get::<_, Option<String>>(4)?,
+        enc_private_key: r.get::<_, Option<String>>(5)?,
+        key_verified: r.get::<_, i64>(6)? != 0,
+        status: r.get::<_, Option<i64>>(7)?,
+        atype: r.get::<_, Option<i64>>(8)?,
+    })
 }
 
 pub(crate) fn write_cipher(conn: &rusqlite::Connection, id: ItemId, c: &Value) -> StoreResult<()> {
@@ -164,6 +306,7 @@ pub(crate) fn write_cipher(conn: &rusqlite::Connection, id: ItemId, c: &Value) -
         "INSERT OR REPLACE INTO ciphers(id, enc_cipher, raw, rev, deleted) VALUES(?1,?2,?3,?4,?5)",
         rusqlite::params![id.to_string(), enc_blob, raw, rev, deleted as i64],
     )?;
+    write_cipher_collections(conn, id, c)?;
     if deleted {
         conn.execute("DELETE FROM meta_plain WHERE id = ?1", [id.to_string()])?;
     } else {
@@ -183,6 +326,111 @@ pub(crate) fn write_cipher(conn: &rusqlite::Connection, id: ItemId, c: &Value) -
         )?;
     }
     Ok(())
+}
+
+/// cipher `collectionIds[]` → 歸屬關聯（P4b）。全量替換語意：先刪後插。
+/// 非 UUID 元素寬容跳過（伺服器未來可能塞非 uuid 字串，鏡像 raw 才是真相源）。
+fn write_cipher_collections(conn: &rusqlite::Connection, id: ItemId, c: &Value) -> StoreResult<()> {
+    conn.execute(
+        "DELETE FROM cipher_collections WHERE cipher = ?1",
+        [id.to_string()],
+    )?;
+    let Some(list) = c.get("collectionIds").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    for col in list {
+        let Some(col_id) = col.as_str().and_then(|s| Uuid::parse_str(s).ok()) else {
+            continue;
+        };
+        conn.execute(
+            "INSERT OR IGNORE INTO cipher_collections(cipher, collection) VALUES(?1,?2)",
+            rusqlite::params![id.to_string(), col_id.to_string()],
+        )?;
+    }
+    Ok(())
+}
+
+/// rebuild 前快照：org id →（public_key, enc_private_key, key_verified）。
+type OrgKeyState = std::collections::HashMap<String, (Option<String>, Option<String>, i64)>;
+
+fn snapshot_org_key_state(conn: &rusqlite::Connection) -> StoreResult<OrgKeyState> {
+    let mut stmt =
+        conn.prepare("SELECT id, public_key, enc_private_key, key_verified FROM orgs")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            (
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, i64>(3)?,
+            ),
+        ))
+    })?;
+    rows.collect::<Result<OrgKeyState, _>>().map_err(Into::into)
+}
+
+fn write_org(
+    tx: &rusqlite::Connection,
+    id: ItemId,
+    o: &Value,
+    preserved: &OrgKeyState,
+) -> StoreResult<()> {
+    let raw = serde_json::to_vec(o)?;
+    let keep = preserved.get(&id.to_string());
+    let public_key = o
+        .pointer("/keys/publicKey")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| keep.and_then(|k| k.0.clone()));
+    let enc_private_key = o
+        .pointer("/keys/encryptedPrivateKey")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| keep.and_then(|k| k.1.clone()));
+    let key_verified = keep.map(|k| k.2).unwrap_or(0);
+    tx.execute(
+        "INSERT OR REPLACE INTO orgs(id, raw, name, key, public_key, enc_private_key, key_verified, status, atype)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        rusqlite::params![
+            id.to_string(),
+            raw,
+            o.get("name").and_then(Value::as_str),
+            o.get("key").and_then(Value::as_str),
+            public_key,
+            enc_private_key,
+            key_verified,
+            o.get("status").and_then(Value::as_i64),
+            o.get("type").and_then(Value::as_i64),
+        ],
+    )?;
+    Ok(())
+}
+
+fn write_collection(tx: &rusqlite::Connection, id: ItemId, c: &Value) -> StoreResult<()> {
+    let raw = serde_json::to_vec(c)?;
+    tx.execute(
+        "INSERT OR REPLACE INTO collections(id, org, name, raw) VALUES(?1,?2,?3,?4)",
+        rusqlite::params![
+            id.to_string(),
+            c.get("organizationId")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            c.get("name").and_then(Value::as_str),
+            raw,
+        ],
+    )?;
+    Ok(())
+}
+
+/// 依序嘗試多個 JSON pointer 路徑，回第一個存在的陣列；全缺 → 空。
+fn sync_array<'a>(sync: &'a Value, pointers: &[&str]) -> Vec<&'a Value> {
+    for p in pointers {
+        let path = format!("/{p}").replace('.', "/");
+        if let Some(arr) = sync.pointer(&path).and_then(Value::as_array) {
+            return arr.iter().collect();
+        }
+    }
+    Vec::new()
 }
 
 pub(crate) fn refresh_pending(tx: &rusqlite::Connection, item: Option<ItemId>) -> StoreResult<()> {

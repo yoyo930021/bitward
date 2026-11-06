@@ -56,6 +56,9 @@ enum Cmd {
         /// 以密碼/帳號值精確搜尋（需曾解鎖回填索引）
         #[arg(long)]
         value: Option<String>,
+        /// 只列該 collection（org 共享集合）的項目（P4b）
+        #[arg(long)]
+        collection: Option<String>,
         #[arg(long, default_value = "name")]
         sort: String,
         #[arg(long, default_value_t = 100)]
@@ -451,7 +454,9 @@ async fn open_session(
             }
             Ok(other) => return Err(format!("expected Welcome, got {other:?}")),
             Err(e) if attempt == 0 => {
-                let _ = e;
+                // 撤銷/失效必須留痕（readpath A6 的可觀察性）：靜默重 Enroll 會把
+                // 「lock 級聯撤銷」這個安全語意洗成無感成功。
+                eprintln!("warning: session 失效（{e}）；已重入會（enroll）並續跑指令");
                 let _ = std::fs::remove_file(session_file(data_dir));
             }
             Err(e) => return Err(e.to_string()),
@@ -743,6 +748,7 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             tag,
             uri,
             value,
+            collection,
             sort,
             limit,
         } => Call::Vault(VaultCall::List {
@@ -759,6 +765,7 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                     _ => SortKey::Name,
                 },
                 limit: *limit,
+                collection: collection.as_deref().map(parse_id).transpose()?,
             },
             view: View::Metadata,
         }),

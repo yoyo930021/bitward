@@ -11,6 +11,16 @@
 - `meta_plain.name/uris`：`apply_sync` 時先存伺服器原樣（多半是信封字串）；
   解鎖後 daemon 在 `with_keys` 內解密、經 `set_plain_meta` 覆寫為明文，
   FTS5 觸發器自動重建索引。bw-store 不知金鑰語意（§3 規則）。
+- `orgs`（v3）：`/sync` 的 `profile.organizations[]`（VW）或
+  `objects.organizations[]`（官方雲 v2）鏡像。`key`＝akey（org 對稱金鑰的
+  包裝），`public_key`/`enc_private_key`＝org RSA 信封（VW 的 /sync 不含，
+  daemon 另經 `GET /organizations/{id}/crypto/keys` 補寫、`org_set_keys`）。
+  `key_verified` 由 daemon 在 `with_keys` 內跑 bw-crypto 往返驗證後落庫；
+  全量 rebuild 前快照保留（避免每次 sync 重驗 RSA）。
+- `collections`（v3）：`collections[]` 鏡像；`name` 是 org key 加密的信封。
+- `cipher_collections`（v3）：cipher `collectionIds[]` 展開的歸屬關聯，
+  `write_cipher` 先刪後插（全量替換語意）；Query 的 `collection` 過濾與
+  `ItemMeta.collections` 都讀這張表。
 
 ## 魔術常數
 
@@ -18,7 +28,8 @@
 |---|---|---|
 | cipher `type` → ItemKind | 1=Login, 2=SecureNote, 3=Card, 4=Identity（VW 1.37.2 實錄 fixtures 佐證；原引路徑 404 已改） | https://github.com/dani-garcia/vaultwarden/blob/main/src/api/websockets/notifications.rs 同族欄位 |
 | 信封格式 `type.iv|ct|mac`（type 2 = AES-256-CBC + HMAC-SHA256） | — | https://bitwarden.com/help/what-encryption-is-used ；docs/research/protocol.md「金鑰階層」段 |
-| `/sync` 回應形態（`serverDate`、`ciphers[]`、`revisionDate`、`deletedDate`） | — | https://github.com/frankhommers/bitwarden-openapi-generator （unofficial spec，docs/research/protocol.md 引用）；寬容解析另收 `data.ciphers` |
+| `/sync` 回應形態（`serverDate`、`ciphers[]`、`revisionDate`、`deletedDate`） | — | https://github.com/frankhommers/bitwarden-openapi-generator （unofficial spec，docs/research/protocol.md 引用）；寬容解析另收 `data.ciphers` 與 v2 `objects.ciphers` |
+| org `akey`（`organizations[].key`）兩態 | `2.` = owner（org 對稱金鑰以 user key 包裝）；`4.` = 成員（以成員 RSA 公鑰包裝） | clients 新金鑰模型；vaultwarden 1.37.2 `Membership.akey` → `to_json` 的 `"key"`（https://github.com/dani-garcia/vaultwarden/blob/1.37.2/src/db/models/organization.rs）；解包在 bw-keys `KeyBundle::unwrap_org_key` |
 | outbox `LEASE_MS` | 120_000 ms | 本專案自訂（P2）：A7 要求 daemon 5 秒內重生，崩潰重啟後最多等一個租約即可重取 in-flight 列 |
 | audit 鏈 genesis hash | 64 個 '0' | 本專案自訂（§2.3 只定義欄位集） |
 | audit canonical 分隔符 | U+001F（unit separator） | 本專案自訂；不會出現在 ts/action 等可讀欄位 |

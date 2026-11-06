@@ -228,6 +228,10 @@ pub struct CallReq {
     pub tags: Vec<String>,
     /// 小寫 host 或 uri 字串，供 UriDomain 後綴比對
     pub uris: Vec<String>,
+    /// item 的 folder 歸屬（P4b：Target::Folder 判定輸入）
+    pub folder: Option<Uuid>,
+    /// item 的 collection 歸屬（P4b org 共享語意：Target::Collection 判定輸入）
+    pub collections: Vec<Uuid>,
     pub est_bytes: u64,
 }
 
@@ -280,8 +284,10 @@ fn target_matches(g: &Grant, req: &CallReq) -> bool {
             .uris
             .iter()
             .any(|u| host_of(u).is_some_and(|h| h == d.as_str() || h.ends_with(&format!(".{d}")))),
-        // P3：folder/collection 歸屬需 daemon 提供 item 的歸屬資料；未提供時不命中
-        Target::Folder(_) | Target::Collection(_) => false,
+        // 歸屬比對（P4b）：資料由 daemon 從鏡像 metadata 餵進 CallReq；
+        // 未提供（None/空）時不命中——沒有歸屬資料就沒有共享授權。
+        Target::Folder(f) => req.folder == Some(*f),
+        Target::Collection(c) => req.collections.contains(c),
     }
 }
 
@@ -444,6 +450,8 @@ mod tests {
             item: Some(id()),
             tags: vec!["dev".into()],
             uris: vec!["https://github.com/login".into()],
+            folder: None,
+            collections: vec![],
             est_bytes: 8,
         }
     }
@@ -481,6 +489,28 @@ mod tests {
             check(&set, &req(Access::Reveal(Sensitivity::Secret))).unwrap(),
             Decision::Allow(1)
         );
+    }
+
+    #[test]
+    fn collection_and_folder_grants_match_membership() {
+        let col = Uuid::new_v4();
+        let folder = Uuid::new_v4();
+        let set = parse_grants(&format!(
+            "see:identity collection:{col}; use:totp folder:{folder}"
+        ))
+        .unwrap();
+        let mut r = req(Access::See(Sensitivity::Identity));
+        r.collections = vec![col];
+        assert_eq!(check(&set, &r).unwrap(), Decision::Allow(0));
+        // 無歸屬資料 → 不命中（共享項目對沒有 collection grant 的 session 收緊）
+        let mut r2 = req(Access::See(Sensitivity::Identity));
+        r2.collections = vec![Uuid::new_v4()];
+        assert!(check(&set, &r2).is_err());
+        let mut t = req(Access::Use(UseKind::TotpCode));
+        t.folder = Some(folder);
+        assert_eq!(check(&set, &t).unwrap(), Decision::Allow(1));
+        let t2 = req(Access::Use(UseKind::TotpCode));
+        assert!(check(&set, &t2).is_err());
     }
 
     #[test]

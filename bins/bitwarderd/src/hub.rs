@@ -40,6 +40,10 @@ pub struct AccountRecord {
     pub kdf_parallelism: Option<u64>,
     pub protected_user_key: String,
     pub keys_fingerprint: Option<String>,
+    /// 使用者 RSA 私鑰信封（token 回應 `PrivateKey`，原樣保存；P4b 成員
+    /// 路徑解 org akey 用）。舊檔缺欄 → None。
+    #[serde(default)]
+    pub enc_private_key: Option<String>,
 }
 
 pub struct Hub {
@@ -119,6 +123,7 @@ impl Hub {
                 kdf: kdf_params(a),
                 protected_user_key: a.protected_user_key.clone(),
                 keys_fingerprint: a.keys_fingerprint.clone(),
+                enc_private_key: a.enc_private_key.clone(),
             });
         }
         let (drain_tx, drain_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -225,6 +230,7 @@ impl Hub {
             },
             needs_reauth: self.machine.needs_reauth(),
             proto: PROTO_VERSION,
+            orgs: self.store.org_count().unwrap_or(0),
         }
     }
 
@@ -532,6 +538,7 @@ impl Hub {
             kdf_parallelism: kdf.parallelism,
             protected_user_key: keys.key.clone().unwrap(),
             keys_fingerprint: Some(fingerprint.clone()),
+            enc_private_key: keys.private_key.clone(),
         };
         if let Some(t) = acc.access_token.clone() {
             client.set_access_token(&t).await;
@@ -544,6 +551,7 @@ impl Hub {
             kdf: kdf.to_params(),
             protected_user_key: acc.protected_user_key.clone(),
             keys_fingerprint: acc.keys_fingerprint.clone(),
+            enc_private_key: acc.enc_private_key.clone(),
         });
         self.machine
             .submit(UnlockMaterial::MasterPassword(Zeroizing::new(
@@ -568,43 +576,112 @@ impl Hub {
                 tracing::warn!("key drift detected");
             }
         }
-        self.reindex_plain().map_err(denied)?;
+        self.backfill_org_keys(&h.client).await;
+        drop(g);
+        self.reindex_all()?;
         let count = self.store.cipher_count().map_err(denied)?;
         self.machine.set_mirror(count);
         Ok(())
     }
 
-    /// 鏡像落盤後的名字索引回填：解密只發生在 `with_keys` 閉包內。
-    /// 單欄位解密失敗容忍跳過（漂移防御），不阻塞整批。
-    fn reindex_plain(&self) -> Result<(), String> {
+    /// org RSA 公開金鑰信封缺漏時向伺服器補齊（P4b 讀側）：官方雲
+    /// `GET /organizations/{id}/crypto/keys` 回 publicKey+encryptedPrivateKey，
+    /// Vaultwarden 1.37.2 只回 publicKey（私鑰信封對成員本就不開放）。
+    /// 任何失敗容忍跳過，不阻塞 sync。
+    async fn backfill_org_keys(&self, client: &Client) {
+        let Ok(orgs) = self.store.org_list() else {
+            return;
+        };
+        for o in orgs {
+            if o.public_key.is_some() {
+                continue;
+            }
+            match client.org_keys(o.id).await {
+                Ok(v) => {
+                    let pubk = v.get("publicKey").and_then(Value::as_str);
+                    let enck = v.get("encryptedPrivateKey").and_then(Value::as_str);
+                    if pubk.is_some() || enck.is_some() {
+                        let _ = self.store.org_set_keys(o.id, pubk, enck);
+                    }
+                }
+                Err(e) => tracing::debug!(org = %o.id, err = %e, "org keys endpoint unavailable"),
+            }
+        }
+    }
+
+    /// 自 org 鏡像派生 org 對稱金鑰集合（`with_keys` 閉包內；金鑰值型別
+    /// `OrgKey` drop 即清零，不變量 3）。解不開的 akey 只讓該 org 缺席。
+    /// 順帶：私鑰信封齊全時以 bw-crypto 原語做往返驗證並落庫
+    /// （`orgs.key_verified`，P4b 解密鏈驗收點）。
+    pub(crate) fn org_key_map(&self) -> HashMap<Uuid, bw_crypto::OrgKey> {
+        let Ok(orgs) = self.store.org_list() else {
+            return HashMap::new();
+        };
+        self.machine
+            .with_keys(|kb| {
+                let mut out = HashMap::new();
+                for o in &orgs {
+                    if let Some(akey) = o.key.as_deref() {
+                        match kb.unwrap_org_key(akey) {
+                            Ok(k) => {
+                                out.insert(o.id, k);
+                            }
+                            Err(e) => {
+                                tracing::debug!(org = %o.id, err = %e, "org akey unwrap failed");
+                            }
+                        }
+                    }
+                    if !o.key_verified
+                        && let (Some(pubk), Some(encp)) =
+                            (o.public_key.as_deref(), o.enc_private_key.as_deref())
+                        && verify_org_private_key(kb, pubk, encp).is_ok()
+                    {
+                        let _ = self.store.org_mark_verified(o.id, true);
+                    }
+                }
+                out
+            })
+            .unwrap_or_default()
+    }
+
+    /// 明文索引回填（全鏡像）。
+    fn reindex_all(&self) -> Result<(), WtpError> {
         let metas = self
             .store
             .query(&Query {
                 limit: u32::MAX,
                 ..Default::default()
             })
-            .map_err(|e| e.to_string())?;
-        for m in metas {
-            let Some(row) = self.store.item(m.id).map_err(|e| e.to_string())? else {
+            .map_err(denied)?;
+        self.reindex_many(&metas.iter().map(|m| m.id).collect::<Vec<_>>())
+    }
+
+    /// 鏡像落盤後的明文索引回填：解密只發生在 `with_keys` 閉包內。
+    /// 單欄位解密失敗容忍跳過（漂移防御），不阻塞整批。共享項目改以
+    /// org 對稱金鑰解密（金鑰選擇見 [`cipher_field_decryptor`]）。
+    pub fn reindex_many(&self, ids: &[ItemId]) -> Result<(), WtpError> {
+        let org_keys = self.org_key_map();
+        for id in ids {
+            let Some(row) = self.store.item(*id).map_err(denied)? else {
                 continue;
             };
             let decrypted = self.machine.with_keys(|kb| {
-                let uk = kb.user_key();
+                let dec = cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
                 let name = row
                     .enc_cipher
                     .get("name")
                     .and_then(Value::as_str)
-                    .and_then(|e| bw_crypto::decrypt(uk, &e.to_string()).ok());
+                    .and_then(&dec);
                 let username = row
                     .enc_cipher
                     .pointer("/login/username")
                     .and_then(Value::as_str)
-                    .and_then(|e| bw_crypto::decrypt(uk, &e.to_string()).ok());
+                    .and_then(&dec);
                 let password = row
                     .enc_cipher
                     .pointer("/login/password")
                     .and_then(Value::as_str)
-                    .and_then(|e| bw_crypto::decrypt(uk, &e.to_string()).ok());
+                    .and_then(&dec);
                 let uris: Vec<String> = row
                     .enc_cipher
                     .pointer("/login/uris")
@@ -612,7 +689,7 @@ impl Hub {
                     .map(|a| {
                         a.iter()
                             .filter_map(|u| u.get("uri").and_then(Value::as_str))
-                            .filter_map(|e| bw_crypto::decrypt(uk, &e.to_string()).ok())
+                            .filter_map(dec)
                             .collect()
                     })
                     .unwrap_or_default();
@@ -622,10 +699,10 @@ impl Hub {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            let _ = self.store.set_plain_meta(m.id, name.as_deref(), &uris);
+            let _ = self.store.set_plain_meta(*id, name.as_deref(), &uris);
             let _ = self
                 .store
-                .set_plain_secrets(m.id, username.as_deref(), password.as_deref());
+                .set_plain_secrets(*id, username.as_deref(), password.as_deref());
         }
         Ok(())
     }
@@ -647,17 +724,20 @@ impl Hub {
         let Some(row) = row else {
             return Ok(Some(ItemView::metadata(base)));
         };
+        // 共享項目（organizationId 命中已派生 org key）以 org 對稱金鑰解密；
+        // 敏感度分級（§2.1）不因 org 放寬——這裡只換鑰，不換視窗。
+        let org_keys = self.org_key_map();
         let dec = self.machine.with_keys(|kb| {
-            let uk = kb.user_key();
+            let d = cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
             let login = row.enc_cipher.get("login");
             let username = login
                 .and_then(|l| l.get("username"))
                 .and_then(Value::as_str)
-                .and_then(|e| bw_crypto::decrypt(uk, &e.to_string()).ok());
+                .and_then(&d);
             let password = login
                 .and_then(|l| l.get("password"))
                 .and_then(Value::as_str)
-                .and_then(|e| bw_crypto::decrypt(uk, &e.to_string()).ok());
+                .and_then(d);
             (username, password)
         });
         let (username, password) = dec.map_err(denied)?;
@@ -692,22 +772,25 @@ impl Hub {
                 .map_err(denied)?;
         let row = self.store.item(id).map_err(denied)?;
         let row = row.ok_or(WtpError::NotFound)?;
-        let (username, password) = self
-            .machine
-            .with_keys(|kb| {
-                let dec = |field: &str| {
-                    row.enc_cipher
-                        .pointer(&format!("/login/{field}"))
-                        .and_then(Value::as_str)
-                        .and_then(|e| bw_crypto::decrypt(kb.user_key(), &e.to_string()).ok())
-                };
-                (
-                    Zeroizing::new(dec("username").unwrap_or_default()),
-                    Zeroizing::new(dec("password").unwrap_or_default()),
-                )
-            })
-            // 先過 is_unlocked 後仍失敗＝中途被鎖：語意同 Locked（totp 同款處理）
-            .map_err(|_| WtpError::Locked)?;
+        let (username, password) = {
+            let org_keys = self.org_key_map();
+            self.machine
+                .with_keys(|kb| {
+                    let d = cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
+                    let dec = |field: &str| {
+                        row.enc_cipher
+                            .pointer(&format!("/login/{field}"))
+                            .and_then(Value::as_str)
+                            .and_then(&d)
+                    };
+                    (
+                        Zeroizing::new(dec("username").unwrap_or_default()),
+                        Zeroizing::new(dec("password").unwrap_or_default()),
+                    )
+                })
+                // 先過 is_unlocked 後仍失敗＝中途被鎖：語意同 Locked（totp 同款處理）
+                .map_err(|_| WtpError::Locked)?
+        };
         if username.is_empty() && password.is_empty() {
             return Err(denied("item 無 username/password 可打字"));
         }
@@ -749,22 +832,23 @@ impl Hub {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let code = self
-            .machine
-            .with_keys(|kb| {
-                row.enc_cipher
-                    .pointer("/login/totp")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "no totp seed".to_string())
-                    .and_then(|e| {
-                        bw_crypto::decrypt(kb.user_key(), &e.to_string()).map_err(|d| d.to_string())
-                    })
-                    .and_then(|seed| {
-                        bw_crypto::totp_code(seed.trim(), now).map_err(|t| t.to_string())
-                    })
-            })
-            .map_err(|_| WtpError::Locked)?
-            .map_err(denied)?;
+        let code = {
+            let org_keys = self.org_key_map();
+            self.machine
+                .with_keys(|kb| {
+                    let d = cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
+                    row.enc_cipher
+                        .pointer("/login/totp")
+                        .and_then(Value::as_str)
+                        .and_then(d)
+                        .ok_or_else(|| "no totp seed".to_string())
+                        .and_then(|seed| {
+                            bw_crypto::totp_code(seed.trim(), now).map_err(|t| t.to_string())
+                        })
+                })
+                .map_err(|_| WtpError::Locked)?
+                .map_err(denied)?
+        };
         Ok(Response::TotpCode {
             code,
             valid_for_secs: (30 - now % 30) as u32,
@@ -983,5 +1067,49 @@ fn sensitivity_of_call(c: &Call, resp: Option<&Response>) -> bw_proto::Sensitivi
         Call::Passkey(PasskeyCall::GetPasskeys { .. }) => Identity,
         Call::Passkey(_) => Secret,
         Call::Auth(_) | Call::Admin(_) | Call::Sync(_) | Call::Agent(_) | Call::Fill(_) => Opaque,
+    }
+}
+
+/// 讀路徑欄位解密器：cipher 帶 `organizationId` 且該 org 的對稱金鑰已派生
+/// （`org_key_map`）→ 用 org key；否則使用者金鑰。回傳閉包只在 `with_keys`
+/// 閉包內存活（不變量 3）。解密失敗回 None（容忍漂移，同 reindex 舊行為）。
+/// 出處：org 項目欄位以 org 對稱金鑰加密（clients 新金鑰模型；
+/// `Membership.akey` → `organizations[].key` 的包裝金鑰見 bw-keys `unwrap_org_key`）。
+pub(crate) fn cipher_field_decryptor<'k>(
+    kb: &'k bw_keys::KeyBundle,
+    enc_cipher: &Value,
+    org_keys: &'k HashMap<Uuid, bw_crypto::OrgKey>,
+) -> impl Fn(&str) -> Option<String> + 'k {
+    let user_bytes: &'k [u8] = kb.user_key().as_bytes();
+    let org_bytes = enc_cipher
+        .get("organizationId")
+        .and_then(Value::as_str)
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .and_then(|o| org_keys.get(&o))
+        .map(|k| k.as_bytes());
+    let key: &'k [u8] = org_bytes.unwrap_or(user_bytes);
+    move |e: &str| {
+        bw_crypto::decrypt_bytes_with_key(key, e)
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+    }
+}
+
+/// org RSA 私鑰解密鏈驗證：user 對稱金鑰解 `encryptedPrivateKey` 得 PKCS#8
+/// → 以 org 公開金鑰 RSA-OAEP 包一枚 probe → 私鑰解回原值。全用既有
+/// bw-crypto 原語（P4b 契約交付 1 的「至少」門檻）。
+fn verify_org_private_key(
+    kb: &bw_keys::KeyBundle,
+    public_key_b64: &str,
+    enc_private_key: &str,
+) -> Result<(), bw_crypto::CryptoError> {
+    const PROBE: &[u8] = b"bitward:org-key-roundtrip";
+    let der = kb.org_rsa_private(enc_private_key)?;
+    let wrapped = bw_crypto::rsa_encrypt(public_key_b64, bw_crypto::OaepHash::Sha1, PROBE)?;
+    let back = bw_crypto::rsa_decrypt(&der, &wrapped)?;
+    if back == PROBE {
+        Ok(())
+    } else {
+        Err(bw_crypto::CryptoError::Rsa)
     }
 }

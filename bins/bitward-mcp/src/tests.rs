@@ -47,6 +47,7 @@ fn sample_item() -> ItemView {
         uris: vec!["https://github.com".into()],
         folder_id: None,
         organization_id: None,
+        collections: vec![],
         favorite: false,
         tags: vec![],
         updated_at: None,

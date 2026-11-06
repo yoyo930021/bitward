@@ -638,6 +638,7 @@ mod tests {
             },
             protected_user_key: "2.iv|ct|mac".into(),
             keys_fingerprint: fp.map(str::to_owned),
+            enc_private_key: None,
         }
     }
 

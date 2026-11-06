@@ -268,17 +268,23 @@ impl Hub {
         }
         let mut tags = vec![];
         let mut uris = vec![];
+        let mut folder = None;
+        let mut collections = vec![];
         if let Some(id) = item
             && let Ok(Some(m)) = self.store.meta(id)
         {
             tags = m.tags;
             uris = m.uris;
+            folder = m.folder_id;
+            collections = m.collections;
         }
         Ok(CallReq {
             access,
             item,
             tags,
             uris,
+            folder,
+            collections,
             est_bytes: 64,
         })
     }
@@ -557,11 +563,17 @@ impl Hub {
             if let Some(r) = v.strip_prefix("btw://") {
                 let _ = r;
                 let reference = parse_ref(v).map_err(denied)?;
+                let meta = self.store.meta(reference.item).ok().flatten();
                 let req = CallReq {
                     access: Access::Use(UseKind::InjectEnv),
                     item: Some(reference.item),
-                    tags: self.item_tags_uris(reference.item).0,
-                    uris: self.item_tags_uris(reference.item).1,
+                    tags: meta.as_ref().map(|m| m.tags.clone()).unwrap_or_default(),
+                    uris: meta.as_ref().map(|m| m.uris.clone()).unwrap_or_default(),
+                    folder: meta.as_ref().and_then(|m| m.folder_id),
+                    collections: meta
+                        .as_ref()
+                        .map(|m| m.collections.clone())
+                        .unwrap_or_default(),
                     est_bytes: 64,
                 };
                 let grants = sess.grants.read().unwrap().clone();
@@ -583,16 +595,8 @@ impl Hub {
         Ok((out, known))
     }
 
-    fn item_tags_uris(&self, id: bw_proto::ItemId) -> (Vec<String>, Vec<String>) {
-        self.store
-            .meta(id)
-            .ok()
-            .flatten()
-            .map(|m| (m.tags, m.uris))
-            .unwrap_or_default()
-    }
-
     /// 鏡像欄位 → 明文（with_keys 閉包內解密）。field ∈ password|username|totp|notes。
+    /// 共享項目走 org 對稱金鑰（P4b；金鑰選擇同 project_one）。
     fn secret_plaintext(&self, id: bw_proto::ItemId, field: &str) -> Result<String, WtpError> {
         let row = self.store.item(id).map_err(denied)?;
         let row = row.ok_or(WtpError::NotFound)?;
@@ -601,12 +605,14 @@ impl Hub {
             "notes" => "/notes".to_string(),
             _ => return Err(denied("P3：僅 password/username/totp/notes 可解析")),
         };
+        let org_keys = self.org_key_map();
         self.machine
             .with_keys(|kb| {
+                let d = crate::hub::cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
                 row.enc_cipher
                     .pointer(&path)
                     .and_then(Value::as_str)
-                    .and_then(|e| bw_crypto::decrypt(kb.user_key(), &e.to_string()).ok())
+                    .and_then(d)
             })
             .map_err(|_| WtpError::Locked)?
             .ok_or(WtpError::NotFound)

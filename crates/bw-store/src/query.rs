@@ -11,10 +11,13 @@ impl Store {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut sql = String::from(
             "SELECT m.id, m.name, m.uris, m.kind, m.folder, m.org, m.favorite,
-                    m.updated_at, m.pending, COALESCE(o.tags, '[]')
+                    m.updated_at, m.pending, COALESCE(o.tags, '[]'),
+                    COALESCE(cc.cols, '[]')
              FROM meta_plain m
              JOIN ciphers c ON c.id = m.id
              LEFT JOIN overlay o ON o.id = m.id
+             LEFT JOIN (SELECT cipher, json_group_array(collection) AS cols
+                        FROM cipher_collections GROUP BY cipher) cc ON cc.cipher = m.id
              WHERE c.deleted = 0",
         );
         let mut args: Vec<String> = Vec::new();
@@ -64,6 +67,14 @@ impl Store {
             sql.push_str(" AND m.kind = ?");
             args.push(kind_index(kind).to_string());
         }
+        if let Some(col) = q.collection {
+            // 集合過濾走歸屬關聯表（apply_sync / put_mirror 落庫時重建）
+            sql.push_str(
+                " AND EXISTS(SELECT 1 FROM cipher_collections cx
+                                      WHERE cx.cipher = m.id AND cx.collection = ?)",
+            );
+            args.push(col.to_string());
+        }
         sql.push_str(" ORDER BY ");
         sql.push_str(match q.sort {
             SortKey::Name => "m.name COLLATE NOCASE ASC",
@@ -102,7 +113,9 @@ pub(crate) fn meta_by_id(conn: &Connection, id: bw_proto::ItemId) -> StoreResult
     use rusqlite::OptionalExtension;
     let mut stmt = conn.prepare(
         "SELECT m.id, m.name, m.uris, m.kind, m.folder, m.org, m.favorite,
-                m.updated_at, m.pending, COALESCE(o.tags, '[]')
+                m.updated_at, m.pending, COALESCE(o.tags, '[]'),
+                COALESCE((SELECT json_group_array(cx.collection)
+                          FROM cipher_collections cx WHERE cx.cipher = m.id), '[]')
          FROM meta_plain m LEFT JOIN overlay o ON o.id = m.id WHERE m.id = ?1",
     )?;
     stmt.query_row([id.to_string()], row_to_meta)
@@ -115,6 +128,10 @@ fn row_to_meta(row: &Row<'_>) -> Result<ItemMeta, rusqlite::Error> {
     let uris_raw = row.get::<_, String>(2)?;
     let uris = parse_string_array(&uris_raw);
     let tags = parse_string_array(&row.get::<_, String>(9)?);
+    let collections = parse_string_array(&row.get::<_, String>(10)?)
+        .into_iter()
+        .filter_map(|s| Uuid::parse_str(&s).ok())
+        .collect();
     let kind = match row.get::<_, Option<i64>>(3)? {
         Some(v) => index_kind(v),
         None => ItemKind::Login,
@@ -130,6 +147,7 @@ fn row_to_meta(row: &Row<'_>) -> Result<ItemMeta, rusqlite::Error> {
         organization_id: row
             .get::<_, Option<String>>(5)?
             .and_then(|s| Uuid::parse_str(&s).ok()),
+        collections,
         favorite: row.get::<_, i64>(6)? != 0,
         tags,
         updated_at: row.get::<_, Option<String>>(7)?,
@@ -222,6 +240,7 @@ mod tests {
             "kind",
             "folder",
             "org",
+            "collections",
             "favorite",
             "updated_at",
             "pending",

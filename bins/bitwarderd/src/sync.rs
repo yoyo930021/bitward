@@ -490,48 +490,9 @@ impl Hub {
         Ok(())
     }
 
-    /// 單筆鏡像的明文索引回填（with_keys 閉包內解密）。
+    /// 單筆鏡像的明文索引回填（金鑰選擇與批量路徑同源，見 `Hub::reindex_many`）。
     pub fn reindex_one(&self, id: ItemId) -> Result<(), WtpError> {
-        let row = self.store.item(id).map_err(denied)?;
-        let Some(row) = row else { return Ok(()) };
-        let (name, uris, username, password) = self
-            .machine
-            .with_keys(|kb| {
-                let uk = kb.user_key();
-                let name = row
-                    .enc_cipher
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .and_then(|e| bw_crypto::decrypt(uk, &e.to_string()).ok());
-                let username = row
-                    .enc_cipher
-                    .pointer("/login/username")
-                    .and_then(Value::as_str)
-                    .and_then(|e| bw_crypto::decrypt(uk, &e.to_string()).ok());
-                let password = row
-                    .enc_cipher
-                    .pointer("/login/password")
-                    .and_then(Value::as_str)
-                    .and_then(|e| bw_crypto::decrypt(uk, &e.to_string()).ok());
-                let uris: Vec<String> = row
-                    .enc_cipher
-                    .pointer("/login/uris")
-                    .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|u| u.get("uri").and_then(Value::as_str))
-                            .filter_map(|e| bw_crypto::decrypt(uk, &e.to_string()).ok())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                (name, uris, username, password)
-            })
-            .map_err(denied)?;
-        let _ = self.store.set_plain_meta(id, name.as_deref(), &uris);
-        let _ = self
-            .store
-            .set_plain_secrets(id, username.as_deref(), password.as_deref());
-        Ok(())
+        self.reindex_many(&[id])
     }
 
     // —— notifications：多中樞收斂 ——
