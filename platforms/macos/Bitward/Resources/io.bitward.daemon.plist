@@ -2,11 +2,19 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- SMAppService.agent(plistName:) 正確形態：歸因給 App（__CFBundleIdentifier）
+	     + BundleProgram（bundle 相對路徑）。ProgramArguments[0] 為 argv[0] 佔位，
+	     實際執行檔由 BundleProgram 決定。歸因後 launchd 以 App 的 group 成員
+	     身分跑 daemon → 可 bind group container socket。 -->
 	<key>Label</key>
 	<string>io.bitward.daemon</string>
+	<key>__CFBundleIdentifier</key>
+	<string>io.bitward.dev</string>
+	<key>BundleProgram</key>
+	<string>Contents/Helpers/bitwarderd</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>$__AppDir__/Helpers/bitwarderd</string>
+		<string>bitwarderd</string>
 		<string>--push-app-group</string>
 		<string>group.8V5224A99M.io.bitward.dev</string>
 	</array>
@@ -15,6 +23,10 @@
 	<key>KeepAlive</key>
 	<true/>
 	<key>ThrottleInterval</key>
-	<integer>5</integer>
+	<integer>1</integer>
+	<key>StandardOutPath</key>
+	<string>/tmp/io.bitward.daemon.log</string>
+	<key>StandardErrorPath</key>
+	<string>/tmp/io.bitward.daemon.log</string>
 </dict>
 </plist>

@@ -21,11 +21,18 @@ enum BitwardGroup {
     static var daemonSocketPath: String? {
         // 沙盒進程的 NSHomeDirectory() 是容器 home，其下 Group Containers
         // 是 containerURL 真身的映射（非沙盒時兩者皆真路徑）。
+        // 優先級：真 group 路徑（appex 已證明可連）→ 容器映射 → tmp（terminal-only daemon 除錯用）。
+        if let url = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: id) {
+            let p = url.appendingPathComponent("daemon.sock").path
+            if FileManager.default.fileExists(atPath: p) { return p }
+        }
         let mapped = URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent("Library/Group Containers/\(id)/daemon.sock").path
-        if FileManager.default.fileExists(atPath: tmpSock) { return tmpSock }
         if FileManager.default.fileExists(atPath: mapped) { return mapped }
-        return containerURL?.appendingPathComponent("daemon.sock").path
+        if FileManager.default.fileExists(atPath: Self.tmpSock) { return Self.tmpSock }
+        // 全都不存在：回真 group 路徑（存在與否由 daemon 決定），讓錯誤以
+        // daemonAbsent 現形而非靜默換路。
+        return containerURL?.appendingPathComponent("daemon.sock").path ?? mapped
     }
 
     static let tmpSock = "/private/tmp/io.bitward.dev/daemon.sock"

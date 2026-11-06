@@ -1,6 +1,7 @@
 import AuthenticationServices
 import Foundation
 import OSLog
+import ServiceManagement
 import SwiftUI
 
 private let uiLog = Logger(subsystem: "io.bitward.dev", category: "gui")
@@ -11,51 +12,24 @@ private let uiLog = Logger(subsystem: "io.bitward.dev", category: "gui")
 /// 執行（`--service install`）：SMAppService.agent(plistName:) 對本機組建
 /// 回 EPERM（MAS 分發限定），非沙盒進程寫 LaunchAgents + launchctl 才是通的路。
 enum DaemonService {
-    private static var daemonURL: URL? {
-        let u = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/bitwarderd")
-        return FileManager.default.fileExists(atPath: u.path) ? u : nil
-    }
+    private static let agent = SMAppService.agent(plistName: "io.bitward.daemon.plist")
 
     static func status() -> String {
-        run(["--service", "status"]) ?? "unavailable"
+        switch agent.status {
+        case .notRegistered: return "未註冊"
+        case .enabled: return "已啟用"
+        case .requiresApproval: return "待核准（系統設定→登入項目）"
+        case .notFound: return "找不到（bundle 缺 LaunchAgents plist？）"
+        @unknown default: return "未知"
+        }
     }
 
     static func enable() -> String? {
-        runExpectOk(["--service", "install", "--push-app-group", BitwardGroup.id])
+        do { try agent.register(); return nil } catch { return error.localizedDescription }
     }
 
     static func disable() -> String? {
-        runExpectOk(["--service", "uninstall"])
-    }
-
-    private static func run(_ args: [String]) -> String? {
-        guard let d = daemonURL else { return nil }
-        let p = Process()
-        p.executableURL = d
-        p.arguments = args
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = pipe
-        do { try p.run() } catch { return nil }
-        p.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private static func runExpectOk(_ args: [String]) -> String? {
-        guard let d = daemonURL else { return "bundle 內找不到 bitwarderd" }
-        let p = Process()
-        p.executableURL = d
-        p.arguments = args
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = pipe
-        do { try p.run() } catch { return error.localizedDescription }
-        p.waitUntilExit()
-        guard p.terminationStatus != 0 else { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "exit \(p.terminationStatus)"
+        do { try agent.unregister(); return nil } catch { return error.localizedDescription }
     }
 }
 

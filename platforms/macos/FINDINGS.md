@@ -191,10 +191,14 @@ DER/hash 直簽修復生效）。本輪新增的實測坑：
 ## 8. W1–W4 收尾批次（identity store 失效／LaunchAgent 常駐／p95 實測）
 - **identity store 分級失效**：容器 App 依 `Welcome.state` 分派——Unlocked 才
   replace 明文候選，否則 `replace([])` 清空（真機雙態：25 筆 ↔ 0 筆）。
-- **socket 落點遷到 `/private/tmp/io.bitward.dev/`（0700 目錄 + 0600 sock +
-  peer-uid）**：macOS 15+ group container 的 bind 權只認 terminal 登入 session
-  拉起的進程；launchd daemon 與沙盒 App 綁 group 內 socket 一律 EPERM。沙盒
-  **connect** tmp sock 實測放行（探測法：App init 寫 errno 檔，用畢拆除）。
+- **socket 落點Experiment `/private/tmp/io.bitward.dev/`（0700 目錄 + 0600 sock +
+  peer-uid）**：**觀察到的事實**是——terminal session 拉起的 daemon 能 bind/connect
+  group container 的 sock；launchd daemon 與沙盒 App 對 group 路徑的 bind、
+  沙盒 App 對 tmp sock 的 connect 都實測 EPERM（探測法：App init 內 connect +
+  uiLog 記 errno——**檔寫探測會因沙盒重定向+try? 吞錯而假性消失，教訓**）。
+  **根因未隔離**（未逐一排除簽章歸因/沙盒 network 權限/容器政策的各自貢獻），
+  故 tmp 只是繞道、非「唯一活路」；且沙盒 connect tmp 亦 EPERM → **provider 端
+  仍必須走 group sock**。常駐形態的正解候選＝SMAppService 歸因（見下）。
 - **LaunchAgent 由 daemon 自裝**（`bitwarderd --service install|uninstall|status`）：
   SMAppService.agent(plistName:) 對本機組建 EPERM（MAS 限定）、mainAgent(url:)
   非真 API；非沙盒進程寫 ~/Library/LaunchAgents + launchctl bootstrap 是通的路。
@@ -204,10 +208,12 @@ DER/hash 直簽修復生效）。本輪新增的實測坑：
   daemon 的 sock 位址蓋掉，退出後全员 ECONNREFUSED 且症狀酷似 daemon 掛掉。
 - **R2 驗收**：kill -9 daemon → 3 秒 launchd 復活 → 客戶端可連（驗「連得上」
   而非「pid 存在」）。
-- **p95 實測（benchmark-checklist 全項）**：宣稱「UDS 短命 client 呼叫 p95 < 50ms」；
-  實測 release daemon、載入 1.9、5 輪 × 200 次（connect+Enroll+Version+close）、
-  0/1000 錯誤：p50 中位 0.09ms、**p95 中位 0.13ms**（range 0.11–0.41，首輪含冷
-  尾飾）。限制為 loopback UDS 系統呼叫本身（~10–100µs 級），餘裕 385 倍。
+- **p95 實測（benchmark-checklist）**：計畫宣稱「UDS 短命 client 呼叫 p95 < 50ms」
+  （對照官方 bw CLI 1–5s、issue #2741）。主數字＝使用者可感路徑
+  **`bitward status` 端到端**（進程 spawn + connect + 呼叫 + stdout 內容斷言
+  必須含 Unlocked，否則計錯）：**p50 4.7ms、p95 5.2ms、max 5.9ms、0/60 錯**。
+  in-process 純 UDS 環路為地板值（p50 0.09ms/p95 0.13ms，5×200 次 0/1000 錯）。
+  量測環境：launchd→terminal demo daemon、demo vault、載入 1.9、release build。
 - **scripts/dev-install.sh**：cargo release → xcodebuild → ditto → 強制重拷＋重簽
   helper＋功能探測 → 裝 agent → smoke connect。存在理由：Xcode script phase 增量
   不可靠（xcodegen 2.46 無視 alwaysOutOfDate），本會話三次被殭屍二進位誤導診斷。
