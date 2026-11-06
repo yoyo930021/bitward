@@ -648,7 +648,9 @@ pub struct StatusInfo {
     pub outbox: OutboxCounts,
     pub needs_reauth: bool,
     pub proto: u16,
-    /// 已落庫的 organization 數（P4b 讀側；含邀請中/已接受全部狀態）
+    /// 已落庫的 organization 數（P4b 讀側；含邀請中/已接受全部狀態）。
+    /// `default`：舊 daemon（P4b 前建置）不帶此欄位，thin 端寬容解析（§2.6 同款紀律）。
+    #[serde(default)]
     pub orgs: u32,
 }
 
