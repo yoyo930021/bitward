@@ -413,6 +413,11 @@ pub enum AgentCall {
     },
     /// hash 鏈驗證（A8）：回 {count, head, ok}
     AuditVerify,
+    /// 拒絕一個待批請求：請求端立刻收到 Denied（不等 120s 逾時）。
+    /// 置尾：postcard 變體索引追加，不動既有呼叫的編碼。
+    Deny {
+        id: ApprovalId,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

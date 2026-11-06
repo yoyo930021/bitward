@@ -52,7 +52,12 @@ pub struct PendingApproval {
     pub tx: tokio::sync::oneshot::Sender<ApprovalDecision>,
 }
 
-pub type ApprovalDecision = Option<GrantSet>;
+/// 拒絕標記：`deny()` 送出後，等待端映射為 `WtpError::Denied`（非 ApprovalExpired）。
+#[derive(Clone, Copy, Debug)]
+pub struct DeniedMarker;
+
+/// 人工裁決：Ok = 批准（Option = 追加的常駐 grant）；Err = 拒絕。
+pub type ApprovalDecision = Result<Option<GrantSet>, DeniedMarker>;
 
 fn denied(gap: impl std::fmt::Display) -> WtpError {
     WtpError::Denied {
@@ -136,7 +141,8 @@ impl Hub {
                 let waited = tokio::time::timeout(std::time::Duration::from_secs(120), rx).await;
                 self.pending.lock().unwrap().remove(&id);
                 match waited {
-                    Ok(Ok(extra)) => {
+                    // 批准（含追加 grant）：語意不變
+                    Ok(Ok(Ok(extra))) => {
                         if let Some(extra) = extra {
                             let mut g = sess.grants.write().unwrap();
                             g.0.extend(extra.0);
@@ -147,6 +153,12 @@ impl Hub {
                         let _ = self.store.session_put(&row);
                         Ok(Some(idx))
                     }
+                    // 拒絕：立刻回 Denied，不再等 120s 逾時
+                    Ok(Ok(Err(_))) => {
+                        tracing::info!(approval = %id.0, target = %sess.row.id, "approval denied");
+                        Err(denied("核准被使用者拒絕"))
+                    }
+                    // 逾時或通道斷（核准端消失）：維持 ApprovalExpired 語意
                     _ => Err(WtpError::ApprovalExpired),
                 }
             }
@@ -328,8 +340,23 @@ impl Hub {
             Some(segs) => Some(parse_grants(&segs.join("; ")).map_err(parse_err)?),
             None => None,
         };
-        let _ = p.tx.send(extra);
+        let _ = p.tx.send(Ok(extra));
         tracing::info!(approval = %id.0, target = %p.target, "approval granted");
+        Ok(Response::Ok)
+    }
+
+    /// 拒絕一個待批請求：語意比照 approve（僅互動端可拒；無此 pending → NotFound）。
+    /// 請求端立刻收到 `Denied`，不必等 120s 逾時。
+    pub fn deny(&self, caller: &Arc<LiveSession>, id: ApprovalId) -> Result<Response, WtpError> {
+        if caller.kind != SessionKind::Interactive {
+            return Err(denied("只有互動端能拒絕核准"));
+        }
+        let pending = self.pending.lock().unwrap().remove(&id);
+        let Some(p) = pending else {
+            return Err(WtpError::NotFound);
+        };
+        let _ = p.tx.send(Err(DeniedMarker));
+        tracing::info!(approval = %id.0, target = %p.target, "approval denied");
         Ok(Response::Ok)
     }
 
@@ -653,5 +680,113 @@ fn summarize(call: &Call) -> String {
             format!("run {:?}", plan.argv.first().cloned().unwrap_or_default())
         }
         other => format!("{other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn bare_hub() -> Arc<Hub> {
+        let dir = std::env::temp_dir().join(format!("bw-agent-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        Hub::open(&dir, None).await.unwrap()
+    }
+
+    /// (requester, human)：requester 帶 `approve` 標記的 grant，任何命中都排隊。
+    fn gated_sessions(hub: &Arc<Hub>) -> (Arc<LiveSession>, Arc<LiveSession>) {
+        let requester = hub.new_session(
+            Uuid::new_v4().to_string(),
+            SessionKind::Agent,
+            parse_grants("use:totp all approve").unwrap(),
+            None,
+            json!({"kind": "agent", "name": "gated"}),
+        );
+        let human = hub.new_session(
+            Uuid::new_v4().to_string(),
+            SessionKind::Interactive,
+            GrantSet::default_full(),
+            None,
+            json!({"kind": "interactive"}),
+        );
+        (requester, human)
+    }
+
+    /// 背景發起一個必然 NeedApproval 的 dispatch，等它進佇列後回 (任務, 核准 id)。
+    async fn spawn_gated(
+        hub: &Arc<Hub>,
+        requester: &Arc<LiveSession>,
+    ) -> (
+        tokio::task::JoinHandle<Result<Response, WtpError>>,
+        ApprovalId,
+    ) {
+        let hub2 = hub.clone();
+        let sess2 = requester.clone();
+        let h = tokio::spawn(async move {
+            hub2.dispatch(&sess2, &Call::Use(UseCall::TotpCode { id: Uuid::new_v4() }))
+                .await
+        });
+        let id = loop {
+            if let Some((s, _)) = hub.pending_list().first() {
+                break ApprovalId(Uuid::parse_str(s).unwrap());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+        (h, id)
+    }
+
+    #[tokio::test]
+    async fn deny_releases_requester_with_denied_not_timeout() {
+        let hub = bare_hub().await;
+        let (requester, human) = gated_sessions(&hub);
+        let (h, id) = spawn_gated(&hub, &requester).await;
+        // 治理比照 approve：非互動端不能拒；未知 id → NotFound
+        assert!(matches!(
+            hub.deny(&requester, id),
+            Err(WtpError::Denied { .. })
+        ));
+        assert!(matches!(
+            hub.deny(&human, ApprovalId(Uuid::new_v4())),
+            Err(WtpError::NotFound)
+        ));
+        assert!(matches!(hub.deny(&human, id), Ok(Response::Ok)));
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), h)
+            .await
+            .expect("deny 後請求端必須立刻放行（非等 120s 逾時）")
+            .unwrap();
+        match outcome {
+            Err(WtpError::Denied { grant_gap }) => {
+                assert!(grant_gap.contains("拒絕"), "grant_gap: {grant_gap}")
+            }
+            other => panic!("expect Denied, got {other:?}"),
+        }
+        assert!(hub.pending_list().is_empty(), "拒絕後佇列必須清空");
+    }
+
+    #[tokio::test]
+    async fn approve_path_still_passes_authorize() {
+        let hub = bare_hub().await;
+        let (requester, human) = gated_sessions(&hub);
+        let (h, id) = spawn_gated(&hub, &requester).await;
+        hub.approve(&human, id, Some(&vec!["see:identity all".to_string()]))
+            .unwrap();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), h)
+            .await
+            .expect("approve 後請求端必須放行")
+            .unwrap();
+        // authorize 放行 → dispatch_inner 的 totp 因 item 不存在回 NotFound（非 Denied/Expired）
+        assert!(matches!(outcome, Err(WtpError::NotFound)), "{outcome:?}");
+        // approve 的追加 grant 語意不變：持久化進 session grants
+        let g = requester.grants.read().unwrap();
+        assert!(
+            g.0.iter()
+                .any(|x| x.access == Access::See(bw_proto::Sensitivity::Identity)),
+            "追加 grant 必須生效"
+        );
     }
 }

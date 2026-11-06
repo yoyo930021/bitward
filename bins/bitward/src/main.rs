@@ -176,6 +176,10 @@ enum Cmd {
         #[arg(long = "grant")]
         grants: Vec<String>,
     },
+    /// 拒絕一個待批請求：請求端立刻收到 Denied，不必等 120s 逾時
+    Deny {
+        id: String,
+    },
     /// 跨機配對（§1.2）
     Pair {
         #[command(subcommand)]
@@ -897,6 +901,9 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
         Cmd::Approve { id, grants } => Call::Agent(AgentCall::Approve {
             id: bw_proto::ApprovalId(parse_approval(id)?),
             grants: (!grants.is_empty()).then(|| grants.clone()),
+        }),
+        Cmd::Deny { id } => Call::Agent(AgentCall::Deny {
+            id: bw_proto::ApprovalId(parse_approval(id)?),
         }),
         Cmd::Agent { cmd } => match cmd {
             AgentCmd::Open { name, grant, ttl } => Call::Agent(AgentCall::OpenSession {

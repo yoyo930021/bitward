@@ -461,6 +461,7 @@ impl Hub {
             Call::Agent(AgentCall::Approve { id, grants }) => {
                 self.approve(sess, *id, grants.as_ref())
             }
+            Call::Agent(AgentCall::Deny { id }) => self.deny(sess, *id),
             Call::Agent(AgentCall::Revoke { session: sid }) => self.revoke(sess, *sid),
             Call::Agent(AgentCall::ListSessions) => self.list_sessions(sess),
             Call::Agent(AgentCall::ListPending) => Ok(Response::Sessions(
@@ -911,6 +912,7 @@ fn action_tag(c: &Call) -> String {
         Call::Sync(SyncCall::ResolveConflict { .. }) => "Sync.ResolveConflict",
         Call::Agent(AgentCall::OpenSession { .. }) => "Agent.OpenSession",
         Call::Agent(AgentCall::Approve { .. }) => "Agent.Approve",
+        Call::Agent(AgentCall::Deny { .. }) => "Agent.Deny",
         Call::Agent(AgentCall::Revoke { .. }) => "Agent.Revoke",
         Call::Agent(AgentCall::ListSessions) => "Agent.ListSessions",
         Call::Agent(AgentCall::ListPending) => "Agent.ListPending",

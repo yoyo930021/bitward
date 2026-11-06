@@ -4,7 +4,8 @@
 //!
 //! 佈局來源（WebAuthn L3 §6.1/§7.1/§7.3）：
 //! - authData = sha256(rpId) ‖ flags ‖ counter(32be) [‖ attestedCredentialData]
-//! - attestedCredentialData = rpIdHash ‖ AAGUID(16B) ‖ credIdLen(32be) ‖ credId ‖ COSE_Key
+//! - attestedCredentialData = AAGUID(16B) ‖ credIdLen(16be) ‖ credId ‖ COSE_Key
+//!   （rpIdHash 只在 authData 頭出現一次，**不在** attestedCredentialData 內重複）
 //! - clientDataJSON = {"type","challenge","origin","crossOrigin"}（challenge 逐字元原樣嵌入）
 //! - 簽名 = ECDSA-P256-SHA256(authData ‖ sha256(clientDataJSON))，出棧轉 raw r‖s(64B)。
 
@@ -59,34 +60,41 @@ fn signing_key(scalar: &[u8]) -> Result<p256::ecdsa::SigningKey, CryptoError> {
 }
 
 /// 私鑰 → COSE_Key（EC2/P-256/ES256）的 CBOR bytes。
+/// 手寫 canonical 鍵序（RFC 8949 §4.2.1：鍵編碼位元組字典序 01,03,20,21,22）；
+/// 77 bytes 定長。serde_cbor 的 BTreeMap 按整數值排序（-3,-2,-1,1,3）非 canonical。
 pub fn cose_public_key(scalar: &[u8]) -> Result<Vec<u8>, CryptoError> {
     let vk = signing_key(scalar)?.verifying_key().to_encoded_point(false);
-    let x = vk.x().ok_or(CryptoError::InvalidKey)?;
-    let y = vk.y().ok_or(CryptoError::InvalidKey)?;
-    let mut m = BTreeMap::new();
-    m.insert(CborValue::Integer(1), CborValue::Integer(2)); // kty = EC2
-    m.insert(CborValue::Integer(3), CborValue::Integer(-7)); // alg = ES256
-    m.insert(CborValue::Integer(-1), CborValue::Integer(1)); // crv = P-256
-    m.insert(CborValue::Integer(-2), CborValue::Bytes(x.to_vec()));
-    m.insert(CborValue::Integer(-3), CborValue::Bytes(y.to_vec()));
-    serde_cbor::to_vec(&CborValue::Map(m)).map_err(|_| CryptoError::InvalidKey)
+    let x = vk.x().ok_or(CryptoError::InvalidKey)?.to_vec();
+    let y = vk.y().ok_or(CryptoError::InvalidKey)?.to_vec();
+    if x.len() != 32 || y.len() != 32 {
+        return Err(CryptoError::InvalidKey);
+    }
+    let mut out = Vec::with_capacity(77);
+    out.extend_from_slice(&[
+        0xA5, // map(5)
+        0x01, 0x02, // 1 (kty) = 2 (EC2)
+        0x03, 0x26, // 3 (alg) = -7 (ES256)
+        0x20, 0x01, // -1 (crv) = 1 (P-256)
+        0x21, 0x58, 0x20, // -2 (x) = bstr(32)
+    ]);
+    out.extend_from_slice(&x);
+    out.extend_from_slice(&[0x22, 0x58, 0x20]); // -3 (y) = bstr(32)
+    out.extend_from_slice(&y);
+    Ok(out)
 }
 
 fn rp_id_hash(rp_id: &str) -> [u8; 32] {
     Sha256::digest(rp_id.as_bytes()).into()
 }
 
-/// attestedCredentialData（L3 §6.1）：AAGUID 取全零（本 daemon 無認證的 attester id）。
-fn attested_credential_data(
-    rp_id_hash: &[u8; 32],
-    credential_id: &[u8],
-    scalar: &[u8],
-) -> Result<Vec<u8>, CryptoError> {
+/// attestedCredentialData（L3 §6.1）：AAGUID(16) ‖ credIdLen(16be) ‖ credId ‖ COSE_Key。
+/// AAGUID 取全零（本 daemon 無認證的 attester id）；rpIdHash 屬 authData 頭部，
+/// 不在這裡重複（Safari 嚴格解析：多 32B 或長度欄 4B 都會整包拒收）。
+fn attested_credential_data(credential_id: &[u8], scalar: &[u8]) -> Result<Vec<u8>, CryptoError> {
     let cose = cose_public_key(scalar)?;
-    let mut out = Vec::with_capacity(52 + credential_id.len() + cose.len());
-    out.extend_from_slice(rp_id_hash);
+    let mut out = Vec::with_capacity(18 + credential_id.len() + cose.len());
     out.extend_from_slice(&[0u8; 16]); // AAGUID
-    out.extend_from_slice(&(credential_id.len() as u32).to_be_bytes());
+    out.extend_from_slice(&(credential_id.len() as u16).to_be_bytes()); // credIdLen: 16 位
     out.extend_from_slice(credential_id);
     out.extend_from_slice(&cose);
     Ok(out)
@@ -109,7 +117,7 @@ pub fn registration_auth_data(
 ) -> Result<Vec<u8>, CryptoError> {
     let h = rp_id_hash(rp_id);
     let mut ad = auth_data_prefix(&h, FLAGS_REGISTER, counter);
-    ad.extend_from_slice(&attested_credential_data(&h, credential_id, scalar)?);
+    ad.extend_from_slice(&attested_credential_data(credential_id, scalar)?);
     Ok(ad)
 }
 
@@ -207,54 +215,92 @@ pub fn assertion(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p256::ecdsa::VerifyingKey;
 
-    fn verify_with_cose(cose: &[u8], msg: &[u8], sig_raw: &[u8]) -> Option<bool> {
-        use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
+    /// 獨立視角解析器：不用本模組任何佈局常數/組裝函數，
+    /// 按 FIDO2 L3 §6.1 手撕固定位元組偏移。回傳 (credId, COSE bytes)。
+    fn parse_authdata_independent(ad: &[u8], cose_len: usize) -> (Vec<u8>, Vec<u8>) {
+        // 標頭：rpIdHash(32) ‖ flags(1) ‖ counter(4)
+        let expect_total = 32 + 1 + 4 + 16 + 2 + 32 + cose_len;
+        assert_eq!(ad.len(), expect_total, "authData 總長");
+        assert_eq!(ad[32], 0x45, "flags = UP|UV|AT（字面值）");
+        assert_eq!(&ad[33..37], &[0x00, 0x00, 0x00, 0x01], "counter=1（32be）");
+        // attestedCredentialData：AAGUID(16) ‖ credIdLen(2) ‖ credId(32) ‖ COSE
+        assert_eq!(&ad[37..53], &[0u8; 16][..], "AAGUID 全零");
+        assert_eq!(
+            u16::from_be_bytes(ad[53..55].try_into().unwrap()),
+            32,
+            "credIdLen 必須是 16 位元組大端＝32"
+        );
+        let cred_id = ad[55..87].to_vec();
+        let cose = ad[87..].to_vec();
+        assert_eq!(cose.len(), cose_len);
+        (cred_id, cose)
+    }
+
+    /// COSE bytes → (x, y)，用 serde_cbor + p256 公開 API 反解（不碰產生端）。
+    fn cose_coords(cose: &[u8]) -> (Vec<u8>, Vec<u8>) {
         let v: CborValue = serde_cbor::from_slice(cose).unwrap();
-        let CborValue::Map(m) = v else { return None };
-        let get = |k: i128| -> Option<&Vec<u8>> {
-            m.get(&CborValue::Integer(k)).and_then(|x| match x {
-                CborValue::Bytes(b) => Some(b),
-                _ => None,
-            })
+        let CborValue::Map(m) = v else {
+            panic!("COSE_Key must be a map")
         };
-        // 形態斷言：kty=EC2(2)、alg=ES256(-7)、crv=P-256(1)
-        assert_eq!(
-            m.get(&CborValue::Integer(1)),
-            Some(&CborValue::Integer(2)),
-            "kty"
-        );
-        assert_eq!(
-            m.get(&CborValue::Integer(3)),
-            Some(&CborValue::Integer(-7)),
-            "alg"
-        );
-        assert_eq!(
-            m.get(&CborValue::Integer(-1)),
-            Some(&CborValue::Integer(1)),
-            "crv"
-        );
-        let (x, y) = (get(-2)?, get(-3)?);
-        let mut uncompressed = Vec::with_capacity(65);
-        uncompressed.push(0x04);
-        uncompressed.extend_from_slice(x);
-        uncompressed.extend_from_slice(y);
-        let vk = VerifyingKey::from_sec1_bytes(&uncompressed).ok()?;
-        Some(
-            vk.verify(msg, &Signature::from_slice(sig_raw).ok()?)
-                .is_ok(),
-        )
+        let int = |k: i128| {
+            assert_eq!(
+                m.get(&CborValue::Integer(k)),
+                Some(&CborValue::Integer(match k {
+                    1 => 2,
+                    3 => -7,
+                    -1 => 1,
+                    _ => unreachable!(),
+                })),
+                "cose key {k}"
+            )
+        };
+        int(1);
+        int(3);
+        int(-1);
+        let bytes = |k: i128| -> Vec<u8> {
+            match m.get(&CborValue::Integer(k)) {
+                Some(CborValue::Bytes(b)) => b.clone(),
+                other => panic!("cose key {k} not bytes: {other:?}"),
+            }
+        };
+        (bytes(-2), bytes(-3))
     }
 
     #[test]
-    fn register_then_assert_roundtrip() {
+    fn registration_authdata_fido2_byte_layout() {
+        let scalar = generate_private_key();
+        let cred_id: Vec<u8> = (0u8..32).collect(); // 遞增花樣：任何錯位都瞞不過
+        let ad = registration_auth_data("cbor.test", &cred_id, &scalar, 1).unwrap();
+        assert_eq!(&ad[0..32], &Sha256::digest(b"cbor.test")[..], "rpIdHash");
+        let (parsed_id, cose) = parse_authdata_independent(&ad, 77);
+        assert_eq!(parsed_id, cred_id, "ACD 內 credId == 頂層 credential_id");
+        // canonical 鍵序前導 10 字节：map(5), 1=>2, 3=>-7, -1=>1, -2=>bstr32
+        assert_eq!(
+            &cose[..10],
+            &[0xA5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21, 0x58, 0x20]
+        );
+        // COSE x/y 反解出的公鑰必須等於生成鑰
+        let (x, y) = cose_coords(&cose);
+        let mut uncompressed = vec![0x04];
+        uncompressed.extend_from_slice(&x);
+        uncompressed.extend_from_slice(&y);
+        let vk_from_cose = VerifyingKey::from_sec1_bytes(&uncompressed).unwrap();
+        let vk_generated =
+            VerifyingKey::from(&p256::ecdsa::SigningKey::from_slice(&scalar).unwrap());
+        assert_eq!(
+            vk_from_cose.to_encoded_point(false).as_bytes(),
+            vk_generated.to_encoded_point(false).as_bytes(),
+            "COSE 公鑰必須與生成私鑰一致"
+        );
+    }
+
+    #[test]
+    fn attestation_object_wraps_authdata_verbatim() {
         let scalar = generate_private_key();
         let cred_id = vec![0xab; 32];
         let ad = registration_auth_data("webauthn.test", &cred_id, &scalar, 1).unwrap();
-        // authData 逐欄位：rpIdHash、flags、counter、ACD 佈局
-        assert_eq!(&ad[0..32], &Sha256::digest(b"webauthn.test")[..]);
-        assert_eq!(ad[32], FLAGS_REGISTER);
-        assert_eq!(&ad[33..37], &1u32.to_be_bytes());
         let att = attestation_object("webauthn.test", &cred_id, &scalar, 1).unwrap();
         let obj: CborValue = serde_cbor::from_slice(&b64url_decode(&att).unwrap()).unwrap();
         let CborValue::Map(m) = obj else {
@@ -272,32 +318,42 @@ mod tests {
             panic!("authData must be bytes")
         };
         assert_eq!(ad2, &ad);
-        // COSE 公鑰藏在 ACD 尾部：authData 前綴 37B 後是 ACD（32+16+4 起為 credId）
-        assert_eq!(&ad[89..89 + cred_id.len()], cred_id.as_slice());
-        assert_eq!(&ad2[89..89 + cred_id.len()], cred_id.as_slice());
-        let cose = &ad2[89 + cred_id.len()..];
+        parse_authdata_independent(ad2, 77);
+    }
+
+    #[test]
+    fn register_then_assert_roundtrip() {
+        let scalar = generate_private_key();
+        let cred_id = vec![0xab; 32];
+        let ad = registration_auth_data("webauthn.test", &cred_id, &scalar, 1).unwrap();
+        let (_parsed_id, cose) = parse_authdata_independent(&ad, 77);
 
         let parts = assertion("webauthn.test", &scalar, 2, "d2FsdGVyYXRl").unwrap();
         let ad_bytes = b64url_decode(&parts.authenticator_data).unwrap();
+        // 斷言 authData（無 AT）：恰好 37B，佈局不受註冊端修復波及
+        assert_eq!(ad_bytes.len(), 37, "assertion authData = 32+1+4，無 ACD");
         assert_eq!(&ad_bytes[0..32], &Sha256::digest(b"webauthn.test")[..]);
-        assert_eq!(ad_bytes[32], FLAGS_ASSERT);
-        assert_eq!(&ad_bytes[33..37], &2u32.to_be_bytes());
+        assert_eq!(ad_bytes[32], 0x05, "flags = UP|UV（字面值）");
+        assert_eq!(&ad_bytes[33..37], &[0x00, 0x00, 0x00, 0x02]);
         let cdj = b64url_decode(&parts.client_data_json).unwrap();
         assert_eq!(
             String::from_utf8(cdj.clone()).unwrap(),
             r#"{"challenge":"d2FsdGVyYXRl","crossOrigin":false,"origin":"https://webauthn.test","type":"webauthn.get"}"#
         );
-        let mut msg = ad_bytes;
+        let mut msg = ad_bytes.clone();
         msg.extend_from_slice(&Sha256::digest(&cdj));
-        assert_eq!(
-            verify_with_cose(cose, &msg, &b64url_decode(&parts.signature).unwrap()),
-            Some(true),
-            "COSE 公鑰必須驗通 assertion 簽名"
-        );
-        assert_eq!(
-            b64url_decode(&parts.signature).unwrap().len(),
-            64,
-            "raw r‖s"
+        let sig_raw = b64url_decode(&parts.signature).unwrap();
+        assert_eq!(sig_raw.len(), 64, "raw r‖s");
+        let (x, y) = cose_coords(&cose);
+        let mut uncompressed = vec![0x04];
+        uncompressed.extend_from_slice(&x);
+        uncompressed.extend_from_slice(&y);
+        use p256::ecdsa::{Signature, signature::Verifier};
+        let vk = VerifyingKey::from_sec1_bytes(&uncompressed).unwrap();
+        assert!(
+            vk.verify(&msg, &Signature::from_slice(&sig_raw).unwrap())
+                .is_ok(),
+            "attestation 內 COSE 公鑰必須驗通 assertion 簽名"
         );
     }
 
