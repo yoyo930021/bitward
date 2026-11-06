@@ -117,3 +117,32 @@
   2. `totp()` 對無 seed 項目誤報 `Locked`（`ok_or_else("no totp seed")` 折進
      `.map_err(|_| Locked)`）；seed 存在性不需金鑰，檢查前移回 `Denied("此項目沒有
      TOTP seed")`。
+
+## 7. P7 批次（passkey／批准中心／identity store）
+- **authData 佈局是 Safari 收單的全部**：`attested_credential_data` = AAGUID(16) ‖
+  credIdLen(u16 BE) ‖ credId ‖ COSE_Key——rpIdHash 只在 authData 前綴出現一次。
+  初版多塞了一遍 rpIdHash 且 credIdLen 用 u32（198B vs 正確 164B），Safari 客戶端直接
+  NotAllowedError（連 finish POST 都不發）。COSE_Key 鍵序必須 canonical（1,3,-1,-2,-3；
+  serde_cbor 的 BTreeMap 按整數值排序剛好不合）。獨立解析（cbor2/SimpleWebAuthn）
+  與產生端常量函數要**分開寫測試**，否則自證循環。
+- **Apple challenge 慣例**：provider 只拿得到 `clientDataHash`，clientDataJSON 的
+  challenge 欄位填 b64url(clientDataHash raw bytes)、JSON 模板
+  `{"type":...,"challenge":...,"origin":"https://<rpID>","crossOrigin":false}` 需逐字元
+  對齊系統重建——本地 http RP 會因 origin（http+port）對不上而假性失敗，非實作 bug。
+- **註冊確認時機**：互動路徑不可立即 `completeRegistrationRequest`——系統在等「人同意」，
+  搶跑判定 user denied。確認按鈕內嵌於系統 sheet（ViewBridge remote view：**合成點擊
+  （AXPress 與物理座標都打不進）；真人可按**——自動化到此為界）。
+- **系統 Helper 崩潰（macOS 27 實測）**：`_ASCredentialAuthenticationViewController`
+  `presentViewControllerAsSheet:` 在無 active display（螢幕睡眠）時 NSAssertion 崩潰。
+  除錯前先 `caffeinate -u`；「Error checking with notarization daemon: 3」仍是噪音。
+- **ASCredentialIdentityStore 可用**：容器 App（帶 autofill entitlement）
+  `replaceCredentialIdentities` 落地
+  `~/Library/Application Support/com.apple.AuthenticationServices/CredentialProviders/<bundle> (<team>)/Identities/Identities.db`。
+  首呼可能報 "database could not be opened"（建檔競態），後續成功——重試即可。
+  鎖定期間 metadata 是密文信封，寫入的 user/service 欄會是密文（解鎖後下一輪刷新為明）。
+- **批准中心閉環**：pair code grant 支援 `approve` 修飾（`reveal:secret all approve`）→
+  請求端阻塞 → 容器 App 輪詢 ListPending → 批准/拒絕（Deny 立即釋放，不等 120s）。
+  真機閉環驗證通過。
+- **macOS 27 容器 App 首窗**：背景 session `open` 啟動的 WindowGroup app 不自動建窗
+  （此前視窗全靠 savedState 還原）；單例 `Window` scene + `.defaultLaunchBehavior(.presented)`
+  修正。無窗進程會被 TAL 自動終止——首窗是生存問題不是美學問題。
