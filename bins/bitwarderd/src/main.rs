@@ -309,14 +309,23 @@ where
             }
         }
         Auth::Session { token } => {
-            hub.sessions
+            let sess = hub
+                .sessions
                 .lock()
                 .unwrap()
                 .get(&token)
                 .cloned()
                 .ok_or(WtpError::Denied {
                     grant_gap: "unknown session".into(),
-                })?
+                })?;
+            // lock 撤銷的 session 在 Hello 就拒（A6），讓 thin 端的「重 Enroll 一次」
+            // 路徑接住；拖到 Invoke 才回 StaleEpoch 会让 client 快取殭屍 token 永世復活失敗。
+            if sess.revoked.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(WtpError::Denied {
+                    grant_gap: "session 已隨鎖撤銷".into(),
+                });
+            }
+            sess
         }
         Auth::Resume { .. } => {
             return Err(WtpError::Unsupported {

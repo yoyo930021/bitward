@@ -93,3 +93,27 @@
   "Error checking with notarization daemon: 3" 是噪音，曾誤導一輪排查。
 - `platforms/macos/probe/`：最小 credential provider（無 daemon、無 socket），
   用於切割「我們的程式碼 vs 環境/簽章」問題，留作日後回歸工具。
+
+## 6. P6 批次（OTP／解鎖引導／保存路徑調查）
+- **macOS Safari 不向第三方 provider 發 OTP 請求**：`autocomplete=one-time-code` 欄位
+  不出現鑰匙圖示、無 `ASOneTimeCodeCredentialRequest`（驗證碼建議是 Apple 簡訊中繼專有路徑）。
+  1Password 在 macOS 的互動模型是**清單多列一行「驗證碼」**——本專案照做：Login 項目在清單
+  產生 password + TOTP 兩列，選 TOTP 列以 `Use(TotpCode)` 現算代碼、經
+  `ASPasswordCredential(user:"", password:code)` 填入目前欄位。真機驗證：
+  `totp ok → completeRequest expired=false`，代碼與 RFC 6238 獨立計算一致。
+- **Locked 分級如設計**：daemon 鎖定下 List（加密 metadata）照常服務，Reveal/TOTP 才回
+  `Err(Locked)`。清單選取撞鎖 → 面板轉「Vault 目前鎖定 ＋ 解鎖鈕」（裝置斷言免密解鎖）→
+  `unlock ok` → 自動回清單。BTPError 拆出 `.locked`（WtpError externally-tagged 的 unit
+  variant 是字串 "Locked"，struct variant 是單鍵物件——Err 形態解析要兩式都吃）。
+- **保存密碼在 macOS 系統路徑走不通（暫）**：`prepareInterface(for: ASSavePasswordRequest)`
+  為 `API_UNAVAILABLE(macos)`（iOS/visionOS 26.2 獨有）。系統級「儲存此密碼」對第三方
+  provider 在 macOS 根本沒開門——與本專案「官方 macOS 支援缺席」的前提互為表裡。
+  目前保存走 CLI `bitward new`；appex 保存等 Apple 補 API。
+- **daemon 修復（真機踩出）**：
+  1. `Auth::Session` 命中已被 lock 撤銷的 session 時原本照發 Welcome、到 Invoke 才回
+     StaleEpoch——thin 端快取的殭屍 token 讓「重新執行指令即可」的承諾永不成立（每次重跑
+     都重蹈同一死 session）。改為 Hello 階段即拒（Denied），CLI 既有的「刪檔重 Enroll 一次」
+     路徑自然接住。真機驗證：lock 後 CLI status 自愈。
+  2. `totp()` 對無 seed 項目誤報 `Locked`（`ok_or_else("no totp seed")` 折進
+     `.map_err(|_| Locked)`）；seed 存在性不需金鑰，檢查前移回 `Denied("此項目沒有
+     TOTP seed")`。

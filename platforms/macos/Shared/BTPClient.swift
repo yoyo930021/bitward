@@ -9,7 +9,8 @@ import Darwin
 enum BTPError: Error, Equatable {
     case daemonAbsent          // connect 失敗：daemon 沒跑
     case timeout               // 超出 §8 的 1.5s 有界預算
-    case needsInteraction      // Locked / NeedsApproval / StaleEpoch / Challenge
+    case locked                // Err(Locked)：清單頁給一鍵解鎖
+    case needsInteraction      // NeedsApproval / StaleEpoch / Challenge
     case noCredentials         // 查詢成功但零候選
     case protocolError(String)
 }
@@ -26,6 +27,8 @@ struct BTPListItem {
     let name: String
     /// metadata 分級表不含 username（屬 Secret），清單以首個 uri 呈現歸屬。
     let detail: String
+    /// ItemKind 線格式（"Login" 等）；只有 Login 列附驗證碼行。
+    let kind: String
 }
 
 final class BTPClient {
@@ -116,7 +119,8 @@ final class BTPClient {
         return try items(fromReply: reply).compactMap { item in
             guard let meta = item["meta"] as? [String: Any], let id = meta["id"] as? String else { return nil }
             let uris = (meta["uris"] as? [String]) ?? []
-            return BTPListItem(id: id, name: meta["name"] as? String ?? id, detail: uris.first ?? "")
+            return BTPListItem(id: id, name: meta["name"] as? String ?? id,
+                               detail: uris.first ?? "", kind: meta["kind"] as? String ?? "")
         }
     }
 
@@ -136,6 +140,34 @@ final class BTPClient {
         return BTPCandidate(id: id, username: item["username"] as? String, password: password)
     }
 
+    /// Use(TotpCode)：目前有效的 30 秒代碼；清單選取與填充共用。
+    func totp(id: String) throws -> (code: String, validForSecs: UInt32) {
+        try ensureEnrolled()
+        try sendJSON(["Invoke": ["rid": 3, "call": ["Use": ["TotpCode": ["id": id]]]]])
+        let reply = try readFrames(until: { frame in
+            guard let invoke = frame["Reply"] as? [String: Any], let rid = invoke["rid"] as? Int else { return false }
+            return rid == 3
+        })
+        let response = try response(fromReply: reply)
+        guard let totp = response["TotpCode"] as? [String: Any], let code = totp["code"] as? String else {
+            throw BTPError.protocolError("Reply Ok is not TotpCode")
+        }
+        return (code, (totp["valid_for_secs"] as? UInt32) ?? 30)
+    }
+
+    /// Auth(Unlock{biometric:false})：本機 UDS 的裝置斷言解鎖，不需人在場輸入密碼。
+    @discardableResult
+    func unlock() throws -> Bool {
+        try ensureEnrolled()
+        try sendJSON(["Invoke": ["rid": 4, "call": ["Auth": ["Unlock": ["biometric": false]]]]])
+        let reply = try readFrames(until: { frame in
+            guard let invoke = frame["Reply"] as? [String: Any], let rid = invoke["rid"] as? Int else { return false }
+            return rid == 4
+        })
+        _ = try response(fromReply: reply)
+        return true
+    }
+
     /// 凍結流：Hello(Enroll) → List(Metadata by uri) → 取首筆 → Get(Reveal)。
     func autofill(uri: String) throws -> BTPCandidate {
         let items = try list(uri: uri, limit: 5)
@@ -153,9 +185,15 @@ final class BTPClient {
         guard let outcome = reply["outcome"] as? [String: Any] else {
             throw BTPError.protocolError("Reply without outcome")
         }
-        if outcome["Err"] != nil {
-            // Locked / NeedsApproval / StaleEpoch / Denied 一律交回互動路徑（§8 語意）
-            throw BTPError.needsInteraction
+        if let err = outcome["Err"] {
+            // WtpError 是 externally tagged：unit variant 為字串（"Locked"），
+            // struct variant 為單鍵物件（{"Denied":{...}}）。只拆 Locked，
+            // 其餘（NeedsApproval/Denied/StaleEpoch…）一律交回互動語意（§8）。
+            let name: String
+            if let s = err as? String { name = s }
+            else if let d = err as? [String: Any] { name = d.keys.first ?? "" }
+            else { name = "" }
+            throw name == "Locked" ? BTPError.locked : BTPError.needsInteraction
         }
         guard let response = outcome["Ok"] as? [String: Any] else {
             throw BTPError.protocolError("Reply outcome without Ok/Err")

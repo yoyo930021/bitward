@@ -711,6 +711,10 @@ impl Hub {
     fn totp(&self, id: ItemId) -> DispatchResult {
         let row = self.store.item(id).map_err(denied)?;
         let row = row.ok_or(WtpError::NotFound)?;
+        // seed 存在性不需金鑰：先擋「無 seed」，別讓它折進下面的 Locked 映射。
+        if row.enc_cipher.pointer("/login/totp").and_then(Value::as_str).is_none() {
+            return Err(denied("此項目沒有 TOTP seed"));
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
