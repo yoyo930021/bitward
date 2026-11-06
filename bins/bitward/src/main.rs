@@ -743,6 +743,8 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                 credential_id: credential.clone(),
                 challenge: challenge.clone(),
                 rp_id: rp.clone(),
+                // CLI 走標準流（自組 JSON）；Apple provider 流由 Swift 端帶 hash。
+                client_data_hash: None,
             }),
         },
         Cmd::Audit { tail, verify } => {

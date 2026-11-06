@@ -251,6 +251,7 @@ impl Hub {
             credential_id,
             challenge,
             rp_id,
+            client_data_hash,
         } = call
         else {
             return Err(denied("expect AssertPasskey"));
@@ -278,7 +279,16 @@ impl Hub {
                     .map_err(|e| e.to_string())?;
                 let scalar =
                     Zeroizing::new(bw_crypto::b64_decode(&scalar_b64).map_err(|e| e.to_string())?);
-                bw_crypto::assertion(rp_id, &scalar, next, challenge).map_err(|e| e.to_string())
+                // Apple 流（有 hash）：簽 authData‖hash；標準流（只有 challenge）：自組 JSON。
+                match client_data_hash {
+                    Some(h) => {
+                        let hash = bw_crypto::b64url_decode(h).map_err(|e| e.to_string())?;
+                        bw_crypto::assertion_with_hash(rp_id, &scalar, next, &hash)
+                            .map_err(|e| e.to_string())
+                    }
+                    None => bw_crypto::assertion(rp_id, &scalar, next, challenge)
+                        .map_err(|e| e.to_string()),
+                }
             })
             .map_err(|_| WtpError::Locked)?
             .map_err(denied)?;
@@ -482,6 +492,7 @@ mod tests {
                     credential_id: credential_id.clone(),
                     challenge: challenge.into(),
                     rp_id: "webauthn.test".into(),
+                    client_data_hash: None,
                 },
             )
             .await
@@ -624,6 +635,7 @@ mod tests {
                     credential_id: "x".into(),
                     challenge: "y".into(),
                     rp_id: "r".into(),
+                    client_data_hash: None,
                 }
             )
             .await,

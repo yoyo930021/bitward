@@ -173,7 +173,7 @@ pub fn public_key_sec1(scalar: &[u8]) -> Result<Vec<u8>, CryptoError> {
         .to_vec())
 }
 
-/// 驗證斷言簽名：msg = authData ‖ sha256(clientDataJSON)，sig 為 raw r‖s。
+/// 驗證斷言簽名：msg = authData ‖ sha256(clientDataJSON)，sig 為 DER（也收 raw）。
 pub fn verify_es256(
     pub_sec1: &[u8],
     auth_data: &[u8],
@@ -184,7 +184,8 @@ pub fn verify_es256(
     let Ok(vk) = VerifyingKey::from_sec1_bytes(pub_sec1) else {
         return false;
     };
-    let Ok(sig) = Signature::from_slice(sig_raw) else {
+    // WebAuthn 出棧是 DER；測試/內部路徑可能給 raw——兩種都收。
+    let Ok(sig) = Signature::from_der(sig_raw).or_else(|_| Signature::from_slice(sig_raw)) else {
         return false;
     };
     let mut msg = auth_data.to_vec();
@@ -204,11 +205,36 @@ pub fn assertion(
     let mut payload = ad.clone();
     payload.extend_from_slice(&Sha256::digest(cdj.as_bytes()));
     let sig: p256::ecdsa::Signature = signing_key(scalar)?.sign(&payload);
-    let sig = sig.to_bytes().to_vec();
+    // WebAuthn L1 §7.2：response.signature 是 **DER** ASN.1 ECDSA-Sig-Value
+    // （raw r‖s 是 COSE/JWT 紀律，不是 WebAuthn 的——真機 RP 驗簽實測）。
+    let sig = sig.to_der().as_bytes().to_vec();
     Ok(AssertionParts {
         authenticator_data: b64url(&ad),
         client_data_json: b64url(cdj.as_bytes()),
         signature: b64url(&sig),
+    })
+}
+
+/// Apple provider 流：系統只給 clientDataHash（32B，即 sha256(系統將送 RP 的
+/// clientDataJSON)）。簽名輸入 = authData ‖ hash 本體，不再自建 JSON 雜湊。
+/// 回傳的 client_data_json 僅供除錯顯示（challenge 欄放 hash 本身）。
+pub fn assertion_with_hash(
+    rp_id: &str,
+    scalar: &[u8],
+    counter: u32,
+    client_data_hash: &[u8],
+) -> Result<AssertionParts, CryptoError> {
+    if client_data_hash.len() != 32 {
+        return Err(CryptoError::InvalidLength);
+    }
+    let ad = auth_data_prefix(&rp_id_hash(rp_id), FLAGS_ASSERT, counter);
+    let mut payload = ad.clone();
+    payload.extend_from_slice(client_data_hash);
+    let sig: p256::ecdsa::Signature = signing_key(scalar)?.sign(&payload);
+    Ok(AssertionParts {
+        authenticator_data: b64url(&ad),
+        client_data_json: b64url(client_data_json(&b64url(client_data_hash), rp_id).as_bytes()),
+        signature: b64url(sig.to_der().as_bytes()),
     })
 }
 
@@ -322,6 +348,35 @@ mod tests {
     }
 
     #[test]
+    fn assertion_with_hash_signs_over_raw_hash() {
+        // Apple 流：簽名輸入 = authData ‖ clientDataHash（非自建 JSON 的雜湊）。
+        use p256::ecdsa::signature::Verifier;
+        use p256::ecdsa::{Signature, VerifyingKey};
+        let scalar = generate_private_key();
+        let hash = [7u8; 32];
+        let a = assertion_with_hash("apple.test", &scalar, 9, &hash).unwrap();
+        let ad = b64url_decode(&a.authenticator_data).unwrap();
+        let sig = b64url_decode(&a.signature).unwrap();
+        let vk = VerifyingKey::from_sec1_bytes(&public_key_sec1(&scalar).unwrap()).unwrap();
+        let mut msg = ad.clone();
+        msg.extend_from_slice(&hash);
+        assert!(
+            vk.verify(
+                &msg,
+                &Signature::from_der(&sig)
+                    .or_else(|_| Signature::from_slice(&sig))
+                    .unwrap()
+            )
+            .is_ok(),
+            "hash 直簽必須以 authData‖hash 驗通"
+        );
+        // 與自建 JSON 雜湊路徑不同輸入 → 簽不同
+        let b = assertion("apple.test", &scalar, 9, &b64url(&hash)).unwrap();
+        assert_ne!(a.signature, b.signature);
+        assert_eq!(ad.len(), 37);
+    }
+
+    #[test]
     fn register_then_assert_roundtrip() {
         let scalar = generate_private_key();
         let cred_id = vec![0xab; 32];
@@ -343,7 +398,7 @@ mod tests {
         let mut msg = ad_bytes.clone();
         msg.extend_from_slice(&Sha256::digest(&cdj));
         let sig_raw = b64url_decode(&parts.signature).unwrap();
-        assert_eq!(sig_raw.len(), 64, "raw r‖s");
+        assert_eq!(sig_raw[0], 0x30, "DER SEQUENCE 頭（WebAuthn 簽名紀律）");
         let (x, y) = cose_coords(&cose);
         let mut uncompressed = vec![0x04];
         uncompressed.extend_from_slice(&x);
@@ -351,7 +406,7 @@ mod tests {
         use p256::ecdsa::{Signature, signature::Verifier};
         let vk = VerifyingKey::from_sec1_bytes(&uncompressed).unwrap();
         assert!(
-            vk.verify(&msg, &Signature::from_slice(&sig_raw).unwrap())
+            vk.verify(&msg, &Signature::from_der(&sig_raw).unwrap())
                 .is_ok(),
             "attestation 內 COSE 公鑰必須驗通 assertion 簽名"
         );

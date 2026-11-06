@@ -199,12 +199,14 @@ final class BTPClient {
         return (cid, obj)
     }
 
-    /// AssertPasskey → 簽名材料（全 b64url）。challenge 傳的是 b64url(clientDataHash)
-    /// ——Apple 紀律：provider 以 clientDataHash raw bytes 充當 challenge。
-    func assertPasskey(credentialId: String, challenge: String, rpID: String) throws -> (authData: String, clientDataJSON: String, signature: String) {
+    /// AssertPasskey → 簽名材料（全 b64url）。Apple 流：challenge 與
+    /// client_data_hash 都傳 b64url(clientDataHash 32B)——daemon 直接以 hash 簽
+    /// （RP 驗的是系統將送的 clientDataJSON 之雜湊，自建 JSON 再雜湊必敗）。
+    func assertPasskey(credentialId: String, clientDataHash: String, rpID: String) throws -> (authData: String, clientDataJSON: String, signature: String) {
         try ensureEnrolled()
         let call: [String: Any] = ["Passkey": ["AssertPasskey": [
-            "credential_id": credentialId, "challenge": challenge, "rp_id": rpID,
+            "credential_id": credentialId, "challenge": clientDataHash, "rp_id": rpID,
+            "client_data_hash": clientDataHash,
         ]]]
         let response = try invoke(rid: 9, call: call)
         guard let a = response["PasskeyAssertion"] as? [String: Any],

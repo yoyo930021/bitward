@@ -374,7 +374,7 @@ final class ProviderViewController: ASCredentialProviderViewController {
         // allowedCredentials 有給就對齐（b64url 比對），否則取首筆。
         let picked = allowed.flatMap { a in entries.first { $0.credentialId == a.b64url } } ?? entries[0]
         let (authData, _, signature) = try client.assertPasskey(credentialId: picked.credentialId,
-                                                                challenge: clientDataHash.b64url, rpID: rpID)
+                                                                clientDataHash: clientDataHash.b64url, rpID: rpID)
         guard let ad = Data(b64url: authData), let sig = Data(b64url: signature),
               let cid = Data(b64url: picked.credentialId) else {
             throw BTPError.protocolError("assertion material not b64url")

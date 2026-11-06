@@ -31,8 +31,8 @@ pub use kdf::{
 };
 pub use passkey::{
     AssertionParts, FLAG_AT, FLAG_UP, FLAG_UV, FLAGS_ASSERT, FLAGS_REGISTER, assertion,
-    attestation_object, b64url, b64url_decode, client_data_json, cose_public_key,
-    generate_private_key, public_key_sec1, registration_auth_data, verify_es256,
+    assertion_with_hash, attestation_object, b64url, b64url_decode, client_data_json,
+    cose_public_key, generate_private_key, public_key_sec1, registration_auth_data, verify_es256,
 };
 pub use rsa::{
     OaepHash, RsaKeyPair, decrypt_private_key, generate_rsa_keypair, rsa_decrypt, rsa_encrypt,

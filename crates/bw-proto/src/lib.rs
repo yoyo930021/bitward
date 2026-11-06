@@ -293,6 +293,11 @@ pub enum PasskeyCall {
         credential_id: String,
         challenge: String,
         rp_id: String,
+        /// Apple 流：系統只給 clientDataHash（=sha256(系統要送 RP 的 clientDataJSON)）。
+        /// Some 時簽名輸入直接用它（authData ‖ hash），不自建 JSON 再雜湊——
+        /// 否則 RP 以系統 JSON 驗簽必敗（真機實測 NotAllowedError 根因）。
+        #[serde(default)]
+        client_data_hash: Option<String>,
     },
 }
 
