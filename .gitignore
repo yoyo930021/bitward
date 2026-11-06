@@ -11,3 +11,7 @@ spike/**/target/
 *.sqlite-shm
 dev/e2e/demo/
 keys/
+
+# NSH apps（apps/ 有自己的 cargo target 與 nsh 產物）
+apps/**/target/
+apps/**/.nsh/

@@ -71,3 +71,97 @@ runtime（`~/.nsh/runtime/android`）負責 Java 層，全程免 Gradle。未跑
   需 LAN/TCP 或中繼（此為架構問題，非工具鏈問題，建議列 P4 開工前決策）。
 - emulator 未裝亦未測（假設明文：編出 APK 即算過）；`nsh run --target android` 需 emulator/
   device，建議驗收放真機。
+## P4b 第一批（2026-11-07）：nav 容器在 Android 的實測＋in-process 中樞進 APK
+
+環境同上（nsh 0.3.0 76fa8a7、NDK 27/28.2/30、AVD `Pixel_10_Pro_XL`：android-36.1
+google_apis_playstore arm64-v8a、4G RAM）。实验码：`spike/android/navprobe`
+（導航探針）、`apps/bitward-android`（正式 app 本體）、`dev/e2e/android-app.sh`（驗收）。
+
+### 假設 5：nsh 0.3.0 的導航容器在 Android views 後端可用 — 通過（macOS 卡點 4 不適用）
+
+§0.2 的裁決寫「Android track 起押注前先確認 nav 容器行為」，實測四件事全過：
+
+| 項目 | 證據 |
+|---|---|
+| `nav_stack`/`nav_page` 渲染內容 | uiautomator 層級有 `Probe A` 標題與 `PROBE-A-ROOT` 內容；兩頁棧時頂頁 `Probe B`/`PROBE-B-TOP` 渲染，原生 toolbar 跟著換標題 |
+| `when` 區域增減頁面＝原生 push/pop | 起點 B 在棧上，按 `POP-VIA-STATE` 後層級只剩 Probe A（訊號驅動，無手動導航器） |
+| 系統返回鍵 | `input keyevent 4` 會 pop 頂頁**並**觸發 `nav_page().on_dismiss`（logcat `probe: dismissed b`），只剩一頁時才退出 app |
+| `dialog()`（Modal） | 按 `SHOW-DIALOG` 後層級出現 `PROBE-DIALOG`/`CLOSE-DIALOG`，蓋住棧與 header |
+
+教訓：**Android 這軌可以直接押原生 `nav_stack`**（返回鍵語意免費），macOS dev host
+仍按卡點 4 用 `when` 自製切頁。另外 `.children(cond.then(...))` 只在建立時求值
+（卡點 1 的同一條），條件頁/條件內容一律走 `when(...)`，否則按了沒反應——這是
+探針第一輪「push 沒渲染」的真正原因，不是框架缺陷。
+
+### 假設 6：in-process 核心（bw-crypto/bw-server/bw-store）進得了 Android APK — 通過
+
+把三個 crate 加進 nsh app 的依賴後 `nsh package --target android`：
+
+    ✓ built libnsh.so ... armeabi-v7a (1m 4s) / arm64-v8a (1m 3s) / x86_64 (1m 2s)
+    ✓ packaged .nsh/out/bitward.apk
+
+`rusqlite`（bundled SQLite，要編 C）與 `ring`（asm）都在 nsh 自繪的 NDK 工具鏈下
+编譯＋連結成功，**不需要**任何額外 env。但純 cargo 交叉編譯要自己給 C 工具鏈：
+NDK 28 已移除裸 `aarch64-linux-android-clang` 符號連結，cc-rs 找不到會直接掛，
+得明確指定：
+
+    CC_aarch64_linux_android=$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android21-clang
+    AR_aarch64_linux_android=$NDK/.../llvm-ar
+    cargo check --target aarch64-linux-android --lib
+
+（`--all-targets` 在 Android 目標會連 bin target 一起編，而 nsh 模板的 `src/main.rs`
+在非桌機目標是 `compile_error!`；Android 的 gate 用 `--lib`，桌機用 `--all-targets`。）
+
+執行期證據（emulator，非 mock）：登入頁填表按「登入」後 logcat
+
+    nsh_app_bitward_android::ui: 已登入：3 筆鏡像
+    nsh_app_bitward_android::hub: hub: signed out（金鑰已歸零）
+
+代表 prelogin→PBKDF2 600k 派生→password grant→user key 解封→`GET /sync`→
+SQLite 鏡像＋明文索引回填在 arm64 模擬器上跑通（派生＋sync 不到 1 秒），
+列表/搜尋/Reveal/遮罩重置都在真 UI 上驗過。到 host Vaultwarden 走
+`http://10.0.2.2:18095`（10.0.2.2＝emulator 視角的 host loopback）。
+
+### 假設 7：純 Rust app 拿得到可寫的 app 私有目錄 — 有缺口，可用 TMPDIR 抵
+
+nsh 0.3.0 的 Android host 把 Java 層的 `filesDir` 只放進 JS runtime 的
+`System.data_dir`（`nsh-core::element::System`），**純 Rust 根元件沒有對應存取面**
+（`Environment` 裡沒有路徑欄位）。實測 app 進程的環境有 zygote 給的
+`TMPDIR=/data/user/0/io.bitward.android/cache`（app 私有、可寫），本輪用它落地
+`vault.db`/`account.json`，並留 `BITWARD_ANDROID_DATA` 覆寫：
+
+    nsh_app_bitward_android::hub: bitward-android hub: dir=/data/user/0/io.bitward.android/cache/bitward
+
+代價：cache 目錄理論上可被系統在空間壓力時清除（鏡像可重 sync，但帳號檔會不見）。
+正式解要嘛上游開一個 Rust 側 data dir API，要嘛 Kotlin 外殼自己傳 `filesDir` 進來
+（與下面的 Gradle 缺口一起做）。
+
+### 假設 8：Kotlin 孤島能進 nsh 產的 APK — 不通（需要 Gradle 外殼）
+
+`nsh package --help` 的 Android 旗標只有 `--name/--id/--app-version/--build/--icon/
+--keystore/--key-alias/--keystore-password/--run`；APK 的 dex 一律取自
+`~/.nsh/runtime/android/{dev,release}/classes.dex`，**沒有** app 自帶 Kotlin/Java
+來源、資源或 manifest 的掛鉤（`nsh.json` 也無對應欄位）。所以 `AutofillService`、
+`CredentialProviderService`、Keystore、foreground service 這幾個孤島，在 0.3.0 的
+管線下進不了 APK；本輪把孤島寫成佔位（簽名與分層真實、方法體留白）放在
+`apps/bitward-android/android/`，並在那邊 README 記錄缺口。下一批的形：
+一個 Gradle app module 吃 nsh 的 `classes.dex` + `lib/<ABI>/libnsh.so`，
+或由 nsh 提供 app 自帶 Android 來源的支援。
+
+### adb 驅動陷阱（背景驗收必讀）
+
+軟鍵盤開著時，第一個 `adb shell input type tap` 常被系統用來收 IME
+（logcat 出現 `ImeTracker: ... HIDE_SOFT_INPUT fromUser true`），**送不到 app 的
+`on_press`**；表單自動化要在按按鈕前先 `input keyevent 111`（ESCAPE，比 KEYCODE_BACK
+安全——back 在單頁棧上會直接退出 app）。另外 `adb shell ...` 會吃 stdin，腳本裡
+要加 `</dev/null`，否則迴圈的讀取會被它攔走。
+
+### 對 P4b 排程的更新
+
+- 導航：Android 可押原生 `nav_stack`（本輪已押，返回鍵＋`on_dismiss` 實測可用）。
+- 打包：in-process 核心零風險；**唯一**必要設定是純 cargo 路徑的 `CC_*`/`AR_*` 兩行。
+- 缺口兩項，都要在第二批前拍板：(1) 純 Rust app 的 data dir API（否則鏡像放 cache）；
+  (2) Kotlin 孤島進 APK 的管道（Gradle 外殼 vs 上游支援）。
+- 驗收入口：`dev/e2e/android-app.sh`（A1..A7：三 ABI APK、啟動到登入畫面、真實 UI
+  登入＋sync、搜尋、詳情遮罩→Reveal、返回清明文、鎖定＋預填），截圖留
+  `apps/bitward-android/shots/`。

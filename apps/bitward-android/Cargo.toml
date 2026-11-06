@@ -1,0 +1,42 @@
+[package]
+name = "nsh-app-bitward-android"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+
+# 獨立 workspace（同 spike 慣例）：nsh 的 Android 管線以 app 目錄為根跑 cargo。
+[workspace]
+
+[dependencies]
+nsh-core = "0.3.0"
+nsh-base = "0.3.0"
+env_logger = "0.11"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "time",
+    "net",
+    "io-util",
+    "sync",
+    "fs",
+] }
+# in-process 中樞核心（契約 §1：Android 的 Full 形態沒有獨立 daemon 進程）
+bw-proto = { path = "../../crates/bw-proto" }
+bw-crypto = { path = "../../crates/bw-crypto" }
+bw-server = { path = "../../crates/bw-server" }
+bw-store = { path = "../../crates/bw-store" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nsh-platform-linux = { version = "0.3.0", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nsh-platform-macos = { version = "0.3.0", default-features = false }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+nsh-platform-windows = { version = "0.3.0", default-features = false }
