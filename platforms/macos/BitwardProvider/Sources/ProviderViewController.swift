@@ -275,7 +275,9 @@ final class ProviderViewController: ASCredentialProviderViewController {
     }
 
     override func prepareInterface(forPasskeyRegistration registrationRequest: any ASCredentialRequest) {
+        log.notice("prepareInterface(passkeyReg) got \(type(of: registrationRequest), privacy: .public)")
         guard #available(macOS 14.0, *), let request = registrationRequest as? ASPasskeyCredentialRequest else {
+            log.notice("cancel(.failed): unexpected request type")
             extensionContext.cancelRequest(withError: ASExtensionError(.failed))
             return
         }
@@ -322,6 +324,7 @@ final class ProviderViewController: ASCredentialProviderViewController {
     @available(macOS 14.0, *)
     private func runRegistration(_ request: ASPasskeyCredentialRequest) {
         guard let identity = request.credentialIdentity as? ASPasskeyCredentialIdentity else {
+            log.notice("cancel(.failed): identity not passkey")
             extensionContext.cancelRequest(withError: ASExtensionError(.failed))
             return
         }
@@ -334,6 +337,12 @@ final class ProviderViewController: ASCredentialProviderViewController {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             do {
+                // 先做人驗證（provider = authenticator 的 UV），再請 daemon 簽。
+                guard PasskeyUV.evaluate(reason: "要為「\(rpID)」儲存 passkey") else {
+                    log.notice("uv declined")
+                    self.extensionContext.cancelRequest(withError: ASExtensionError(.userCanceled))
+                    return
+                }
                 let client = try Self.connect(budget: 5.0)
                 let (cid, attestation) = try client.registerPasskey(
                     rpID: rpID, challenge: clientDataHash.b64url,
