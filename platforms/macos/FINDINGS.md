@@ -225,3 +225,15 @@ DER/hash 直簽修復生效）。本輪新增的實測坑：
 - **scripts/dev-install.sh**：cargo release → xcodebuild → ditto → 強制重拷＋重簽
   helper＋功能探測 → 裝 agent → smoke connect。存在理由：Xcode script phase 增量
   不可靠（xcodegen 2.46 無視 alwaysOutOfDate），本會話三次被殭屍二進位誤導診斷。
+
+## 9. G2/G3 終案（接續 §8 的兩條尾巴）
+- **G3 text-to-insert＝幽灵活動，非欠債**：macOS SDK 的 AuthenticationServices
+  全目錄無 `ASTextToInsert*` 符號（該 API 為 iOS/visionOS 18 限定）——原 plist 的
+  `ProvidesTextToInsert` 是從 Bitwarden iOS 版照抄，macOS 系統永遠不會發此請求。
+  撤宣告（W4）即最終形態，無實作項。
+- **G2 常駐收斂到 BTM 生命週期**：SMAppService.agent（BundleProgram 形態）
+  register 後 `~/Library/LaunchAgents` 連檔案都沒落地、status=notFound、再
+  register 拋 EINVAL——ditto＋lsregister 的「非正式安裝」疑似不被 BTM 接受。
+  **判別實驗（需使用者）：重登入一次**→ 若 job 出現即屬實；否則剩 MAS 分發
+  限定假說。現行可用常駐＝`bitwarderd --service install`（legacy LaunchAgents，
+  kill -9 自愈已驗），其群組 socket 限制見 §8。
