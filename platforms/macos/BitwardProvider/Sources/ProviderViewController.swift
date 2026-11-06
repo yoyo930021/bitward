@@ -337,27 +337,34 @@ final class ProviderViewController: ASCredentialProviderViewController {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             do {
-                // 先做人驗證（provider = authenticator 的 UV），再請 daemon 簽。
+                // 註冊無簽名，UV 要明確做（SE userPresence 只在簽名時觸發）。
                 guard PasskeyUV.evaluate(reason: "要為「\(rpID)」儲存 passkey") else {
                     log.notice("uv declined")
                     self.extensionContext.cancelRequest(withError: ASExtensionError(.userCanceled))
                     return
                 }
+                // SE 流：id 先協商 → 以 id 作 SecKey tag 生 SE 生物綁定金鑰 → 公鑰交 daemon 組 attestation。
                 let client = try Self.connect(budget: 5.0)
-                let (cid, attestation) = try client.registerPasskey(
-                    rpID: rpID, challenge: clientDataHash.b64url,
-                    userName: userName, userHandle: userHandle.b64url, displayName: userName)
+                let cid = try client.beginRegister(rpID: rpID, userName: userName,
+                                                   userHandle: userHandle.b64url,
+                                                   displayName: userName, itemId: nil)
+                guard let tag = Data(b64url: cid) else { throw BTPError.protocolError("cid not b64url") }
+                guard SEPasskeyKey.create(tag: tag) != nil else { throw BTPError.protocolError("SE keygen failed") }
+                let sec1 = try SEPasskeyKey.publicKeySEC1(tag: tag).get()
+                let spki = SEPasskeyKey.sec1ToSPKI(sec1).b64url
+                let attestation = try client.finishRegister(credentialId: cid, spkiPublicKey: spki,
+                                                            rpID: rpID, challenge: clientDataHash.b64url,
+                                                            userName: userName, userHandle: userHandle.b64url,
+                                                            displayName: userName, itemId: nil)
                 guard let credentialID = Data(b64url: cid), let attObj = Data(b64url: attestation) else {
                     throw BTPError.protocolError("attestation not b64url")
                 }
-                if #available(macOS 14.0, *) {
-                    let credential = ASPasskeyRegistrationCredential(
-                        relyingParty: rpID, clientDataHash: clientDataHash,
-                        credentialID: credentialID, attestationObject: attObj)
-                    self.extensionContext.completeRegistrationRequest(using: credential, completionHandler: { expired in
-                        log.notice("registration completeRequest expired=\(expired)")
-                    })
-                }
+                let credential = ASPasskeyRegistrationCredential(
+                    relyingParty: rpID, clientDataHash: clientDataHash,
+                    credentialID: credentialID, attestationObject: attObj)
+                self.extensionContext.completeRegistrationRequest(using: credential, completionHandler: { expired in
+                    log.notice("registration completeRequest expired=\(expired)")
+                })
             } catch {
                 log.notice("registration failed \(String(describing: error), privacy: .public)")
                 self.extensionContext.cancelRequest(withError: ASExtensionError(.failed))
@@ -368,21 +375,25 @@ final class ProviderViewController: ASCredentialProviderViewController {
     @available(macOS 14.0, *)
     private static func assertPasskey(rpID: String, clientDataHash: Data, allowed: Data?,
                                       fallbackHandle: Data?, fallbackUser: String) throws -> ASPasskeyAssertionCredential {
-        let client = try connect(budget: 1.5)
+        let client = try connect(budget: 5.0)
         let entries = try client.passkeys(rpID: rpID)
         guard !entries.isEmpty else { throw BTPError.noCredentials }
         // allowedCredentials 有給就對齐（b64url 比對），否則取首筆。
         let picked = allowed.flatMap { a in entries.first { $0.credentialId == a.b64url } } ?? entries[0]
-        let (authData, _, signature) = try client.assertPasskey(credentialId: picked.credentialId,
-                                                                clientDataHash: clientDataHash.b64url, rpID: rpID)
-        guard let ad = Data(b64url: authData), let sig = Data(b64url: signature),
-              let cid = Data(b64url: picked.credentialId) else {
+        guard let tag = Data(b64url: picked.credentialId) else { throw BTPError.protocolError("cid not b64url") }
+        // SE 流：daemon 產 authData → SE 私鑰簽（userPresence 自動彈 Touch ID）→ daemon 驗簽提交 counter。
+        let authData = try client.beginAssert(credentialId: picked.credentialId,
+                                              clientDataHash: clientDataHash.b64url)
+        guard let adBytes = Data(b64url: authData) else { throw BTPError.protocolError("authData not b64url") }
+        let sigDER = try SEPasskeyKey.sign(tag: tag, authData: adBytes, clientDataHash: clientDataHash).get()
+        let done = try client.finishAssert(credentialId: picked.credentialId, signature: sigDER.b64url)
+        guard let ad = Data(b64url: done.authData), let sig = Data(b64url: done.signature) else {
             throw BTPError.protocolError("assertion material not b64url")
         }
         let userHandle = Data(b64url: picked.userHandle) ?? fallbackHandle ?? Data()
         return ASPasskeyAssertionCredential(userHandle: userHandle, relyingParty: rpID,
                                             signature: sig, clientDataHash: clientDataHash,
-                                            authenticatorData: ad, credentialID: cid)
+                                            authenticatorData: ad, credentialID: tag)
     }
 
     private static func resolve(uri: String) throws -> BTPCandidate {

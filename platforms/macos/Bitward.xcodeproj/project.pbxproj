@@ -16,6 +16,8 @@
 		645807D23E2C009A86E2575A /* BTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25C3BDA637D74D9057065DED /* BTPClient.swift */; };
 		82BD21D47DD27EFDD277B291 /* ProviderViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 974EF14296AB1177D31C53AD /* ProviderViewController.swift */; };
 		9658780B3D2890E47C590F00 /* BitwardProvider.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = EBAA0AE3E2826BF329591F74 /* BitwardProvider.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		996C0305BD100A47B6F45743 /* SEPasskeyKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CA69D3C2193516C15EEA3F9 /* SEPasskeyKey.swift */; };
+		F9148B631CF9051AEE4C5F08 /* SEPasskeyKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CA69D3C2193516C15EEA3F9 /* SEPasskeyKey.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -46,6 +48,7 @@
 		0A7B5F02CAB65867EBC45312 /* Bitward.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Bitward.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		0E75116995D1D6A3D6ECC3E3 /* BitwardGroup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BitwardGroup.swift; sourceTree = "<group>"; };
 		25C3BDA637D74D9057065DED /* BTPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BTPClient.swift; sourceTree = "<group>"; };
+		3CA69D3C2193516C15EEA3F9 /* SEPasskeyKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SEPasskeyKey.swift; sourceTree = "<group>"; };
 		974EF14296AB1177D31C53AD /* ProviderViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderViewController.swift; sourceTree = "<group>"; };
 		BF3FDF1E8E8CE270ACE6F11B /* BitwardApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BitwardApp.swift; sourceTree = "<group>"; };
 		D731879FB0F011FD1E555FB1 /* PasskeyUV.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasskeyUV.swift; sourceTree = "<group>"; };
@@ -110,6 +113,7 @@
 				0E75116995D1D6A3D6ECC3E3 /* BitwardGroup.swift */,
 				25C3BDA637D74D9057065DED /* BTPClient.swift */,
 				D731879FB0F011FD1E555FB1 /* PasskeyUV.swift */,
+				3CA69D3C2193516C15EEA3F9 /* SEPasskeyKey.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -201,6 +205,7 @@
 				1665726F5AC7E72E07DB2B56 /* BitwardApp.swift in Sources */,
 				59CBAD684FE91E440E48AA56 /* BitwardGroup.swift in Sources */,
 				16B99B4DBDE865995E96A3FC /* PasskeyUV.swift in Sources */,
+				996C0305BD100A47B6F45743 /* SEPasskeyKey.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -212,6 +217,7 @@
 				27C961CEFA953F7DDA28D5B2 /* BitwardGroup.swift in Sources */,
 				4478749589A0B5B7710824F3 /* PasskeyUV.swift in Sources */,
 				82BD21D47DD27EFDD277B291 /* ProviderViewController.swift in Sources */,
+				F9148B631CF9051AEE4C5F08 /* SEPasskeyKey.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

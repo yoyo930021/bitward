@@ -11,5 +11,9 @@
 	<array>
 		<string>group.8V5224A99M.io.bitward.dev</string>
 	</array>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>8V5224A99M.io.bitward.dev</string>
+	</array>
 </dict>
 </plist>

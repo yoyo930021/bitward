@@ -218,6 +218,70 @@ final class BTPClient {
         return (ad, cd, sig)
     }
 
+    /// SE 流註冊第一步：daemon 預先協商 credential_id（Swift 以它作 SecKey tag）。
+    func beginRegister(rpID: String, userName: String, userHandle: String,
+                       displayName: String, itemId: String?) throws -> String {
+        try ensureEnrolled()
+        let call: [String: Any] = ["Passkey": ["BeginRegister": [
+            "rp_id": rpID, "user_name": userName, "user_handle": userHandle,
+            "display_name": displayName, "item_id": itemId as Any,
+        ]]]
+        let response = try invoke(rid: 11, call: call)
+        guard let begin = response["RegisterBegin"] as? [String: Any],
+              let cid = begin["credential_id"] as? String else {
+            throw BTPError.protocolError("Reply Ok is not RegisterBegin")
+        }
+        return cid
+    }
+
+    /// SE 流註冊第二步：提交 SPKI 公鑰（b64url），daemon 組 none-attestation。
+    func finishRegister(credentialId: String, spkiPublicKey: String, rpID: String, challenge: String,
+                        userName: String, userHandle: String,
+                        displayName: String, itemId: String?) throws -> String /*attestation b64url*/ {
+        try ensureEnrolled()
+        let call: [String: Any] = ["Passkey": ["FinishRegister": [
+            "credential_id": credentialId, "credential_public_key": spkiPublicKey,
+            "rp_id": rpID, "challenge": challenge, "user_name": userName,
+            "user_handle": userHandle, "display_name": displayName, "item_id": itemId as Any,
+        ]]]
+        let response = try invoke(rid: 12, call: call)
+        guard let att = response["PasskeyAttestation"] as? [String: Any],
+              let obj = att["attestation_object"] as? String else {
+            throw BTPError.protocolError("FinishRegister reply is not PasskeyAttestation")
+        }
+        return obj
+    }
+
+    /// SE 流斷言第一步：daemon 產 authData（含新 counter）回顯待簽。
+    func beginAssert(credentialId: String, clientDataHash: String) throws -> String /*authenticator_data b64url*/ {
+        try ensureEnrolled()
+        let call: [String: Any] = ["Passkey": ["BeginAssert": [
+            "credential_id": credentialId, "client_data_hash": clientDataHash,
+        ]]]
+        let response = try invoke(rid: 13, call: call)
+        guard let begin = response["AssertBegin"] as? [String: Any],
+              let ad = begin["authenticator_data"] as? String else {
+            throw BTPError.protocolError("BeginAssert reply is not AssertBegin")
+        }
+        return ad
+    }
+
+    /// SE 流斷言第二步：提交 SE 簽名（DER b64url），daemon 驗簽後才遞交 counter。
+    func finishAssert(credentialId: String, signature: String) throws -> (authData: String, clientDataJSON: String, signature: String) {
+        try ensureEnrolled()
+        let call: [String: Any] = ["Passkey": ["FinishAssert": [
+            "credential_id": credentialId, "signature": signature,
+        ]]]
+        let response = try invoke(rid: 14, call: call)
+        guard let a = response["PasskeyAssertion"] as? [String: Any],
+              let ad = a["authenticator_data"] as? String,
+              let cd = a["client_data_json"] as? String,
+              let sig = a["signature"] as? String else {
+            throw BTPError.protocolError("FinishAssert reply is not PasskeyAssertion")
+        }
+        return (ad, cd, sig)
+    }
+
     /// 授權治理類（ListPending／Approve）：批准中心用。
     func listPending() throws -> [(id: String, summary: String)] {
         try invoke(rid: 5, call: ["Agent": ["ListPending": NSNull()]])

@@ -4,6 +4,8 @@ import Foundation
 /// daemon 將以 `--push-app-group` 在 `<container>/daemon.sock` 多綁一個 BTP listener）。
 enum BitwardGroup {
     static let id = "group.8V5224A99M.io.bitward.dev"
+    /// app-group keychain 共用組（容器 App 與 appex 同組，SE passkey 金鑰落點）。
+    static let keychainAccessGroup = "8V5224A99M.io.bitward.dev"
 
     /// sandboxed 進程走 containerURL API；非 sandbox（或 ad-hoc 簽章未獲 app group 核准）
     /// 時退回常規路徑——兩者在真機上是同一個目錄。
