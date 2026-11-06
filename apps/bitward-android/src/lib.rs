@@ -3,7 +3,7 @@
 //! 架構位置（契約 §0.1、§1）：Android 的 Full 形態沒有獨立 daemon 進程，
 //! `bw-crypto`/`bw-server`/`bw-store` 直接鏈進 `libnsh.so`；UI 與核心同進程，
 //! 所以這一軌沒有 FFI 綁定面。平台整合（AutofillService、Keystore、
-//! CredentialProviderService）是 Kotlin 孤島，見 `android/README.md`。
+//! CredentialProviderService）是 Kotlin 孤島，見 `android-shell/README.md`。
 //!
 //! 導航用 nsh 原生 `nav_stack`/`nav_page`：Android views 後端實測會渲染
 //! （macOS dev host 的卡點 4 不適用），系統返回鍵會 pop 並觸發 `on_dismiss`。

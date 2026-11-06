@@ -24,7 +24,7 @@ use serde_json::Value;
 use zeroize::Zeroizing;
 
 /// 帳號落地資料（不含主密碼，也不含明文 user key）。
-/// user key 的封存形態在 P4b 第二批交給 Keystore 孤島（`android/README.md`），
+/// user key 的封存形態在 P4b 第二批交給 Keystore 孤島（`android-shell/README.md`），
 /// 這批只在解鎖期間把金鑰放在記憶體。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Account {

@@ -9,7 +9,11 @@
 #   A5 詳情頁預設遮罩；按「顯示」才出明文（Reveal）
 #   A6 系統返回鍵 pop 詳情並清明文（再進詳情是遮罩態）
 #   A7 鎖定回登入頁、帳號檔預填（金鑰已歸零）
-# 產物：apps/bitward-android/shots/*.png（截圖）與 .nsh/out/bitward.apk
+#   A8 系統列舉我們的 AutofillService（settings 切換成功、dumpsys 認得）
+#   A9 表單觸發 autofill 面板＋logcat 證明系統真的 bind 到我們並送 fill 請求
+#   A10 Keystore 橋：service 內 Android Keystore 生成 Class 3 EC 金鑰、回顯 alias
+# 產物：apps/bitward-android/shots/*.png（截圖）與 .nsh/out/bitward-islands.apk
+#       （孤島＋nsh 中樞的合併 APK；A1–A7 裝的就是這顆）
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -31,6 +35,9 @@ DA=${DA:-/tmp/bitward-android-hub}
 fail() { echo "FAIL: $1" >&2; exit 1; }
 pass() { echo "ok: $1"; }
 mkdir -p "$SHOTS"
+BG=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+AF_SVC="$PKG/$PKG.BitwardAutofillService"
+EMU_PIN=${EMU_PIN:-0000}
 
 dump() {  # $1 = 本機留檔路徑
   $ADB shell uiautomator dump /sdcard/window_dump.xml >/dev/null 2>&1
@@ -74,6 +81,33 @@ wait_text() {  # wait_text <text> <秒>
     sleep 1
   done
   return 1
+}
+tap_first_edittext() {  # focus 第一個原生 EditText（autofill 面板由 focus 觸發）
+  dump "/tmp/$1"
+  local xy
+  xy=$(python3 -c "
+import re, sys
+x = open(sys.argv[1]).read()
+m = re.search(r'class=\"android.widget.EditText\"[^>]*bounds=\"\[(\d+),(\d+)\]\[(\d+),(\d+)\]\"', x)
+if m:
+    x1, y1, x2, y2 = map(int, m.groups())
+    print((x1 + x2) // 2, (y1 + y2) // 2)
+" "/tmp/$1")
+  [[ -n "$xy" ]] || fail "層級裡找不到 EditText（見 /tmp/$1）"
+  $ADB shell input tap $xy </dev/null >/dev/null 2>&1
+  sleep 1
+}
+unlock_device() {  # 設了 PIN 之後 keyguard 可能在螢幕喚醒時擋路（A8–A10 前必跑）
+  $ADB shell input keyevent 224 </dev/null >/dev/null 2>&1   # WAKEUP
+  $ADB shell wm dismiss-keyguard >/dev/null 2>&1
+  sleep 1
+  local win
+  win=$($ADB shell dumpsys window 2>/dev/null || true)
+  if [[ "$win" == *"mShowingLockscreen=true"* ]] || [[ "$win" == *"mDreamingLockscreen=true"* ]]; then
+    $ADB shell input text "$EMU_PIN" </dev/null >/dev/null 2>&1
+    $ADB shell input keyevent 66 </dev/null >/dev/null 2>&1
+    sleep 1
+  fi
 }
 
 # --- 0. 依賴 ------------------------------------------------------------------
@@ -121,21 +155,50 @@ for _ in $(seq 1 90); do
   sleep 2
 done
 [[ "$($ADB shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]] || fail "emulator 沒開機完成"
+# Keystore Class 3（需使用者解鎖）的金鑰生成要求裝置有安全鎖屏（實測：無 PIN 時
+# 拋 IllegalStateException "Secure lock screen must be enabled"）。冪等設定；
+# 不用 `adb shell ... | grep -q`：grep 早收工讓 adb 吃 SIGPIPE，pipefail 下變失敗。
+HAS_PW=$($ADB shell locksettings get-password 2>/dev/null || true)
+if [[ "$HAS_PW" != *"lock credential"* ]] && [[ "$HAS_PW" != "true" ]]; then
+  $ADB shell locksettings set-pin "$EMU_PIN" >/dev/null 2>&1 || fail "locksettings set-pin 失敗（A10 需要安全鎖屏）"
+fi
+$ADB shell svc power stayon true >/dev/null 2>&1
+unlock_device
 pass "emulator 就緒（$($ADB get-state)）"
 
-# --- 3. A1：三 ABI APK（含 in-process 核心） ----------------------------------
+# --- 3. A1：三 ABI＋孤島 dex 的合併 APK ---------------------------------------
 (cd "$APP" && nsh package --target android)
-APK="$APP/.nsh/out/bitward.apk"
-[[ -f "$APK" ]] || fail "APK 沒產出"
+NSH_APK="$APP/.nsh/out/bitward.apk"
+[[ -f "$NSH_APK" ]] || fail "nsh APK 沒產出"
+"$APP/android-shell/build.sh" || fail "孤島外殼 build 失敗"
+APK="$APP/.nsh/out/bitward-islands.apk"
+[[ -f "$APK" ]] || fail "孤島合併 APK 沒產出"
 # 不用 `unzip -l | grep -q`：grep 提前收工會讓 unzip 吃到 SIGPIPE，
 # 在 `set -o pipefail` 下變成「匹配成功但管道失敗」。
 APK_LIST=$(unzip -l "$APK")
 for abi in armeabi-v7a arm64-v8a x86_64; do
   [[ "$APK_LIST" == *"lib/$abi/libnsh.so"* ]] || fail "APK 缺 $abi 的 libnsh.so"
 done
-pass "A1 APK 三 ABI 齊備（$(du -h "$APK" | cut -f1)）"
+# 兩套 dex 共存：外殼（孤島 Kotlin）＋ nsh runtime（AppActivity）
+DEX_TMP=$(mktemp -d)
+unzip -q "$APK" -d "$DEX_TMP" 'classes*.dex'
+HAS_ISLAND=0; HAS_RUNTIME=0
+for d in "$DEX_TMP"/classes*.dex; do
+  DUMP=$("$BG/dexdump" -f "$d" 2>/dev/null)
+  [[ "$DUMP" == *"Lio/bitward/android/BitwardAutofillService;"* ]] && HAS_ISLAND=1
+  [[ "$DUMP" == *"Lcom/longbridge/nsh/AppActivity;"* ]] && HAS_RUNTIME=1
+done
+rm -rf "$DEX_TMP"
+[[ $HAS_ISLAND == 1 ]] || fail "APK 的 dex 裡沒有 BitwardAutofillService（孤島沒編進去）"
+[[ $HAS_RUNTIME == 1 ]] || fail "APK 的 dex 裡沒有 nsh runtime（AppActivity）"
+pass "A1 合併 APK：三 ABI＋孤島 dex＋runtime dex 齊備（$(du -h "$APK" | cut -f1)）"
 
 # --- 4. A2：裝並啟動到登入畫面 ------------------------------------------------
+# Android 15+ 的 autofill 服務 key 是 `autofill_service`（舊 key
+# `current_autofill_service` 在此 image 上已無人監聽；實測 dumpsys 只認新 key）。
+# 先歸零：避免上一輪 A8–A10 設的服務讓「尚未解鎖」彈窗干擾 A2–A7 的表單點擊。
+$ADB shell settings put secure autofill_service null >/dev/null 2>&1 || true
+$ADB shell settings put secure current_autofill_service null >/dev/null 2>&1 || true
 $ADB install -r "$APK" >/dev/null
 # 清掉上輪的 app 資料（登入頁預填會變，斷言要可重跑）
 $ADB shell pm clear $PKG >/dev/null
@@ -205,6 +268,36 @@ dump /tmp/android-locked.xml
 has_text /tmp/android-locked.xml "$EMAIL" || fail "帳號檔預填失效"
 shot 8-locked-prefilled
 pass "A7 鎖定回登入頁（金鑰歸零）、下次冷啟預填帳號"
+
+# --- 9. A8：系統列舉我們的 autofill 服務 --------------------------------------
+# 注意：Android 15+ 用 `autofill_service`；`current_autofill_service` 一併寫
+# （舊 image 上 A8 才成立），兩邊都認。
+$ADB shell settings put secure autofill_service "$AF_SVC"
+$ADB shell settings put secure current_autofill_service "$AF_SVC"
+for _ in $(seq 1 10); do
+  AF=$($ADB shell dumpsys autofill)
+  [[ "$AF" == *"$AF_SVC"* ]] && break
+  sleep 1
+done
+[[ "$AF" == *"$AF_SVC"* ]] || fail "dumpsys autofill 沒列舉到 $AF_SVC"
+pass "A8 系統列舉到我們的 AutofillService（Service Label: bitward）"
+
+# --- 10. A9＋A10：focus 欄位 → 系統 bind、fill 請求、Keystore 橋 ---------------
+unlock_device
+hide_ime
+$ADB logcat -c
+tap_first_edittext android-af-focus.xml
+wait_text "尚未解鎖" 15 || fail "autofill 面板沒出現「尚未解鎖」列"
+shot 9-autofill-panel
+APP_LOG=$($ADB logcat -d)
+[[ "$APP_LOG" == *'bitward-island: autofill service bound by system'* ]] \
+  || fail "logcat 沒有系統 bind 標記（孤島沒被接到單）"
+[[ "$APP_LOG" == *'bitward-island: onFillRequest'* ]] \
+  || fail "logcat 沒有 onFillRequest 標記"
+pass "A9 系統真的 bind 到我們並送 fill 請求（面板截圖 9-autofill-panel）"
+[[ "$APP_LOG" == *'bitward-island: keystore EC class3 key'*'alias=bitward-class3-ec-probe'* ]] \
+  || fail "logcat 沒有 Keystore Class 3 EC 金鑰標記"
+pass "A10 Keystore 橋生成 Class 3 EC 金鑰並回顯 alias"
 
 echo
 echo "截圖：$(ls "$SHOTS" | tr '\n' ' ')"

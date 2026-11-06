@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 外殼 manifest：application/activity 節复刻 nsh 0.3.0 產的 APK
+     （apkanalyzer 讀出：theme=Theme.Material.Light.NoActionBar、minSdk 28、
+     targetSdk 35、configChanges 0x40003ff4、windowSoftInputMode 0x10=adjustResize），
+     再加三個孤島 service（原 android/src/main/AndroidManifest.snippet.xml）。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <application
+        android:label="@string/app_name"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:supportsRtl="true"
+        android:extractNativeLibs="false"
+        android:enableOnBackInvokedCallback="true">
+
+        <!-- nsh runtime 認這個標記才走純 Rust 根元件 -->
+        <meta-data
+            android:name="com.longbridge.nsh.RUST"
+            android:value="true" />
+
+        <activity
+            android:name="com.longbridge.nsh.AppActivity"
+            android:exported="true"
+            android:configChanges="locale|keyboard|keyboardHidden|navigation|orientation|screenLayout|uiMode|screenSize|smallestScreenSize|density|layoutDirection|fontScale"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 填充服務：契約 §1「Android app＝Full（in-process 中樞）」；
+             中樞與本服務同程序（不宣告 android:process），走程序內介面，不經 BTP。 -->
+        <service
+            android:name=".BitwardAutofillService"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_AUTOFILL_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.autofill.AutofillService" />
+            </intent-filter>
+        </service>
+
+        <!-- API 34 CredentialProviderService（passkeys + passwords）。
+             SERVICE_META_DATA（android.credentials.provider）要等 passkey 面
+             （P4b 第二批）才宣告，綁定本身不需要。 -->
+        <service
+            android:name=".BitwardCredentialProviderService"
+            android:exported="true"
+            android:directBootAware="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_CREDENTIAL_PROVIDER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.credentials.CredentialProviderService" />
+            </intent-filter>
+        </service>
+
+        <!-- in-process 中樞的保命服務（契約 §1：foreground service） -->
+        <service
+            android:name=".HubService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+    </application>
+</manifest>

@@ -134,19 +134,51 @@ nsh 0.3.0 的 Android host 把 Java 層的 `filesDir` 只放進 JS runtime 的
 
 代價：cache 目錄理論上可被系統在空間壓力時清除（鏡像可重 sync，但帳號檔會不見）。
 正式解要嘛上游開一個 Rust 側 data dir API，要嘛 Kotlin 外殼自己傳 `filesDir` 進來
-（與下面的 Gradle 缺口一起做）。
+（外殼已就位＝`android-shell/`，傳路徑的 JNI 通道列第二批）。
 
-### 假設 8：Kotlin 孤島能進 nsh 產的 APK — 不通（需要 Gradle 外殼）
+### 假設 8：Kotlin 孤島能進 nsh 產的 APK — 不通（nsh 內）→ 由 Gradle 外殼解決（P4b 第二批，2026-11-07）
 
 `nsh package --help` 的 Android 旗標只有 `--name/--id/--app-version/--build/--icon/
 --keystore/--key-alias/--keystore-password/--run`；APK 的 dex 一律取自
 `~/.nsh/runtime/android/{dev,release}/classes.dex`，**沒有** app 自帶 Kotlin/Java
 來源、資源或 manifest 的掛鉤（`nsh.json` 也無對應欄位）。所以 `AutofillService`、
 `CredentialProviderService`、Keystore、foreground service 這幾個孤島，在 0.3.0 的
-管線下進不了 APK；本輪把孤島寫成佔位（簽名與分層真實、方法體留白）放在
-`apps/bitward-android/android/`，並在那邊 README 記錄缺口。下一批的形：
-一個 Gradle app module 吃 nsh 的 `classes.dex` + `lib/<ABI>/libnsh.so`，
-或由 nsh 提供 app 自帶 Android 來源的支援。
+管線下進不了 APK；第一批把孤島寫成佔位放在 `apps/bitward-android/android/`。
+
+**結局（路線 A：Gradle 外殼，已落地）**：`apps/bitward-android/android-shell/`
+是 app module 吃 nsh 產物的最小 Gradle 專案（Gradle 8.14＋快取 AGP 8.13.1＋
+Kotlin 2.2.21，離線可建）：jniLibs/assets 直接從 `.nsh/out/bitward.apk` 解壓餵入，
+孤島 Kotlin＋manifest 由 AGP 編譯，runtime 的 `classes.dex` 事後追加為
+`classesN.dex`（ART minSdk≥21 原生載入多 dex；兩套碼零符號重疊），zipalign＋
+`~/.android/debug.keystore` 重簽（與 nsh 產物同憑證，`install -r` 互換）。
+最終包 `.nsh/out/bitward-islands.apk` 在 emulator 實測：
+
+- 系統 bind 到 `io.bitward.android/.BitwardAutofillService`，logcat
+  `bitward-island: autofill service bound by system` 與 `onFillRequest unlocked=false`，
+  面板截圖列出「Bitward：尚未解鎖」（驗收 A8/A9）。
+- Keystore Class 3 EC 金鑰在 service 內生成成功，logcat 回顯
+  `keystore EC class3 key ready alias=bitward-class3-ec-probe strongbox=false`
+  （emulator 無 StrongBox，降級路徑即正式行為；驗收 A10）。
+- 原 A1–A7 不回歸（合併包裝回 emulator，登入/sync/搜尋/Reveal/返回/鎖定全過）。
+
+三個 Android 16 實測坑（驗收腳本已照此寫）：
+
+1. **autofill 服務的 settings key 換了**：`settings put secure
+   current_autofill_service` 寫進去後 observer 完全無反應（dumpsys 仍認
+   Google）；生效的是 `Settings.Secure` 的 **`autofill_service`**——
+   `dumpsys autofill` 自報 `SecureSettingsServiceNamer: prop=autofill_service`。
+2. **空 `Dataset` 不能 `build()`**：presentation-only 的鎖定列會丟
+   `IllegalStateException: at least one of field or datatype must be set`；
+   正統解是 response 級 `FillResponse.Builder.setAuthentication(focusedId,
+   intentSender, RemoteViews)`。`PendingIntent.intentSender` 要 API 31+。
+3. **Class 3 金鑰生成要求安全鎖屏**：無 PIN 時 `KeyGenParameterSpec` 帶
+   `setUserAuthenticationRequired(true)` 直接丟 `IllegalStateException`
+   （「Secure lock screen must be enabled」）；emulator 驗收前先
+   `locksettings set-pin`。
+
+教訓：孤島進 APK 不需要等上游掛鉤；外殼只承擔「編 Kotlin＋併 dex」，
+nsh 管線（三 ABI 交叉編譯、NDK 注入、debug 簽章）全部照用。佔位目錄
+`android/` 已刪除，檔位移入 `android-shell/app/src/main/`。
 
 ### adb 驅動陷阱（背景驗收必讀）
 
@@ -160,8 +192,10 @@ nsh 0.3.0 的 Android host 把 Java 層的 `filesDir` 只放進 JS runtime 的
 
 - 導航：Android 可押原生 `nav_stack`（本輪已押，返回鍵＋`on_dismiss` 實測可用）。
 - 打包：in-process 核心零風險；**唯一**必要設定是純 cargo 路徑的 `CC_*`/`AR_*` 兩行。
-- 缺口兩項，都要在第二批前拍板：(1) 純 Rust app 的 data dir API（否則鏡像放 cache）；
-  (2) Kotlin 孤島進 APK 的管道（Gradle 外殼 vs 上游支援）。
-- 驗收入口：`dev/e2e/android-app.sh`（A1..A7：三 ABI APK、啟動到登入畫面、真實 UI
-  登入＋sync、搜尋、詳情遮罩→Reveal、返回清明文、鎖定＋預填），截圖留
-  `apps/bitward-android/shots/`。
+- 缺口兩項：(1) 純 Rust app 的 data dir API（否則鏡像放 cache）——仍在第二批前
+  拍板；(2) Kotlin 孤島進 APK 的管道——**已解**（Gradle 外殼 `android-shell/`，
+  見假設 8 結局與 A8–A10）。
+- 驗收入口：`dev/e2e/android-app.sh`（A1..A10：三 ABI＋孤島 dex 合併 APK、啟動到
+  登入畫面、真實 UI 登入＋sync、搜尋、詳情遮罩→Reveal、返回清明文、鎖定＋預填、
+  系統列舉 autofill 服務、fill 請求送達＋面板截圖、Keystore Class 3 EC 生成），
+  截圖留 `apps/bitward-android/shots/`。

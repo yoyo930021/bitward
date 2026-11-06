@@ -15,3 +15,8 @@ keys/
 # NSH apps（apps/ 有自己的 cargo target 與 nsh 產物）
 apps/**/target/
 apps/**/.nsh/
+# Gradle 孤島外殼產物
+apps/**/.gradle/
+apps/**/android-shell/build/
+apps/**/android-shell/app/build/
+apps/**/android-shell/local.properties
