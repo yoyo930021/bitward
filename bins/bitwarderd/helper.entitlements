@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- launchd 常駐 daemon 要碰 app-group 容器（provider 的 daemon.sock）：
+	     macOS 15+ 要求 team 身分 + 對應 entitlement，ad-hoc 簽章會被 EPERM 拒。 -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.8V5224A99M.io.bitward.dev</string>
+	</array>
+</dict>
+</plist>

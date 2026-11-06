@@ -1,9 +1,66 @@
 import AuthenticationServices
+import Foundation
+import OSLog
 import SwiftUI
+
+private let uiLog = Logger(subsystem: "io.bitward.dev", category: "gui")
+
+/// daemon 常駐服務（計畫 R2 緩解：thin autofill 依賴 daemon 存活）。
+/// launchd 的 UDS socket 激活不存在（MachServices 只認 Mach port），
+/// 等效手段 = RunAtLoad + KeepAlive 進程級常駐。註冊動作由 daemon 自己
+/// 執行（`--service install`）：SMAppService.agent(plistName:) 對本機組建
+/// 回 EPERM（MAS 分發限定），非沙盒進程寫 LaunchAgents + launchctl 才是通的路。
+enum DaemonService {
+    private static var daemonURL: URL? {
+        let u = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/bitwarderd")
+        return FileManager.default.fileExists(atPath: u.path) ? u : nil
+    }
+
+    static func status() -> String {
+        run(["--service", "status"]) ?? "unavailable"
+    }
+
+    static func enable() -> String? {
+        runExpectOk(["--service", "install", "--push-app-group", BitwardGroup.id])
+    }
+
+    static func disable() -> String? {
+        runExpectOk(["--service", "uninstall"])
+    }
+
+    private static func run(_ args: [String]) -> String? {
+        guard let d = daemonURL else { return nil }
+        let p = Process()
+        p.executableURL = d
+        p.arguments = args
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        do { try p.run() } catch { return nil }
+        p.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func runExpectOk(_ args: [String]) -> String? {
+        guard let d = daemonURL else { return "bundle 內找不到 bitwarderd" }
+        let p = Process()
+        p.executableURL = d
+        p.arguments = args
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        do { try p.run() } catch { return error.localizedDescription }
+        p.waitUntilExit()
+        guard p.terminationStatus != 0 else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "exit \(p.terminationStatus)"
+    }
+}
 
 @main
 struct BitwardApp: App {
-    init() { NSLog("bitward app init") }
     var body: some Scene {
         // macOS 27 實測：WindowGroup 從背景 session 啟動不自動建窗（savedState 還原
         // 是唯一出現過視窗的路徑）。單例 Window + presented 啟動行為才有可靠首窗。
@@ -16,17 +73,18 @@ struct BitwardApp: App {
 
 private struct RootView: View {
     var body: some View {
-        // TEMP 隔離實驗：先不用 TabView
-        VStack { Text("Bitward"); ApprovalCenterBody() }.frame(minWidth: 560, minHeight: 320)
+        TabView {
+            ApprovalCenterView()
+                .tabItem { Label("批准", systemImage: "checkmark.seal") }
+            StatusView()
+                .tabItem { Label("狀態", systemImage: "info.circle") }
+        }
+        .frame(minWidth: 560, minHeight: 340)
     }
 }
 
-private struct ApprovalCenterBody: View {
-    var body: some View { ApprovalCenterView() }
-}
-
 /// 批准中心：遠端 device 的受控請求（requires_approval grant）在 daemon 排隊，
-/// 這裡輪詢 ListPending 並由人批准。拒絕＝讓它 120s 逾時（Deny call 屬後續批次）。
+/// 這裡輪詢 ListPending 並由人批准或拒絕（Deny 立即釋放請求端）。
 private struct ApprovalCenterView: View {
     @StateObject private var model = ApprovalModel()
 
@@ -89,22 +147,29 @@ private final class ApprovalModel: ObservableObject {
 
     private func syncIdentityStore() {
         DispatchQueue.global(qos: .background).async {
-            guard let items = try? Self.queryAllItems() else { return }
-            let identities = items.compactMap { item -> ASPasswordCredentialIdentity? in
-                guard !item.detail.isEmpty else { return nil }
-                return ASPasswordCredentialIdentity(
-                    serviceIdentifier: ASCredentialServiceIdentifier(identifier: item.detail, type: .URL),
-                    user: item.name, recordIdentifier: item.id)
-            }
-            ASCredentialIdentityStore.shared.replaceCredentialIdentities(identities) { ok, err in
-                let detail = err.map { "\(($0 as NSError).domain)#\(($0 as NSError).code) \($0.localizedDescription) \($0 as NSError).userInfo" } ?? "none"
-                NSLog("bitward identity store replace ok=\(ok) n=\(identities.count) err=\(detail)")
+            guard let client = try? Self.connect() else { return }
+            do {
+                guard try client.isUnlocked() else {
+                    // 鎖定：清掉建議（密文名稱不配出現在系統下拉），解鎖後下一輪回填。
+                    ASCredentialIdentityStore.shared.replaceCredentialIdentities([]) { ok, _ in
+                        uiLog.notice("identity store cleared unlocked=false ok=\(ok)")
+                    }
+                    return
+                }
+                let items = try client.list(uri: "")
+                let identities = items.compactMap { item -> ASPasswordCredentialIdentity? in
+                    guard !item.detail.isEmpty else { return nil }
+                    return ASPasswordCredentialIdentity(
+                        serviceIdentifier: ASCredentialServiceIdentifier(identifier: item.detail, type: .URL),
+                        user: item.name, recordIdentifier: item.id)
+                }
+                ASCredentialIdentityStore.shared.replaceCredentialIdentities(identities) { ok, err in
+                    uiLog.notice("identity store replace ok=\(ok) n=\(identities.count) err=\(err.map { "\(($0 as NSError).domain)#\(($0 as NSError).code)" } ?? "none", privacy: .public)")
+                }
+            } catch {
+                uiLog.notice("identity store sync failed \(String(describing: error), privacy: .public)")
             }
         }
-    }
-
-    private nonisolated static func queryAllItems() throws -> [(id: String, name: String, detail: String)] {
-        try connect().list(uri: "").map { ($0.id, $0.name, $0.detail) }
     }
 
     func refresh() {
@@ -157,13 +222,32 @@ private final class ApprovalModel: ObservableObject {
     }
 }
 
-/// 狀態頁：骨架佔位（app group/socket/pairing 資訊）。NSH 正式 GUI 屬獨立主項。
+/// 狀態頁：骨架佔位（app group/socket/pairing 資訊）＋ daemon 常駐開關。
 private struct StatusView: View {
+    @State private var agentStatus = DaemonService.status()
+    @State private var agentError: String?
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Bitward").font(.largeTitle.bold())
             Text("批准中心已上工；vault 瀏覽與 NSH 整合屬後續主項")
                 .foregroundStyle(.secondary)
+            Divider()
+            HStack {
+                Text("開機常駐 daemon：").bold()
+                Text(agentStatus).foregroundStyle(.secondary)
+                Button("啟用") {
+                    agentError = DaemonService.enable()
+                    agentStatus = DaemonService.status()
+                }
+                Button("停用") {
+                    agentError = DaemonService.disable()
+                    agentStatus = DaemonService.status()
+                }
+            }
+            if let agentError {
+                Text(agentError).font(.caption).foregroundStyle(.red)
+            }
             Divider()
             Group {
                 Text("app group: \(BitwardGroup.id)")

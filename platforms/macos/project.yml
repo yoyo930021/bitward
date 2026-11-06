@@ -22,6 +22,8 @@ targets:
     platform: macOS
     sources:
       - Bitward/Sources
+      - path: Bitward/Resources
+        buildPhase: none
       - Shared
     settings:
       base:
@@ -31,6 +33,35 @@ targets:
         INFOPLIST_FILE: Bitward/Info.plist
         CODE_SIGN_ENTITLEMENTS: Bitward/Bitward.entitlements
         PROVISIONING_PROFILE_SPECIFIER: Bitward Mac Dev
+    postCompileScripts:
+      # 把 daemon 打进 bundle（Contents/Helpers）供 LaunchAgent 使用。
+      # alwaysOutOfDate：staged 二進位不在 Xcode 依賴圖裡，增量建置曾兩次
+      # 讓舊 bitwarderd 悄悄上崗（真機教訓），故每回合強制重拷＋重簽。
+      - name: Stage bitwarderd
+        script: |
+          set -e
+          REPO="$SRCROOT/../.."
+          # 固定取 release（開發期需先 cargo build --release；debug 優先曾讓
+          # 舊 release 被 debug 覆蓋造成兩次殭屍二進位上崗）。
+          SRC="$REPO/target/release/bitwarderd"
+          if [ -x "$SRC" ]; then
+            DEST="$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME/Contents/Helpers"
+            mkdir -p "$DEST"
+            cp -f "$SRC" "$DEST/bitwarderd"
+            # team 簽章 + app-group entitlement：macOS 15+ 的 group container
+            # 只放行「有 team 身分且宣告對應 group」的進程（ad-hoc 會 EPERM）。
+            codesign -f -s "$EXPANDED_CODE_SIGN_IDENTITY" \
+              --entitlements "$SRCROOT/../../bins/bitwarderd/helper.entitlements" \
+              "$DEST/bitwarderd"
+          else
+            echo "warning: bitwarderd not found (cargo build first)"
+          fi
+          # SMAppService.agent(plistName:) 規定 plist 在 Contents/Library/LaunchAgents/
+          LA="$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME/Contents/Library/LaunchAgents"
+          mkdir -p "$LA"
+          cp -f "$SRCROOT/Bitward/Resources/io.bitward.daemon.plist" "$LA/io.bitward.daemon.plist"
+        # 不宣告 outputFiles：xcodegen 版不支援 alwaysOutOfDate，改用「無輸出
+        # 宣告」讓 Xcode 每回合都跑此腳本（殭屍二進位教訓，見 FINDINGS §7）。
     dependencies:
       - target: BitwardProvider
   BitwardProvider:

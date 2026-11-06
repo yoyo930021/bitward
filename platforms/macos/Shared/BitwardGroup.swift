@@ -19,8 +19,16 @@ enum BitwardGroup {
     }
 
     static var daemonSocketPath: String? {
-        containerURL?.appendingPathComponent("daemon.sock").path
+        // 沙盒進程的 NSHomeDirectory() 是容器 home，其下 Group Containers
+        // 是 containerURL 真身的映射（非沙盒時兩者皆真路徑）。
+        let mapped = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Library/Group Containers/\(id)/daemon.sock").path
+        if FileManager.default.fileExists(atPath: tmpSock) { return tmpSock }
+        if FileManager.default.fileExists(atPath: mapped) { return mapped }
+        return containerURL?.appendingPathComponent("daemon.sock").path
     }
+
+    static let tmpSock = "/private/tmp/io.bitward.dev/daemon.sock"
 
     /// 自產 pairing uuid：Enroll auth 的身分錨點，必須跨啟動穩定，
     /// 否則每次 autofill 都會被 daemon 當成一台新裝置。

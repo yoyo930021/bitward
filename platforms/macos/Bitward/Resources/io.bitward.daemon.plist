@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.bitward.daemon</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>$__AppDir__/Helpers/bitwarderd</string>
+		<string>--push-app-group</string>
+		<string>group.8V5224A99M.io.bitward.dev</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+</dict>
+</plist>

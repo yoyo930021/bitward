@@ -15,13 +15,13 @@ use std::sync::Arc;
 use std::os::unix::io::AsRawFd;
 
 use clap::Parser;
-use tokio::net::UnixListener;
 use uuid::Uuid;
 
 use bw_btp::{read_client, write_server};
 use bw_keys::UnlockEvent;
 use bw_proto::{Auth, ClientMsg, PROTO_VERSION, Response, ServerMsg, WtpError};
 use hub::Hub;
+mod service;
 
 #[derive(Parser)]
 #[command(name = "bitwarderd", version, about = "bitward hub daemon")]
@@ -41,9 +41,12 @@ struct Args {
     /// macOS：在 app group 容器內多綁一個 BTP socket（provider extension 用）
     #[arg(long)]
     push_app_group: Option<String>,
+    /// macOS：LaunchAgent 自管（非沙盒進程才有權限寫 LaunchAgents + launchctl）
+    #[arg(long, value_enum)]
+    service: Option<service::ServiceAction>,
 }
 
-fn default_data_dir() -> PathBuf {
+pub(crate) fn default_data_dir() -> PathBuf {
     if let Ok(d) = std::env::var("BITWARD_DATA_DIR") {
         return d.into();
     }
@@ -52,27 +55,93 @@ fn default_data_dir() -> PathBuf {
         .join("bitward")
 }
 
+/// socket 綁定 + 單實例守衛（flock）。崩潰／kill -9 留下的屍体 sock 檔案必須
+/// 清掉重綁（Make Operations Idempotent），但「先 unlink 再 bind」只有在
+/// **沒有別的 live 實例**時才安全——否則第二個實例會把第一個的位址蓋掉，
+/// 第二個退出後所有人拿到 ECONNREFUSED（真機實測：手工前台測試打掛 launchd
+/// daemon）。故每個 socket 配一個 `.lock` 檔持有非阻塞 LOCK_EX 到程序結束。
+pub(crate) struct HeldSock {
+    pub listener: tokio::net::UnixListener,
+    _lock: std::fs::File,
+}
+
+pub(crate) fn bind_sock(
+    path: &std::path::Path,
+    lock_dir: &std::path::Path,
+) -> Result<HeldSock, String> {
+    use std::os::unix::io::AsRawFd;
+    // lock 檔放 daemon 自有目錄：group container 的策略只准 entitlement 成員建
+    // 普通檔（daemon 非成員，開 lock 會 EPERM），socket 檔是例外能綁。
+    std::fs::create_dir_all(lock_dir).map_err(|e| format!("lock dir: {e}"))?;
+    let lock_path = lock_dir.join(
+        path.file_name()
+            .map(|n| format!("{}.lock", n.to_string_lossy()))
+            .unwrap_or_else(|| "daemon.sock.lock".into()),
+    );
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("lock open: {e}"))?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(format!("{} 已被運行中的實例佔用", path.display()));
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // 不吞錯：EPERM（如 launchd Spawned 非成員進程碰 group container）
+        // 若靜默放行，下一步就是讓人誤診的 EADDRINUSE。
+        Err(e) => return Err(format!("unlink stale {}: {e}", path.display())),
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("sock dir: {e}"))?;
+        // 世界可寫目錄下的 sock 要防搶佔：目錄 0700（僅本使用者可進）＋
+        // sock 0600；同 uid 已是信任邊界，peer_uid 驗證兜底。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+    let listener = tokio::net::UnixListener::bind(path).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(HeldSock {
+        listener,
+        _lock: lock,
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<(), String> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
     let args = Args::parse();
+    if let Some(action) = args.service {
+        let msg = service::run(
+            action,
+            std::env::current_exe().map_err(|e| e.to_string())?,
+            args.push_app_group.as_deref(),
+        )?;
+        println!("{msg}");
+        return Ok(());
+    }
     if !arena::init() {
         eprintln!("warning: secret arena inactive (mlock unavailable)");
     }
     let data_dir = args.data_dir.unwrap_or_else(default_data_dir);
     let sock = args.sock.unwrap_or_else(|| data_dir.join("daemon.sock"));
     std::fs::create_dir_all(data_dir.join("run")).map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_file(&sock);
     let hub = Hub::open(&data_dir, args.ntfy.clone()).await?;
-    let listener = UnixListener::bind(&sock).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| e.to_string())?;
-    }
+    let held = bind_sock(&sock, &data_dir)?;
+    let listener = held.listener;
+    let _sock_guard = held._lock;
     tracing::info!(sock = %sock.display(), "bitwarderd listening");
 
     // 跨機 TLS listener（§1.2）：身分持久化 ⇒ pin 穩定
@@ -116,12 +185,14 @@ async fn main() -> Result<(), String> {
         let group_dir = base.join("Library/Group Containers").join(&group);
         if std::fs::create_dir_all(&group_dir).is_ok() {
             let gsock = group_dir.join("daemon.sock");
-            let _ = std::fs::remove_file(&gsock);
-            match UnixListener::bind(&gsock) {
-                Ok(gl) => {
+            match bind_sock(&gsock, &data_dir.join("run")) {
+                Ok(held) => {
+                    let gl = held.listener;
+                    let flock_guard = held._lock;
                     tracing::info!(sock = %gsock.display(), "bitwarderd app-group socket listening");
                     let hub = hub.clone();
                     tokio::spawn(async move {
+                        let _guard = flock_guard; // flock 隨循環存活：第二實例無法搶佔此位址
                         loop {
                             if let Ok((stream, _)) = gl.accept().await {
                                 let hub = hub.clone();

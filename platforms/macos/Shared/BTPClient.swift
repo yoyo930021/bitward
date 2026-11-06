@@ -90,6 +90,9 @@ final class BTPClient {
     deinit { close(fd) }
 
     private var enrolled = false
+    /// Welcome.state 是否 Unlocked：identity store 等「明文投影」型消費者要據此
+    /// 決定回填或清空——鎖定下 List 仍服務但 name 是密文信封，照寫會污染系統建議。
+    private(set) var daemonUnlocked = false
 
     /// Hello(Enroll) → Welcome；同一連線內冪等（重複呼叫只發一次）。
     private func ensureEnrolled() throws {
@@ -99,8 +102,19 @@ final class BTPClient {
             "auth": ["Enroll": ["pairing": BitwardGroup.pairingUUID(), "display_name": "provider"]],
             "wants": [Any](),
         ]])
-        _ = try readFrames(until: { $0["Welcome"] != nil })
+        let welcome = try readFrames(until: { $0["Welcome"] != nil })
+        if let w = welcome["Welcome"] as? [String: Any],
+           let state = w["state"] as? [String: Any] {
+            daemonUnlocked = state["Unlocked"] != nil
+        }
         enrolled = true
+    }
+
+    /// 顯式觸發 enroll 後回傳解鎖態（daemonUnlocked 在 ensureEnrolled 內才賦值，
+    /// 直接讀屬性會拿到未 enrolled 的預設 false）。
+    func isUnlocked() throws -> Bool {
+        try ensureEnrolled()
+        return daemonUnlocked
     }
 
     /// Vault List(Metadata)：清單頁用，不觸碰密碼。
