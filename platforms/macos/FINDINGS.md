@@ -146,3 +146,24 @@
 - **macOS 27 容器 App 首窗**：背景 session `open` 啟動的 WindowGroup app 不自動建窗
   （此前視窗全靠 savedState 還原）；單例 `Window` scene + `.defaultLaunchBehavior(.presented)`
   修正。無窗進程會被 TAL 自動終止——首窗是生存問題不是美學問題。
+
+### P7-C passkey 收單狀態（截至本批結束）
+已確立：
+- daemon 核心正確——獨立 SimpleWebAuthn/cbor2 round-trip 全驗（authData 164B、
+  COSE canonical、counter、簽名）。
+- Safari 端鏈路可達 `completeRegistrationRequest expired=false`（UI 流：
+  Register → 系統面板「繼續」→ 內嵌「儲存 passkey」→ provider LAContext UV）。
+- 補 UV 前已測（無 UV）與補 UV 後，WebKit 均靜默取消（Code=1000/1001），
+  **finish POST 從未發出** → 拒因在 WebKit 收單層，非伺服器。
+未解（下一步診斷程序，需人在場）：
+1. **取得 Safari 實際送出的 clientDataJSON 原字節**——需要一个 Safari 接受的
+   https RP（自簽憑證 Safari 直接拒開、無「繼續」選項；需將 CA 進系統鑰匙圈：
+   `sudo security add-trusted-cert -d -r trustRoot -p ssl -k /Library/Keychains/
+   System.keychain /tmp/wp_rp/cert.pem`，本地 RP 已備好於 https://localhost:8443
+   並會 log `CLIENTDATA` 行）。
+2. 拿到後 diff daemon `client_data_json()` 構造（challenge/origin/鍵序），
+   讓簽名覆蓋位元組與系統重構一致——這是 thin provider 簽名被 RP 驗通的
+   最後一塊（Apple 慣例 origin=`https://<rpID>` 無 port；頁面帶 port 時必對不上，
+   推測即 webauthn.io（無 port https 實域）輪次仍被拒之外的環境變因）。
+3. 對照實驗：裝官方 Bitwarden beta（PR #22624 已開 macOS passkey provider）或
+   1Password 走同流程——若同樣 NotAllowedError 則為 macOS 27 系統支援度問題。
