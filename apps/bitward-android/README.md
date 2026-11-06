@@ -73,6 +73,15 @@ dev/e2e/android-app.sh
   不讓「值相等」吞掉清零）；`on_dismiss`（含系統返回鍵）即 `set(None)`。
 - 明文不進日誌、不進帳號檔；帳號檔只存 `protected_user_key`（未解封形態）。
 
+## 協作紀律（多 worker 並行時）
+
+清理只准 `git clean -fdX`（僅 ignored 產物）或 `git clean -fd <自己的目錄>`。
+**不要**在 repo 根跑無範圍的 `git clean -fd`：本 repo 的 worker 各自留下尚未
+commit 的**未追蹤**原始檔（例：`apps/bitward-gui/src/*.rs` 曾被這樣掃掉過一次，
+見 2026-11-07 Main 的協作記錄）。同一理由，`rm -rf` 也要帶明確路徑。
+本 app 的產物目錄 `apps/**/target/` 與 `apps/**/.nsh/` 已進 `.gitignore`，
+`git clean -fdX` 就足以清乾淨。
+
 ## 已知的下一步（P4b 第二批）
 
 1. Keystore Class 3 封存 user key（冷啟免主密碼），並把 `bins/bitwarderd` 的
