@@ -1,5 +1,8 @@
 import Foundation
+import OSLog
 import Security
+
+private let seLog = Logger(subsystem: "io.bitward.dev.provider", category: "se")
 
 /// Passkey 私鑰 = Secure Enclave 金鑰，綁生物辨識（WebAuthn L1 §6.1：UV 位元
 /// 可信的前提是簽名由 UV 綁定金鑰產生；純軟體鑰＋LAContext 宣告式 UV 實測被
@@ -18,12 +21,18 @@ enum SEPasskeyKey {
     /// 產生 SE ES256 私鑰；tag 即憑證 id 原料（32B 隨機，前綴 4B 辨識用）。
     static func create(tag: Data) -> SecKey? {
         var error: Unmanaged<CFError>?
+        // 注意 1：ThisDeviceOnly 系列不能經自訂 access group 跨進程共用（Apple 限制），
+        //         金鑰本體在 SE 已硬體綁定，accessibility 類用 AfterFirstUnlock。
+        // 注意 2：macOS 的 SecAccessControl **沒有** userPresence（-50：僅可併
+        //         ApplicationPassword/PrivateKeyUsage；那是 iOS 旗標）。生物要求由
+        //         biometryCurrentSet 承擔——SecKeyCreateSignature 對 biometry-bound
+        //         SE 金鑰本身就會觸發 Touch ID（Apple/Dashlane sample 同形）。
         guard let ac = SecAccessControlCreateWithFlags(
             kCFAllocatorDefault,
-            kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
-            [.biometryCurrentSet, .privateKeyUsage, .userPresence],
+            kSecAttrAccessibleAfterFirstUnlock,
+            [.biometryCurrentSet, .privateKeyUsage],
             &error) else {
-            NSLog("bitward se: access control failed \(error?.takeRetainedValue().localizedDescription ?? "?")")
+            seLog.notice("se access control failed \(error?.takeRetainedValue().localizedDescription ?? "?", privacy: .public)")
             return nil
         }
         let attrs: [String: Any] = [
@@ -40,20 +49,28 @@ enum SEPasskeyKey {
                 kSecAttrAccessControl as String: ac,
             ],
         ]
-        return SecKeyCreateRandomKey(attrs as CFDictionary, &error)
+        guard let key = SecKeyCreateRandomKey(attrs as CFDictionary, &error) else {
+            seLog.notice("se keygen failed \(error?.takeRetainedValue().localizedDescription ?? "?", privacy: .public)")
+            return nil
+        }
+        return key
     }
 
-    /// 公鑁匯出（SecKey 給的是 SEC1 未壓縮點 0x04‖X‖Y）。
+    /// 公鑰匯出（SEC1 未壓縮點 0x04‖X‖Y）。SE 私鑰柄不支援匯出（-4
+    /// export not implemented）——必須先 SecKeyCopyPublicKey 取公鑰柄。
     static func publicKeySEC1(tag: Data) -> Result<Data, Err> {
         guard let key = copyKey(tag: tag) else { return .failure(.notFound) }
+        guard let pub = SecKeyCopyPublicKey(key) else {
+            return .failure(.exportFailed("no public key handle"))
+        }
         var error: Unmanaged<CFError>?
-        guard let pub = SecKeyCopyExternalRepresentation(key, &error) else {
+        guard let repr = SecKeyCopyExternalRepresentation(pub, &error) else {
             return .failure(.exportFailed(error?.takeRetainedValue().localizedDescription ?? "?"))
         }
-        return .success(pub as Data)
+        return .success(repr as Data)
     }
 
-    /// 簽 authData ‖ clientDataHash（WebAuthn 斷言）。userPresence 金鑰會觸發
+    /// 簽 authData ‖ clientDataHash（WebAuthn 斷言）。biometry 綁定金鑰會觸發
     /// Touch ID；回傳 DER ECDSA-Sig-Value（WebAuthn L1 §7.2 紀律）。
     static func sign(tag: Data, authData: Data, clientDataHash: Data) -> Result<Data, Err> {
         guard let key = copyKey(tag: tag) else { return .failure(.notFound) }

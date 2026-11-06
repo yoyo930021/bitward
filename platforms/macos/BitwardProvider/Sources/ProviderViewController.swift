@@ -367,7 +367,8 @@ final class ProviderViewController: ASCredentialProviderViewController {
                 })
             } catch {
                 log.notice("registration failed \(String(describing: error), privacy: .public)")
-                self.extensionContext.cancelRequest(withError: ASExtensionError(.failed))
+                // .failed 會把系統面板卡住不關；.userCanceled 才走關閉路徑。
+                self.extensionContext.cancelRequest(withError: ASExtensionError(.userCanceled))
             }
         }
     }
@@ -395,6 +396,86 @@ final class ProviderViewController: ASCredentialProviderViewController {
                                             signature: sig, clientDataHash: clientDataHash,
                                             authenticatorData: ad, credentialID: tag)
     }
+
+    /// 斷言的互動路徑（macOS 上 passkey get 幾乎必走這裡：系統要 provider 給確認 UI）。
+    /// 未覆寫時空 VC 无人 complete，Safari 無限等待（真機實測「卡住」）。
+    override func prepareInterfaceToProvideCredential(for credentialRequest: any ASCredentialRequest) {
+        log.notice("prepareInterface(toProvideCredential) got \(type(of: credentialRequest), privacy: .public)")
+        guard #available(macOS 14.0, *),
+              let request = credentialRequest as? ASPasskeyCredentialRequest,
+              let identity = request.credentialIdentity as? ASPasskeyCredentialIdentity else {
+            extensionContext.cancelRequest(withError: ASExtensionError(.userInteractionRequired))
+            return
+        }
+        pendingAssertion = (identity.relyingPartyIdentifier, request.clientDataHash)
+        showAssertionConfirm(rpID: identity.relyingPartyIdentifier, user: identity.userName)
+    }
+
+    private var pendingAssertion: (rpID: String, clientDataHash: Data)?
+
+    @MainActor
+    private func showAssertionConfirm(rpID: String, user: String) {
+        view.subviews.forEach { $0.removeFromSuperview() }
+        let label = NSTextField(labelWithString: user.isEmpty
+            ? "要使用「\(rpID)」的 passkey 登入嗎？"
+            : "使用 \(user) 在「\(rpID)」的 passkey 登入？")
+        let button = NSButton(title: "使用 passkey", target: self, action: #selector(confirmAssertion))
+        button.bezelStyle = .rounded
+        button.keyEquivalent = "\r"
+        label.translatesAutoresizingMaskIntoConstraints = false
+        button.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(label)
+        view.addSubview(button)
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: view.centerYAnchor, constant: -16),
+            button.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            button.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 10),
+            view.widthAnchor.constraint(equalToConstant: 460),
+            view.heightAnchor.constraint(equalToConstant: 140),
+        ])
+        preferredContentSize = NSSize(width: 460, height: 140)
+    }
+
+    @objc private func confirmAssertion() {
+        guard #available(macOS 14.0, *), let pending = pendingAssertion else {
+            extensionContext.cancelRequest(withError: ASExtensionError(.userCanceled))
+            return
+        }
+        pendingAssertion = nil
+        log.notice("assertion confirmed rp=\(pending.rpID, privacy: .public)")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                let credential = try Self.assertPasskey(rpID: pending.rpID, clientDataHash: pending.clientDataHash,
+                                                        allowed: self.pendingAllowed.first,
+                                                        fallbackHandle: nil, fallbackUser: "")
+                self.extensionContext.completeAssertionRequest(using: credential, completionHandler: { expired in
+                    log.notice("assertion completeRequest expired=\(expired)")
+                })
+            } catch {
+                log.notice("assertion failed \(String(describing: error), privacy: .public)")
+                self.extensionContext.cancelRequest(withError: ASExtensionError(.userCanceled))
+            }
+        }
+    }
+
+    /// passkey 斷言的清單入口（macOS 14+：prepareCredentialListForServiceIdentifiers:
+    /// requestParameters:）。系統走這版而非舊密碼版——未覆寫時基類預設不作為＝卡死。
+    override func prepareCredentialList(for serviceIdentifiers: [ASCredentialServiceIdentifier],
+                                        requestParameters: ASPasskeyCredentialRequestParameters) {
+        log.notice("passkey credential list rp=\(requestParameters.relyingPartyIdentifier, privacy: .public) allowed=\(requestParameters.allowedCredentials.count)")
+        guard #available(macOS 14.0, *) else {
+            extensionContext.cancelRequest(withError: ASExtensionError(.userInteractionRequired))
+            return
+        }
+        // 骨架流：直接給單筆確認面板（清單化多 passkey 屬後續）。
+        pendingAssertion = (requestParameters.relyingPartyIdentifier, requestParameters.clientDataHash)
+        pendingAllowed = requestParameters.allowedCredentials
+        showAssertionConfirm(rpID: requestParameters.relyingPartyIdentifier, user: "")
+    }
+
+    private var pendingAllowed: [Data] = []
 
     private static func resolve(uri: String) throws -> BTPCandidate {
         let client = try connect(budget: 1.5)

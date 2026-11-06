@@ -167,3 +167,23 @@
    推測即 webauthn.io（無 port https 實域）輪次仍被拒之外的環境變因）。
 3. 對照實驗：裝官方 Bitwarden beta（PR #22624 已開 macOS passkey provider）或
    1Password 走同流程——若同樣 NotAllowedError 則為 macOS 27 系統支援度問題。
+
+### P7-C2 真機閉環（2026-11-07 凌晨，註冊＋斷言雙向通過）
+webauthn.io 實測：註冊 `New credential added!`；斷言日誌
+`passkey credential list rp=webauthn.io allowed=1 → assertion confirmed →
+completeRequest expired=false` → 伺服器驗簽成功（同時證明 counter 事務與
+DER/hash 直簽修復生效）。本輪新增的實測坑：
+- **macOS 斷言入口是帶參數變體**：系統呼 `prepareCredentialList(for:requestParameters:)`
+  （macOS 14+，ObjC `prepareCredentialListForServiceIdentifiers:requestParameters:`），
+  不是舊密碼版 `prepareCredentialList(for:)`。只覆寫舊版時新入口落到基類預設
+  （不作為）→ Safari 無限等待（「卡住」）。
+- **SE 金鑰三連坑**（每個都是硬錯誤、錯誤訊息被 os_log `<private>` 遮蔽，NSLog
+  改自訂 Logger 才看見）：
+  1. macOS `SecAccessControlCreateWithFlags` **拒 `userPresence`**（-50：僅可併
+     ApplicationPassword/PrivateKeyUsage；iOS 專屬旗標）。生物要求由
+     `biometryCurrentSet` 承擔——對 biometry-bound SE 金鑰 `SecKeyCreateSignature`
+     本身就會觸發 Touch ID。
+  2. ThisDeviceOnly 系列 accessibility 類**不能跨 keychain access group 共用**。
+  3. SE 私鑰柄不支援 `SecKeyCopyExternalRepresentation`（-4 export not
+     implemented）——先 `SecKeyCopyPublicKey` 再匯出。
+- **cancel(.failed) 會把系統面板卡住不關**；錯誤路徑用 `.userCanceled` 才走關閉。
