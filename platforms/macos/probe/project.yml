@@ -1,0 +1,48 @@
+name: Probe
+options:
+  bundleIdPrefix: io.bitward.probe
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5"
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "Apple Development"
+    DEVELOPMENT_TEAM: 8V5224A99M
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    GENERATE_INFOPLIST_FILE: NO
+targets:
+  Probe:
+    type: application
+    platform: macOS
+    sources:
+      - ProbeApp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.bitward.probe
+        PRODUCT_NAME: Probe
+        INFOPLIST_FILE: ProbeApp/Info.plist
+        PROVISIONING_PROFILE_SPECIFIER: ProbeApp Mac Dev
+    dependencies:
+      - target: ProbeProvider
+  ProbeProvider:
+    type: app-extension
+    platform: macOS
+    sources:
+      - ProbeProvider
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.bitward.probe.provider
+        PRODUCT_NAME: ProbeProvider
+        INFOPLIST_FILE: ProbeProvider/Info.plist
+        CODE_SIGN_ENTITLEMENTS: ProbeProvider/Probe.entitlements
+        PROVISIONING_PROFILE_SPECIFIER: Probe Mac Dev
+schemes:
+  Probe:
+    build:
+      targets:
+        Probe: all
+    run:
+      config: Release
+      target: Probe

@@ -58,3 +58,38 @@
   NeedApproval 的批准 UI 串接（現在一律降回 `.userInteractionRequired`，不靜默失敗）。
 - 記憶體教訓沿用：client 手刻 POSIX socket、零第三方依賴；Reveal 明文只進
   `ASPasswordCredential`，不落地日誌。
+
+## 5. P5 真機整合（2026-11-06 完成）
+端到端已通：Safari「密碼自動填寫」→ 系統拉起 appex → 互動清單（BTP over app-group socket）→
+點選 → Reveal → `completeRequest(expired=false)` → 欄位填入。五個實測坑，全部要記：
+
+1. **macOS 開發裝置的 UDID 不是 IOPlatformUUID**。xcodebuild 要的註冊 ID 是 ECID 格式
+   （本機為 `00006050-001C315C02F9401C`，錯誤訊息會直接吐出來）。用硬體 UUID 註冊到 portal
+   後 xcodebuild 仍說「device isn't registered」，且誤導你往帳號快取查。
+2. **簽章鏈可全程脫離 Xcode GUI 用 ASC API 建**：`asc certificates create
+   --certificate-type MAC_APP_DEVELOPMENT --generate-csr`（私鑰留 `keys/`，p12 匯鑰匙圈）→
+   `bundle-ids create`（platform 值為 `MAC_OS`）→ `bundle-ids capabilities add
+   --capability AUTOFILL_CREDENTIAL_PROVIDER` → `profiles create MAC_APP_DEVELOPMENT` →
+   `profiles local install` → project.yml 切 Manual + `PROVISIONING_PROFILE_SPECIFIER`。
+   AutoFill capability 沒開時 profile 校验錯誤會明確點名 entitlement。
+3. **app-group 名稱必須帶 Team ID 前綴**：`group.io.bitward.dev` 被 containermanagerd 擋
+   （REJECTED：「Group containers identifiers should be prefixed by requestor's team ID」），
+   改 `group.8V5224A99M.io.bitward.dev` 後 socket 容器才真正可用。daemon 端
+   `--push-app-group` 與 Swift `BitwardGroup.id`、兩份 entitlements 四處要一起改。
+4. **ViewBridge 面板尺寸取自 fittingSize/preferredContentSize**：清單 view 只有錨點約束、
+   沒釘死自身尺寸時，面板以 `remote view frame {{0,0},{0,0}}` 出現——資料都拿到了但使用者
+   看到的就是「點了沒反應」。`showList`/`showNote` 都要給 view 固定寬高 + `preferredContentSize`。
+5. **Release build 的 `Logger.debug` 預設不發出**：整輪除錯以為「系統沒呼叫我們的路徑」，
+   實際是日誌被層級吃掉。骨架期一律 `log.notice`，觀測別省這一行。
+   另：`log stream --level debug` 只放寬顯示，救不了 emission 端。
+
+其他：
+- 互動清單的 metadata 視圖不含 username（分級表屬 Secret），清單第二欄改顯示首个 uri；
+  username 的展示層級屬 P6 分級討論。
+- daemon 重啟後 vault 為 `AuthLocked`：List（加密 metadata）仍可服務，Reveal 才要求解鎖——
+  provider 依契約降回 `.userInteractionRequired`，Safari 保持氣泡不崩不卡，分級語意如設計。
+- 公證（notarization）不是本地開發簽名的硬門檻：Apple Development + 本機 profile 的
+  credential provider 在 macOS 27 可被 authd 正常拉起；`securityd` 的
+  "Error checking with notarization daemon: 3" 是噪音，曾誤導一輪排查。
+- `platforms/macos/probe/`：最小 credential provider（無 daemon、無 socket），
+  用於切割「我們的程式碼 vs 環境/簽章」問題，留作日後回歸工具。

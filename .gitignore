@@ -10,3 +10,4 @@ spike/**/target/
 *.sqlite-wal
 *.sqlite-shm
 dev/e2e/demo/
+keys/

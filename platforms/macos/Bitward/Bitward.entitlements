@@ -9,7 +9,7 @@
 	<true/>
 	<key>com.apple.security.application-groups</key>
 	<array>
-		<string>group.io.bitward.dev</string>
+		<string>group.8V5224A99M.io.bitward.dev</string>
 	</array>
 </dict>
 </plist>

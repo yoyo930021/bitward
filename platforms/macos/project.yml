@@ -11,9 +11,9 @@ settings:
     SWIFT_VERSION: "5"
     # 正常簽章鏈（P5 真機驗證）：免費 Apple Development 身分即可承載受限 entitlement。
     # ad-hoc 教訓保留在 FINDINGS.md：無 Team ID 時 XCBuild 索求 profile、launchd INIT 163。
-    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_STYLE: Manual
     CODE_SIGN_IDENTITY: "Apple Development"
-    DEVELOPMENT_TEAM: 7Z94595PW7
+    DEVELOPMENT_TEAM: 8V5224A99M
     MACOSX_DEPLOYMENT_TARGET: "14.0"
     GENERATE_INFOPLIST_FILE: NO
 targets:
@@ -29,6 +29,7 @@ targets:
         PRODUCT_NAME: Bitward
         INFOPLIST_FILE: Bitward/Info.plist
         CODE_SIGN_ENTITLEMENTS: Bitward/Bitward.entitlements
+        PROVISIONING_PROFILE_SPECIFIER: Bitward Mac Dev
     dependencies:
       - target: BitwardProvider
   BitwardProvider:
@@ -43,6 +44,7 @@ targets:
         PRODUCT_NAME: BitwardProvider
         INFOPLIST_FILE: BitwardProvider/Info.plist
         CODE_SIGN_ENTITLEMENTS: BitwardProvider/BitwardProvider.entitlements
+        PROVISIONING_PROFILE_SPECIFIER: BitwardProvider Mac Dev
 schemes:
   Bitward:
     build:

@@ -1,0 +1,423 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		9410515E4914D2392423079A /* ProbeProvider.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 61B7E7B5F7CD10F061EB54AE /* ProbeProvider.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		A22011467EA71DAAEF8432FB /* ProbeVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C030C9D6C6AA2CEDE8938FB /* ProbeVC.swift */; };
+		FDE111D466287D46B5AB5662 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64DDE684B99547594A385F22 /* main.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		CC96A52C3AE007D901BCC2C2 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 587D90692CD26D0EA2FE6ACC /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 7DF44D0CB1E008A27A14A97C;
+			remoteInfo = ProbeProvider;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		690A593D85942761FABB6B73 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				9410515E4914D2392423079A /* ProbeProvider.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		1C030C9D6C6AA2CEDE8938FB /* ProbeVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProbeVC.swift; sourceTree = "<group>"; };
+		21EA4EB5051DD15B95CE8D66 /* Probe.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Probe.entitlements; sourceTree = "<group>"; };
+		33A320A44DB6B5AEE26CCB95 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		61B7E7B5F7CD10F061EB54AE /* ProbeProvider.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ProbeProvider.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		64DDE684B99547594A385F22 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		670DC86C0DB18949CDB87DC1 /* Probe.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Probe.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		8924BF42EB6CA512FD5D66E8 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		08834D6250AE7E98157EF8EC /* ProbeApp */ = {
+			isa = PBXGroup;
+			children = (
+				8924BF42EB6CA512FD5D66E8 /* Info.plist */,
+				64DDE684B99547594A385F22 /* main.swift */,
+			);
+			path = ProbeApp;
+			sourceTree = "<group>";
+		};
+		1ACCD3A56B4BF8334F3423E1 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				670DC86C0DB18949CDB87DC1 /* Probe.app */,
+				61B7E7B5F7CD10F061EB54AE /* ProbeProvider.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		22040A3A45D13372B2169E41 /* ProbeProvider */ = {
+			isa = PBXGroup;
+			children = (
+				33A320A44DB6B5AEE26CCB95 /* Info.plist */,
+				21EA4EB5051DD15B95CE8D66 /* Probe.entitlements */,
+				1C030C9D6C6AA2CEDE8938FB /* ProbeVC.swift */,
+			);
+			path = ProbeProvider;
+			sourceTree = "<group>";
+		};
+		A6BDC90C598E12E8EFC5D4D8 = {
+			isa = PBXGroup;
+			children = (
+				08834D6250AE7E98157EF8EC /* ProbeApp */,
+				22040A3A45D13372B2169E41 /* ProbeProvider */,
+				1ACCD3A56B4BF8334F3423E1 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		78DE96411CD202404D0EB238 /* Probe */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 994AE47A9D06B34933CCECDF /* Build configuration list for PBXNativeTarget "Probe" */;
+			buildPhases = (
+				12038353AE89A7B6471BFFB5 /* Sources */,
+				690A593D85942761FABB6B73 /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				656FD9562C5395F9A750757B /* PBXTargetDependency */,
+			);
+			name = Probe;
+			packageProductDependencies = (
+			);
+			productName = Probe;
+			productReference = 670DC86C0DB18949CDB87DC1 /* Probe.app */;
+			productType = "com.apple.product-type.application";
+		};
+		7DF44D0CB1E008A27A14A97C /* ProbeProvider */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F28FC434A25785B34CC8B370 /* Build configuration list for PBXNativeTarget "ProbeProvider" */;
+			buildPhases = (
+				D82D6E62D0CCA5B817F289C2 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ProbeProvider;
+			packageProductDependencies = (
+			);
+			productName = ProbeProvider;
+			productReference = 61B7E7B5F7CD10F061EB54AE /* ProbeProvider.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		587D90692CD26D0EA2FE6ACC /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					78DE96411CD202404D0EB238 = {
+						DevelopmentTeam = 8V5224A99M;
+						ProvisioningStyle = Manual;
+					};
+					7DF44D0CB1E008A27A14A97C = {
+						DevelopmentTeam = 8V5224A99M;
+						ProvisioningStyle = Manual;
+					};
+				};
+			};
+			buildConfigurationList = CF443E36A5351D254050E971 /* Build configuration list for PBXProject "Probe" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = A6BDC90C598E12E8EFC5D4D8;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 1ACCD3A56B4BF8334F3423E1 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				78DE96411CD202404D0EB238 /* Probe */,
+				7DF44D0CB1E008A27A14A97C /* ProbeProvider */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		12038353AE89A7B6471BFFB5 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FDE111D466287D46B5AB5662 /* main.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D82D6E62D0CCA5B817F289C2 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A22011467EA71DAAEF8432FB /* ProbeVC.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		656FD9562C5395F9A750757B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 7DF44D0CB1E008A27A14A97C /* ProbeProvider */;
+			targetProxy = CC96A52C3AE007D901BCC2C2 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		1D1191811D4B336264DFADA6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = ProbeProvider/Probe.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = ProbeProvider/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.bitward.probe.provider;
+				PRODUCT_NAME = ProbeProvider;
+				PROVISIONING_PROFILE_SPECIFIER = "Probe Mac Dev";
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		1FC4CBA9787F45EC026A86EB /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = ProbeApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.bitward.probe;
+				PRODUCT_NAME = Probe;
+				PROVISIONING_PROFILE_SPECIFIER = "ProbeApp Mac Dev";
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		7B27C290F387B2DD52A77DC0 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Manual;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = 8V5224A99M;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5;
+			};
+			name = Debug;
+		};
+		B3ADA2309A2481A6D5D24A7D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Manual;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 8V5224A99M;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5;
+			};
+			name = Release;
+		};
+		DE27B5AC6F3D168C5D0FE216 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = ProbeProvider/Probe.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = ProbeProvider/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.bitward.probe.provider;
+				PRODUCT_NAME = ProbeProvider;
+				PROVISIONING_PROFILE_SPECIFIER = "Probe Mac Dev";
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		EB2BA8CAEC40E01A3787EA3D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = ProbeApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.bitward.probe;
+				PRODUCT_NAME = Probe;
+				PROVISIONING_PROFILE_SPECIFIER = "ProbeApp Mac Dev";
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		994AE47A9D06B34933CCECDF /* Build configuration list for PBXNativeTarget "Probe" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				EB2BA8CAEC40E01A3787EA3D /* Debug */,
+				1FC4CBA9787F45EC026A86EB /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		CF443E36A5351D254050E971 /* Build configuration list for PBXProject "Probe" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7B27C290F387B2DD52A77DC0 /* Debug */,
+				B3ADA2309A2481A6D5D24A7D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		F28FC434A25785B34CC8B370 /* Build configuration list for PBXNativeTarget "ProbeProvider" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DE27B5AC6F3D168C5D0FE216 /* Debug */,
+				1D1191811D4B336264DFADA6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 587D90692CD26D0EA2FE6ACC /* Project object */;
+}

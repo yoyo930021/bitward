@@ -20,6 +20,14 @@ struct BTPCandidate {
     let password: String?
 }
 
+/// Vault List 的 Metadata 視圖：互動清單只用這層，密碼要再 Reveal。
+struct BTPListItem {
+    let id: String
+    let name: String
+    /// metadata 分級表不含 username（屬 Secret），清單以首個 uri 呈現歸屬。
+    let detail: String
+}
+
 final class BTPClient {
     /// 幀上限與 bw-btp 的 MAX_FRAME 對齊：解碼前擋住，不是解碼後。
     private static let maxFrame: UInt32 = 1024 * 1024
@@ -78,32 +86,43 @@ final class BTPClient {
 
     deinit { close(fd) }
 
-    /// 凍結流：Hello(Enroll) → Welcome → Invoke Vault List(Metadata by uri) → Reply，
-    /// 再以 Get(Reveal) 取首筆的實際密碼；Reveal 需批准時 daemon 回 NeedsApproval → needsInteraction。
-    func autofill(uri: String) throws -> BTPCandidate {
+    private var enrolled = false
+
+    /// Hello(Enroll) → Welcome；同一連線內冪等（重複呼叫只發一次）。
+    private func ensureEnrolled() throws {
+        guard !enrolled else { return }
         try sendJSON(["Hello": [
             "version": 1,
             "auth": ["Enroll": ["pairing": BitwardGroup.pairingUUID(), "display_name": "provider"]],
             "wants": [Any](),
         ]])
-        let welcome = try readFrames(until: { $0["Welcome"] != nil })
-        _ = welcome
+        _ = try readFrames(until: { $0["Welcome"] != nil })
+        enrolled = true
+    }
 
+    /// Vault List(Metadata)：清單頁用，不觸碰密碼。
+    func list(uri: String, limit: Int = 25) throws -> [BTPListItem] {
+        try ensureEnrolled()
         // Query 欄位無 serde default：JSON 必須帶齊七鍵（對齊 bw-proto 的 struct 形態）。
         let query: [String: Any] = [
             "text": NSNull(), "tag": NSNull(), "uri": uri, "value": NSNull(),
-            "kind": NSNull(), "sort": "Name", "limit": 5,
+            "kind": NSNull(), "sort": "Name", "limit": limit,
         ]
         try sendJSON(["Invoke": ["rid": 1, "call": ["Vault": ["List": ["query": query, "view": "Metadata"]]]]])
         let reply = try readFrames(until: { frame in
             guard let invoke = frame["Reply"] as? [String: Any], let rid = invoke["rid"] as? Int else { return false }
             return rid == 1
         })
-        let items = try items(fromReply: reply)
-        guard let first = items.first, let id = (first["meta"] as? [String: Any])?["id"] as? String else {
-            throw BTPError.noCredentials
+        return try items(fromReply: reply).compactMap { item in
+            guard let meta = item["meta"] as? [String: Any], let id = meta["id"] as? String else { return nil }
+            let uris = (meta["uris"] as? [String]) ?? []
+            return BTPListItem(id: id, name: meta["name"] as? String ?? id, detail: uris.first ?? "")
         }
+    }
 
+    /// Get(Reveal)：只有使用者選取後才取實際密碼；需批准時 daemon 回 NeedsApproval → needsInteraction。
+    func reveal(id: String) throws -> BTPCandidate {
+        try ensureEnrolled()
         try sendJSON(["Invoke": ["rid": 2, "call": ["Vault": ["Get": ["id": id, "view": "Reveal"]]]]])
         let reveal = try readFrames(until: { frame in
             guard let invoke = frame["Reply"] as? [String: Any], let rid = invoke["rid"] as? Int else { return false }
@@ -115,6 +134,13 @@ final class BTPClient {
             throw BTPError.protocolError("Reveal view missing password key")
         }
         return BTPCandidate(id: id, username: item["username"] as? String, password: password)
+    }
+
+    /// 凍結流：Hello(Enroll) → List(Metadata by uri) → 取首筆 → Get(Reveal)。
+    func autofill(uri: String) throws -> BTPCandidate {
+        let items = try list(uri: uri, limit: 5)
+        guard let first = items.first else { throw BTPError.noCredentials }
+        return try reveal(id: first.id)
     }
 
     // MARK: - 幀處理

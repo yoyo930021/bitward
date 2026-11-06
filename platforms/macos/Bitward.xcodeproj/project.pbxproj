@@ -159,12 +159,12 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					6DD3C5585C1F077AEFCFB47B = {
-						DevelopmentTeam = 7Z94595PW7;
-						ProvisioningStyle = Automatic;
+						DevelopmentTeam = 8V5224A99M;
+						ProvisioningStyle = Manual;
 					};
 					7C4C439A9D12C2B6A276BB1C = {
-						DevelopmentTeam = 7Z94595PW7;
-						ProvisioningStyle = Automatic;
+						DevelopmentTeam = 8V5224A99M;
+						ProvisioningStyle = Manual;
 					};
 				};
 			};
@@ -233,6 +233,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = io.bitward.dev;
 				PRODUCT_NAME = Bitward;
+				PROVISIONING_PROFILE_SPECIFIER = "Bitward Mac Dev";
 				SDKROOT = macosx;
 			};
 			name = Release;
@@ -250,6 +251,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = io.bitward.dev.provider;
 				PRODUCT_NAME = BitwardProvider;
+				PROVISIONING_PROFILE_SPECIFIER = "BitwardProvider Mac Dev";
 				SDKROOT = macosx;
 			};
 			name = Debug;
@@ -267,6 +269,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = io.bitward.dev.provider;
 				PRODUCT_NAME = BitwardProvider;
+				PROVISIONING_PROFILE_SPECIFIER = "BitwardProvider Mac Dev";
 				SDKROOT = macosx;
 			};
 			name = Release;
@@ -305,10 +308,10 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_STYLE = Manual;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = 7Z94595PW7;
+				DEVELOPMENT_TEAM = 8V5224A99M;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
@@ -365,10 +368,10 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_STYLE = Manual;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = 7Z94595PW7;
+				DEVELOPMENT_TEAM = 8V5224A99M;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
@@ -411,6 +414,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = io.bitward.dev;
 				PRODUCT_NAME = Bitward;
+				PROVISIONING_PROFILE_SPECIFIER = "Bitward Mac Dev";
 				SDKROOT = macosx;
 			};
 			name = Debug;
