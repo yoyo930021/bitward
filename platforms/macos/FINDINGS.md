@@ -210,6 +210,14 @@ DER/hash 直簽修復生效）。本輪新增的實測坑：
     EPERM 確係 plist 形態錯（$__AppDir__ 無 BundleProgram），形態修正後錯誤
     轉到 BTM 層。殘餘假說：**ditto 直拷的 bundle 未走正式安裝生命週期，
     BTM 登記可能要重登入/正式安裝**。**未結案，開為 P5' 常駐專項**。
+  - **2026-11-07 實驗結果（重登入已執行）**：Label 不合規（`io.bitward.daemon`
+    非 bundle-ID 前綴）是 EINVAL 的** proximate 原因**，改 `io.bitward.dev.daemon`
+    後 register 成功、狀態頁現「已啟用」。但**重登入後 BTM record 消失**
+    （smd: -95 record not found）、job 未載入、註冊未持久——「重登入即癒」
+    **否證**，收斂到「非正式安裝（ditto/無公證）不被 BTM 生命週期接受」，
+    解藥＝Developer ID 公證＋正式安裝流程，屬上架批次（P4' 簽章公證）。
+    **G2 常駐案就此收案**：本機 ad-hoc/ditto 組建下，daemon 存活依賴手動/腳本
+    啟動；legacy `--service install` 同牆（未再測，同一 BTM 閘門）。
   · mainAgent(url:) 非真 API（編譯期即糾）。
 - **bind_sock 單實例守衛**：flock(.lock 檔，先於 unlink) → unlink 屍体（錯誤不吞，
   只饒 NotFound）→ mkdir -p + 0700 → bind。教訓：無守衛時前台測試實例把 launchd
