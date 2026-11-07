@@ -17,7 +17,7 @@ import javax.crypto.KeyGenerator
  *
  * 已進 APK（`android-shell/`）。本批先通「Class 3 生成路徑」（驗收 A10：
  * [`BitwardAutofillService`] 被綁定時跑 [`ensureClass3ProbeKey`]，logcat 回顯
- * alias）；wrap/unwrap 接 Rust 側 `UnlockMachine` 是 P4b 第二批。
+ * alias）；wrap/unwrap 接 Rust 側 `UnlockMachine` 是下一批（P4b 第三批）。
  */
 class BitwardKeyStore(private val keyAlias: String = "bitward-user-key-wrap") {
 
@@ -77,7 +77,7 @@ class BitwardKeyStore(private val keyAlias: String = "bitward-user-key-wrap") {
 
     fun wrappedKeyExists(): Boolean = ks.containsAlias(keyAlias)
 
-    // TODO(P4b 第二批): wrap(userKeyBytes): ByteArray（存 account.json 旁路）、
+    // TODO(P4b 第三批): wrap(userKeyBytes): ByteArray（存 account.json 旁路）、
     // unwrap(sealed): Zeroizing<ByteArray>（交回 Rust 側的 UnlockMachine）。
     // 明文經 FFI 的紀律：只回 byte[]，不讓它變成 Kotlin String（契約 §2.7 規則 1）。
 
