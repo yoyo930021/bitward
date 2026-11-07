@@ -213,6 +213,13 @@ pub enum AuthCall {
         code: String,
     },
     WhoAmI,
+    /// 改主密碼（需解鎖態）。置尾紀律：postcard 變體索引只追加。
+    /// None ＝ daemon 端向人收（同 Login 語意）；Some 只允許經加密本機通道，
+    /// 明文密碼不得進 argv（A11）。
+    ChangePassword {
+        current: Option<String>,
+        new: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -971,6 +978,40 @@ mod tests {
             Response::Json(v) => assert_eq!(v.as_array().map(Vec::len), Some(1)),
             other => panic!("expect Json, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn change_password_call_roundtrip_json_and_postcard() {
+        for call in [
+            AuthCall::ChangePassword {
+                current: Some("舊鐵哥-1234".into()),
+                new: Some("新鐵哥-5678".into()),
+            },
+            // None＝daemon 端向人收（同 Login 語意）：變體必須可過線
+            AuthCall::ChangePassword {
+                current: None,
+                new: None,
+            },
+        ] {
+            let msg = ClientMsg::Invoke {
+                rid: 12,
+                call: Call::Auth(call),
+            };
+            let j = serde_json::to_vec(&msg).unwrap();
+            assert_eq!(serde_json::from_slice::<ClientMsg>(&j).unwrap().rid(), 12);
+            let b = postcard::to_allocvec(&msg).unwrap();
+            assert_eq!(postcard::from_bytes::<ClientMsg>(&b).unwrap().rid(), 12);
+        }
+        // 置尾紀律：WhoAmI（舊末位）索引不動，ChangePassword 在其後
+        let idx = |c: &AuthCall| postcard::to_allocvec(c).unwrap()[0];
+        assert_eq!(
+            idx(&AuthCall::WhoAmI),
+            idx(&serde_json::from_str::<AuthCall>(r#""WhoAmI""#).unwrap())
+        );
+        assert!(idx(&AuthCall::ChangePassword {
+            current: None,
+            new: None
+        }) > idx(&AuthCall::WhoAmI));
     }
 
     #[test]

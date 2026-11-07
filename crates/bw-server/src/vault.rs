@@ -171,6 +171,37 @@ impl Client {
         self.post_json("ciphers", body).await
     }
 
+    /// `POST /accounts/password`：改主密碼（Vaultwarden 1.37.2 `ChangePassData`
+    /// 實錄：`{masterPasswordHash, newMasterPasswordHash, masterPasswordHint, key}`，
+    /// 無 kdf 欄位——KDF 變動走 `POST /accounts/kdf`）。
+    /// 語意以伺服器原始碼為準（https://github.com/dani-garcia/vaultwarden/blob/1.37.2/src/api/core/accounts.rs#L597-L640 ）：
+    /// - `masterPasswordHash`＝**舊**密碼的 ServerAuthorization hash（伺服器先比對，錯→400 "Invalid password"）
+    /// - `newMasterPasswordHash`＝**新**密碼的 ServerAuthorization hash（落庫）
+    /// - `key`＝以新 stretched master key 重包的 **user key**（`2.` 信封，寫進 `user.akey`；
+    ///   不是 RSA 私鑰信封——私鑰仍以未輪換的 user key 保護，改密不動）
+    ///
+    /// 成功會 reset security stamp **並輪換全部 refresh token**
+    /// （`User::reset_security_stamp` → `Device::rotate_refresh_tokens_by_user`）：
+    /// 舊 access token 除例外路由外全數 401、`refresh()` 也失效，
+    /// 呼叫端必須以新密碼重打 password grant 換新 token。
+    pub async fn change_password(
+        &self,
+        old_master_password_hash: &str,
+        new_master_password_hash: &str,
+        new_wrapped_user_key: &str,
+    ) -> Result<Value, ServerError> {
+        self.post_json(
+            "accounts/password",
+            &json!({
+                "masterPasswordHash": old_master_password_hash,
+                "newMasterPasswordHash": new_master_password_hash,
+                "key": new_wrapped_user_key,
+                "masterPasswordHint": null,
+            }),
+        )
+        .await
+    }
+
     /// `PUT /ciphers/{id}`：整筆覆寫（body 由 raw + diff 合成）。
     pub async fn cipher_put(&self, id: ItemId, body: &Value) -> Result<Value, ServerError> {
         self.put_json(&format!("ciphers/{id}"), body).await

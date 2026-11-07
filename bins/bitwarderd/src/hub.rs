@@ -95,6 +95,10 @@ fn drift(detail: impl std::fmt::Display) -> WtpError {
     }
 }
 
+/// 主密碼強度閘（契約 2c：與註冊閘值一致；dev-register/VW 無本地閘，
+/// 此常数是本專案的唯一真相源，daemon 拒短碼、CLI/GUI 前置提示同值）。
+const MIN_MASTER_PASSWORD: usize = 12;
+
 impl Hub {
     pub async fn open(
         data_dir: &Path,
@@ -368,6 +372,13 @@ impl Hub {
                     server: a.server.clone(),
                 })))
             }
+            Call::Auth(AuthCall::ChangePassword {
+                current: Some(cur),
+                new: Some(nw),
+            }) => self.change_password(cur, nw).await,
+            Call::Auth(AuthCall::ChangePassword { .. }) => Err(denied(
+                "P1: daemon 端收密码未実装；請由 CLI/GUI 經本機通道傳入",
+            )),
             Call::Vault(VaultCall::List { query, view }) => {
                 if *view > View::Metadata && !self.machine.is_unlocked() {
                     return Err(WtpError::Locked);
@@ -596,6 +607,165 @@ impl Hub {
         self.server.write().await.replace(ServerHandle { client });
         self.sync_now().await?;
         Ok(Response::Status(self.status_info().await))
+    }
+
+    /// 改主密碼（切片 A 契約 2）。順序即收斂策略：
+    ///
+    /// 1. 解鎖態閘（改密要拿 user key 驗私鑰鏈）；強度閘 12 字（契約 2c）。
+    /// 2. 驗 current：本地信封比對是快速通道，最終裁判是伺服器
+    ///    （`POST /accounts/password` 先比對舊 hash，400＝密碼錯；殘留死
+    ///    token 401 時以 password grant 重登入代替裁決）。
+    /// 3. 先遠端成功再落地：POST 失敗＝本地零變更（契約 2e）。
+    /// 4. 成功後 VW reset security stamp 並輪換全部 refresh token：必須以
+    ///    新密碼完整重登入換新 token（`refresh()` 此時已死），伺服器回顯
+    ///    akey == 新信封才落地 account.json 與 AuthContext。
+    ///
+    /// 冪等語意：current == new 為 no-op（OK，不碰遠端、不踢其他裝置）；
+    /// 崩潰後重跑（current 帶新密碼）經步驟 2 的伺服器裁判收斂。
+    /// 金鑰模型注記：user key 不輪換（VW 的 `key` 欄位直接寫進 `user.akey`），
+    /// 故 FileKeyStore 封存內容（user key 位元組）不變、無需重封；
+    /// 真正輪換 user key 是 rotate-user-account-keys 的範圍（本切片外）。
+    async fn change_password(&self, current: &str, new: &str) -> DispatchResult {
+        if !self.machine.is_unlocked() {
+            return Err(denied("改主密碼需要解鎖態（舊 user key 要驗證金鑰鏈）"));
+        }
+        let Some(mut acc) = self.account.read().await.clone() else {
+            return Err(WtpError::NotFound);
+        };
+        if new.chars().count() < MIN_MASTER_PASSWORD {
+            return Err(denied(format!(
+                "新主密碼太短（至少 {MIN_MASTER_PASSWORD} 字元）"
+            )));
+        }
+        if current == new {
+            return Ok(Response::Ok);
+        }
+        let kdf = kdf_params(&acc);
+        let mk_old = bw_crypto::master_key(current, &acc.email, kdf)
+            .map_err(|_| denied("現有密碼不正確"))?;
+        let hash_old = bw_crypto::master_password_hash(&mk_old, current)
+            .as_b64()
+            .to_owned();
+        // 私鑰鏈硬閘（契約 2b）：解封態 KeyBundle 的 user key 必須解得開
+        // 封存私鑰信封，否則本地金鑰鏈已斷，改密只會把斷鏈帶進新信封。
+        let chain_ok = self
+            .machine
+            .with_keys(|kb| match kb.encrypted_private_key() {
+                Some(enc) => bw_crypto::decrypt_private_key(kb.user_key(), enc).is_ok(),
+                None => true,
+            })
+            .unwrap_or(false);
+        if !chain_ok {
+            return Err(denied("金鑰鏈不完整（封存私鑰解不開），請先鎖庫以現有密碼重新解鎖"));
+        }
+        // 驗 current：先本地（舊 master key 解 protected user key 信封並與
+        // 解封態金鑰包一致）；本地不過**不直接拒**——信封可能過期（上次改密
+        // VW 已成功、落地前崩潰），正確與否由伺服器在 POST 裡裁判。
+        let local_ok =
+            bw_crypto::decrypt_user_key(&bw_crypto::stretch(&mk_old), &acc.protected_user_key)
+                .map(|uk| {
+                    self.machine
+                        .with_keys(|kb| kb.user_key().as_bytes() == uk.as_bytes())
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
+        let server = self.server.read().await;
+        let h = server.as_ref().ok_or(WtpError::NotFound)?;
+        let mk_new = bw_crypto::master_key(new, &acc.email, kdf)
+            .map_err(|_| denied("新密碼無法派生金鑰"))?;
+        let hash_new = bw_crypto::master_password_hash(&mk_new, new)
+            .as_b64()
+            .to_owned();
+        let wrapped_new = self
+            .machine
+            .with_keys(|kb| bw_crypto::encrypt_user_key(&mk_new, kb.user_key()))
+            .map_err(|_| denied("vault 未解鎖"))?
+            .map_err(denied)?;
+        let post = h
+            .client
+            .change_password(&hash_old, &hash_new, &wrapped_new)
+            .await;
+        // 401＝崩潰遺留的死 token（上次成功已 reset stamp）：以 current 重打
+        // password grant 換新 token——這一步就是伺服器對 current 的裁判，
+        // 拒絕（invalid_grant）即現有密碼不正確。
+        let post = match post {
+            Err(ServerError::Http { status: 401, .. }) => {
+                h.client
+                    .password_login(&PasswordLogin::new(
+                        &acc.email,
+                        hash_old.clone(),
+                        self.device.clone(),
+                    ))
+                    .await
+                    .map_err(|e| match e {
+                        ServerError::Http { status: 400, .. }
+                        | ServerError::Rejected(_) => {
+                            denied("現有密碼不正確（伺服器拒絕重登入）")
+                        }
+                        other => map_server_err(other),
+                    })?;
+                h.client
+                    .change_password(&hash_old, &hash_new, &wrapped_new)
+                    .await
+            }
+            other => other,
+        };
+        if !local_ok {
+            // 本地已判不了，伺服器的 400 原文就是最終答案。
+            post.map_err(|e| match e {
+                ServerError::Http { status: 400, detail } => {
+                    denied(format!("現有密碼不正確（伺服器拒絕：{detail}）"))
+                }
+                other => map_server_err(other),
+            })?;
+        } else {
+            post.map_err(map_server_err)?;
+        }
+        // 遠端已改：VW 把 security stamp reset 且**輪換了全部 refresh token**
+        // （`reset_security_stamp` → `rotate_refresh_tokens_by_user`），`refresh()`
+        // 已不可用——以新密碼完整重登入換新 token，並順帶收伺服器回顯的
+        // 新信封做收斂證據。中途崩潰重跑同一指令收斂（見函數註解）。
+        let bundle = h
+            .client
+            .password_login(&PasswordLogin::new(
+                &acc.email,
+                hash_new.clone(),
+                self.device.clone(),
+            ))
+            .await
+            .map_err(|e| drift(format!(
+                "遠端密碼已改，但新密碼重登入失敗（{e}）；請以新密碼重跑 change-password 收斂"
+            )))?;
+        drop(server);
+        if bundle.keys.as_ref().and_then(|k| k.key.as_deref()) != Some(wrapped_new.as_str()) {
+            return Err(drift(
+                "遠端密碼已改，但 token 回顯的 akey 與新信封不符；請重跑 change-password 收斂",
+            ));
+        }
+        self.machine.set_auth_context(AuthContext {
+            email: acc.email.clone(),
+            kdf,
+            protected_user_key: wrapped_new.clone(),
+            keys_fingerprint: acc.keys_fingerprint.clone(),
+            enc_private_key: acc.enc_private_key.clone(),
+        });
+        // 新密碼 self-check：submit 在解鎖態仍驗證材料（AlreadyUnlocked 路徑）。
+        // 失败時遠端已改、本地未落地——回錯讓呼叫端重跑收斂，不硬落地。
+        self.machine
+            .submit(UnlockMaterial::MasterPassword(Zeroizing::new(
+                new.to_owned(),
+            )))
+            .map_err(|e| drift(format!(
+                "遠端密碼已改，但新密碼本地自查失敗（{e}）；請重跑 change-password 收斂"
+            )))?;
+        acc.protected_user_key = wrapped_new;
+        acc.access_token = Some(bundle.access_token.clone());
+        if let Some(r) = bundle.refresh_token.clone() {
+            acc.refresh_token = Some(r);
+        }
+        *self.account.write().await = Some(acc);
+        self.persist_account().await?;
+        Ok(Response::Ok)
     }
 
     pub async fn sync_now(&self) -> Result<(), WtpError> {
@@ -1053,6 +1223,7 @@ fn action_tag(c: &Call) -> String {
         Call::Auth(AuthCall::PairList) => "Auth.PairList",
         Call::Auth(AuthCall::PairRevoke { .. }) => "Auth.PairRevoke",
         Call::Auth(AuthCall::WhoAmI) => "Auth.WhoAmI",
+        Call::Auth(AuthCall::ChangePassword { .. }) => "Auth.ChangePassword",
         Call::Vault(VaultCall::List { view, .. }) => return format!("Vault.List.{view:?}"),
         Call::Vault(VaultCall::Get { view, .. }) => return format!("Vault.Get.{view:?}"),
         Call::Vault(VaultCall::Create { .. }) => "Vault.Create",
@@ -1203,6 +1374,48 @@ mod tests {
         assert!(m.starts_with("01234567…"), "前 8 字元保留：{m}");
         assert!(m.ends_with(&sha256_hex(token)[..12]), "尾段為 sha256 前 12 碼：{m}");
         assert!(!m.contains(token), "完整 token 不得外洩進清單出口");
+    }
+
+    #[tokio::test]
+    async fn change_password_requires_unlock_and_some_passwords() {
+        let hub = bare_hub().await;
+        let sess = hub.new_session(
+            "pw-test".into(),
+            SessionKind::Interactive,
+            bw_agent::GrantSet::default_full(),
+            None,
+            json!({"kind": "local"}),
+        );
+        // 未解鎖（bare hub＝SignedOut）：改密必須被閘下並帶原因（契約 2a）。
+        let err = hub
+            .dispatch(
+                &sess,
+                &Call::Auth(AuthCall::ChangePassword {
+                    current: Some("old-password-1".into()),
+                    new: Some("new-password-123".into()),
+                }),
+            )
+            .await
+            .unwrap_err();
+        let WtpError::Denied { grant_gap } = err else {
+            panic!("未解鎖改密應 Denied，got {err:?}");
+        };
+        assert!(grant_gap.contains("解鎖"), "原因需指向解鎖態：{grant_gap}");
+        // None＝daemon 端向人收（同 Login 語意）：P1 明示未接。
+        let err = hub
+            .dispatch(
+                &sess,
+                &Call::Auth(AuthCall::ChangePassword {
+                    current: None,
+                    new: None,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, WtpError::Denied { grant_gap } if grant_gap.contains("P1")),
+            "None 形態應回 P1 拒接，got {err:?}"
+        );
     }
 
     #[tokio::test]
