@@ -15,7 +15,7 @@ use nsh_core::element::Screen;
 use nsh_core::prelude::*;
 
 use crate::Phase;
-use crate::hub::{Hub, Revealed};
+use crate::hub::{Hub, Revealed, Snapshot};
 
 /// 編輯模態的目標：新增一筆，或編輯既有的某筆（預填走 `Hub::reveal`）。
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -223,10 +223,16 @@ pub fn vault_page(
                                     spawn(async move {
                                         match hub.sync_now().await {
                                             Ok(n) => {
-                                                if let Phase::Vault(mut s) = phase.get() {
-                                                    s.items = n;
-                                                    s.last_sync_ms = hub.now_ms();
-                                                    phase.set(Phase::Vault(s));
+                                                // Busy 蓋掉了快照（既有形態），完成後由帳號檔
+                                                // 重建 Snapshot——舊寫法在 Busy 態讀 phase 永遠
+                                                // 不匹配 Vault，界面卡死在「同步中」。
+                                                if let Some(a) = hub.account() {
+                                                    phase.set(Phase::Vault(Snapshot {
+                                                        email: a.email,
+                                                        server: a.server,
+                                                        items: n,
+                                                        last_sync_ms: hub.now_ms(),
+                                                    }));
                                                 }
                                             }
                                             Err(msg) => {
