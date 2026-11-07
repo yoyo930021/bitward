@@ -558,6 +558,32 @@ fn sessions_persist_and_cascade_revoke() {
 }
 
 #[test]
+fn push_tokens_put_list_remove_converge() {
+    let (_d, path) = tmp_vault("push");
+    let store = Store::open(&path).unwrap();
+    store.push_token_put("AAAA1111BBB", "ios").unwrap();
+    store.push_token_put("CCCC2222DDD", "watchos").unwrap();
+    // 重複註冊同 token：REPLACE 不加倍，platform 更新（app 每次啟動重報）
+    store.push_token_put("AAAA1111BBB", "ios-safari").unwrap();
+    let mut got = store.push_token_list().unwrap();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![
+            ("AAAA1111BBB".to_string(), "ios-safari".to_string()),
+            ("CCCC2222DDD".to_string(), "watchos".to_string()),
+        ]
+    );
+    // 410 清理路徑的 store 端收斂：移除後不在清單；重刪不存在 token 不报错
+    store.push_token_remove("AAAA1111BBB").unwrap();
+    store.push_token_remove("AAAA1111BBB").unwrap();
+    assert_eq!(
+        store.push_token_list().unwrap(),
+        vec![("CCCC2222DDD".to_string(), "watchos".to_string())]
+    );
+}
+
+#[test]
 fn schema_version_guard() {
     let (_d, path) = tmp_vault("version");
     let store = Store::open(&path).unwrap();

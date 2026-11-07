@@ -136,6 +136,10 @@ impl Store {
             // v3 的新表全在 V1（CREATE IF NOT EXISTS 冪等），此處留遷移掛鉤
             conn.execute_batch(schema::V3)?;
         }
+        if version < 4 {
+            // v4（push_tokens）同 v3 形態：表在 V1，此處留掛鉤
+            conn.execute_batch(schema::V4)?;
+        }
         if version < schema::SCHEMA_VERSION {
             conn.execute_batch(&format!(
                 "PRAGMA user_version = {};",

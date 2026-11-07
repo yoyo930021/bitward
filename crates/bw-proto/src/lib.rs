@@ -181,8 +181,10 @@ pub enum Call {
     Sync(SyncCall),
     Agent(AgentCall),
     Admin(AdminCall),
-    /// 置尾：postcard 變體索引追加（P2 主線是 postcard，插在中间會移位舊變體）
+    /// 置尾紀律：postcard 變體索引追加（P2 主線是 postcard，插在中间會移位舊變體）
     Passkey(PasskeyCall),
+    /// 置尾（同上紀律）：APNs 推播 token 管理（§1.2 推播路徑）
+    Push(PushCall),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -369,6 +371,21 @@ pub enum PasskeyCall {
         display_name: String,
         item_id: Option<ItemId>,
     },
+}
+
+/// APNs 推播 token 管理（§1.2 推播路徑正式分發形態）：iOS 端上報 device token，
+/// daemon 於 ntfy 同源時機把同一條不透明信令逐 token 副發。回應重用 Ok 與
+/// Json（陣列 of {"token","platform"}），不加 Response 變體——置尾紀律只約束
+/// 必要新增；Json 值限字串（postcard-safe，見 Audit 註解）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum PushCall {
+    /// `platform` 是用戶端來源標記（"ios"|"watchos"…），daemon 不解釋、原樣存。
+    /// 冪等：同 token 重複註冊覆蓋 platform/時刻（app 每次啟動都上報）。
+    RegisterPush { token: String, platform: String },
+    /// 卸載/退出時自撤；未知 token 回 Ok（收斂語意同 410 清理）。
+    UnregisterPush { token: String },
+    /// 註冊清單（Admin 級出口；token 去敏後回傳，見 daemon 分派）。
+    ListPush,
 }
 
 /// passkey 條目的 Metadata 級視圖：b64url 識別材料 + 公鑰，無密鑰。
@@ -918,6 +935,42 @@ mod tests {
         };
         let back = postcard::from_bytes::<Response>(&postcard::to_allocvec(&rb).unwrap()).unwrap();
         assert!(matches!(back, Response::RegisterBegin { .. }));
+    }
+
+    #[test]
+    fn push_calls_roundtrip_json_and_postcard() {
+        for call in [
+            PushCall::RegisterPush {
+                token: "A1B2C3D4E5F6".into(),
+                platform: "ios".into(),
+            },
+            PushCall::UnregisterPush {
+                token: "A1B2C3D4E5F6".into(),
+            },
+            PushCall::ListPush,
+        ] {
+            let msg = ClientMsg::Invoke {
+                rid: 11,
+                call: Call::Push(call),
+            };
+            let j = serde_json::to_vec(&msg).unwrap();
+            assert_eq!(serde_json::from_slice::<ClientMsg>(&j).unwrap().rid(), 11);
+            let b = postcard::to_allocvec(&msg).unwrap();
+            assert_eq!(postcard::from_bytes::<ClientMsg>(&b).unwrap().rid(), 11);
+        }
+        // ListPush 出口形態：Json 重用，值限字串（postcard-safe，見 Audit）。
+        // 紀律同 Audit：postcard 只保證編碼可發（Value 反序列化需 self-describing，
+        // 見 P1 線格式註解）；JSON 才是可回讀的往返。
+        let resp = Response::Json(serde_json::json!([
+            {"token": "a1b2c3d4…0123456789ab", "platform": "ios"}
+        ]));
+        assert!(postcard::to_allocvec(&resp).is_ok());
+        let j = serde_json::to_string(&resp).unwrap();
+        let back = serde_json::from_str::<Response>(&j).unwrap();
+        match back {
+            Response::Json(v) => assert_eq!(v.as_array().map(Vec::len), Some(1)),
+            other => panic!("expect Json, got {other:?}"),
+        }
     }
 
     #[test]

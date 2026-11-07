@@ -1,5 +1,5 @@
 /// schema 版本；每次加表/改表就 +1 並在本檔補一段遷移 SQL。
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// v1→v2：值搜尋明文索引欄。舊庫 ALTER；新庫 V1 已含，Duplicate column 容忍。
 pub const V2: &str = "ALTER TABLE meta_plain ADD COLUMN username_plain TEXT;
@@ -9,6 +9,9 @@ ALTER TABLE meta_plain ADD COLUMN password_plain TEXT;";
 /// V1 每次開庫都跑（CREATE IF NOT EXISTS 冪等），舊庫補表即經 V1 生效；
 /// 版本號提升只為 schema_version_guard 的可見性，無額外 SQL。
 pub const V3: &str = "";
+
+/// v3→v4（APNs 推播）：push_tokens 表在 V1，遷移形態同 V3。
+pub const V4: &str = "";
 
 /// v1：鏡像（密文原樣）+ 明文 metadata 索引（FTS5）+ overlay + outbox +
 /// audit（append-only hash 鏈）+ sessions + blobs 登記 + meta。
@@ -131,6 +134,12 @@ CREATE TABLE IF NOT EXISTS sessions(
   state      TEXT NOT NULL,   -- active|suspended|revoked
   created_at INTEGER NOT NULL,
   expires_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS push_tokens(
+  token         TEXT PRIMARY KEY,  -- APNs device token（不透明識別子）
+  platform      TEXT NOT NULL,     -- 用戶端來源標記，daemon 不解釋
+  registered_at INTEGER NOT NULL   -- unix ms；重複註冊 INSERT OR REPLACE 覆蓋
 );
 
 CREATE TABLE IF NOT EXISTS blobs(

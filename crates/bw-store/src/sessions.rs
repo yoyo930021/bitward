@@ -1,5 +1,6 @@
 //! agent session 持久層（§2.3）。治理語意在 bw-agent；這裡只管落盤與
 //! epoch 級聯（lock 之後整批標 revoked 的 store 端動作）。
+//! push token 帳（§1.2 推播）同屬「配對裝置的持久登記」，寄此模組。
 
 use serde::{Deserialize, Serialize};
 
@@ -113,6 +114,33 @@ impl Store {
             [now_ms as i64],
         )?;
         Ok(n as u32)
+    }
+
+    /// 推播 token 註冊（§1.2 APNs）：INSERT OR REPLACE——app 每次啟動重報同一
+    /// token 只更新 platform/時刻，收斂到「已註冊」穩定態（Make Operations Idempotent）。
+    pub fn push_token_put(&self, token: &str, platform: &str) -> StoreResult<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "INSERT OR REPLACE INTO push_tokens(token, platform, registered_at) VALUES(?1, ?2, ?3)",
+            rusqlite::params![token, platform, self.now_ms() as i64],
+        )?;
+        Ok(())
+    }
+
+    /// 移除 token：APNs 410（卸載）或用戶端主動 Unregister 都走這裡。
+    /// 不存在的 token 回 Ok（冪等：目標態是「不在表裡」）。
+    pub fn push_token_remove(&self, token: &str) -> StoreResult<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("DELETE FROM push_tokens WHERE token = ?1", [token])?;
+        Ok(())
+    }
+
+    /// 全部註冊 token（(token, platform)，按註冊時間升序）；副發與清單出口共用。
+    pub fn push_token_list(&self) -> StoreResult<Vec<(String, String)>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT token, platform FROM push_tokens ORDER BY registered_at")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }
 
