@@ -44,6 +44,8 @@ enum Cmd {
     },
     Unlock,
     Lock,
+    /// 改主密碼：stdin 依序讀入現有、新主密碼兩行（A11：密碼不進 argv）
+    ChangePassword,
     Status,
     Sync,
     Ls {
@@ -530,7 +532,14 @@ async fn run() -> Result<(), String> {
     };
     match reply {
         Ok(resp) => {
-            print_response(&resp, args.json);
+            if matches!(args.cmd, Cmd::ChangePassword)
+                && matches!(resp, Response::Ok)
+                && !args.json
+            {
+                println!("主密碼已變更");
+            } else {
+                print_response(&resp, args.json);
+            }
             Ok(())
         }
         Err(e) => Err(wtp_to_string(&e)),
@@ -748,6 +757,18 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
         }
         Cmd::Unlock => Call::Auth(AuthCall::Unlock { biometric: false }),
         Cmd::Lock => Call::Auth(AuthCall::Lock),
+        Cmd::ChangePassword => {
+            // 提示與警告走 stderr，stdout 留給結果行（機器可讀慣例）。
+            // 強度閘不在此重複實作——daemon（hub::MIN_MASTER_PASSWORD）是唯一
+            // 真相源，短碼由它拒絕、錯誤原文經 Reply 回程顯示。
+            eprintln!("請依序輸入現有主密碼、新主密碼（至少 12 字元）；注意：改密後其他裝置需重新登入");
+            let current = read_line_stdin()?;
+            let new = read_line_stdin()?;
+            Call::Auth(AuthCall::ChangePassword {
+                current: Some(current),
+                new: Some(new),
+            })
+        }
         Cmd::Status => Call::Admin(AdminCall::Diagnostics),
         Cmd::Sync => Call::Sync(SyncCall::Trigger { force: true }),
         Cmd::Ls {

@@ -81,6 +81,10 @@ pub enum Cmd {
     RequestUnlock,
     /// 僅 dev/驗證用：Auth:Lock（正式 UI 未列需求，解鎖鈕才是契約項目）。
     RequestLock,
+    /// 開/關「變更主密碼」模態；送出由 SubmitChangePassword 落地。
+    OpenChangePassword,
+    CloseChangePassword,
+    SubmitChangePassword,
     AskDelete(ItemId),
     AskExport,
     ConfirmYes,
@@ -118,6 +122,8 @@ pub enum Cmd {
         err: Option<String>,
         follow: Follow,
     },
+    /// 改密 worker 結果：None＝成功（模態關閉 + notice）；Some＝daemon/VW 錯誤原文。
+    ChangePasswordDone(Option<String>),
     ExportDone(Result<ExportOutcome, String>),
     Failed {
         err: String,
@@ -150,6 +156,47 @@ impl FormFields {
     }
 }
 
+/// 改主密碼模態的三欄（現有/新/確認）。明文只活在訊號與送出時的
+/// `Zeroizing` 副本（同 `FormFields.password` 紀律）；關閉模態即出棧。
+#[derive(Clone)]
+pub struct PwFields {
+    pub current: Signal<String>,
+    pub new: Signal<String>,
+    pub confirm: Signal<String>,
+    pub error: Signal<Option<String>>,
+}
+
+impl PwFields {
+    fn reset(&self) {
+        self.current.set(String::new());
+        self.new.set(String::new());
+        self.confirm.set(String::new());
+        self.error.set(None);
+    }
+}
+
+/// 新主密碼強度閘（與 daemon `hub::MIN_MASTER_PASSWORD` 同值；daemon 是
+/// 真相源，這裡只是送出前的前端攔截，省一次往返）。
+pub const MIN_MASTER_PASSWORD: usize = 12;
+
+/// 改密表單的前端校驗（繁中錯誤訊息）。比對全在純函數裡，reduce 只分派。
+pub fn validate_change_password(
+    current: &str,
+    new: &str,
+    confirm: &str,
+) -> Result<(), String> {
+    if current.is_empty() {
+        return Err("請輸入現有主密碼".into());
+    }
+    if new.chars().count() < MIN_MASTER_PASSWORD {
+        return Err(format!("新主密碼太短（至少 {MIN_MASTER_PASSWORD} 字元）"));
+    }
+    if new != confirm {
+        return Err("新密碼與兩次輸入不一致".into());
+    }
+    Ok(())
+}
+
 /// 根元件建立、以 `Copy` 訊號句柄向下傳播的應用核心。
 #[derive(Clone)]
 pub struct AppCore {
@@ -173,6 +220,9 @@ pub struct AppCore {
     pub totp: Signal<Option<String>>,
     pub confirm: Signal<Option<Arc<Confirm>>>,
     pub form: FormFields,
+    /// 改主密碼模態開關 + 三欄（true 時 App 掛 modal）。
+    pub pw_modal: Signal<bool>,
+    pub pw: PwFields,
 }
 
 impl AppCore {
@@ -199,6 +249,13 @@ impl AppCore {
             revealed: signal(None),
             totp: signal(None),
             confirm: signal_with(None, SignalEquals::Never),
+            pw_modal: signal(false),
+            pw: PwFields {
+                current: signal(String::new()),
+                new: signal(String::new()),
+                confirm: signal(String::new()),
+                error: signal(None),
+            },
             form: FormFields {
                 name: signal(String::new()),
                 username: signal(String::new()),
@@ -452,6 +509,53 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.error_text.set(None);
             if refetch {
                 fetch_list(core);
+            }
+        }
+        Cmd::OpenChangePassword => {
+            core.pw.reset();
+            core.pw_modal.set(true);
+        }
+        Cmd::CloseChangePassword => {
+            // 明文出棧：關閉即清零三欄（同 leave_detail 的生命週期紀律）。
+            core.pw.reset();
+            core.pw_modal.set(false);
+        }
+        Cmd::SubmitChangePassword => {
+            let current = core.pw.current.get();
+            let new = core.pw.new.get();
+            let confirm = core.pw.confirm.get();
+            if let Err(e) = validate_change_password(&current, &new, &confirm) {
+                core.pw.error.set(Some(e));
+                return;
+            }
+            core.pw.error.set(None);
+            core.ipc(move |s| {
+                // Zeroize 點：兩份明文以 `Zeroizing` 持有到序列化進 Outgoing
+                // 幀為止；錯誤原文（daemon/VW）原樣回給模態顯示。
+                let current = zeroize::Zeroizing::new(current);
+                let new = zeroize::Zeroizing::new(new);
+                let call = Call::Auth(AuthCall::ChangePassword {
+                    current: Some(current.to_string()),
+                    new: Some(new.to_string()),
+                });
+                match s.call(&call) {
+                    Ok(Response::Ok) => Cmd::ChangePasswordDone(None),
+                    Ok(other) => Cmd::ChangePasswordDone(Some(format!(
+                        "ChangePassword 回應形態不符：{other:?}"
+                    ))),
+                    Err(e) => Cmd::ChangePasswordDone(Some(e.display())),
+                }
+            });
+        }
+        Cmd::ChangePasswordDone(err) => {
+            core.settle();
+            match err {
+                Some(e) => core.pw.error.set(Some(e)),
+                None => {
+                    core.pw_modal.set(false);
+                    core.pw.reset();
+                    core.notice.set(Some("主密碼已變更".into()));
+                }
             }
         }
         Cmd::AskDelete(id) => {
@@ -791,6 +895,12 @@ pub fn can_unlock(st: &Option<UnlockStateView>) -> bool {
     )
 }
 
+/// 「變更主密碼」只在解鎖態開放（daemon 改密需舊 user key 驗金鑰鏈，
+/// 鎖定態送出必被閘下；前端直接把鈕藏掉比讓它报错誠實）。
+pub fn can_change_password(st: &Option<UnlockStateView>) -> bool {
+    matches!(st, Some(UnlockStateView::Unlocked { .. }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -817,6 +927,51 @@ mod tests {
     fn nonblank_trims_to_none() {
         assert_eq!(nonblank("  git "), Some("git".into()));
         assert_eq!(nonblank("   "), None);
+    }
+
+    #[test]
+    fn validate_change_password_gates_locally() {
+        // 空 current、太短 new、比對不一致各自擋下（錯誤是繁中文案）。
+        assert_eq!(
+            validate_change_password("", "new-password-123", "new-password-123").unwrap_err(),
+            "請輸入現有主密碼"
+        );
+        assert!(
+            validate_change_password("old", "短短短", "短短短")
+                .unwrap_err()
+                .contains("12")
+        );
+        assert_eq!(
+            validate_change_password("old-pass-word", "new-password-123", "other-password")
+                .unwrap_err(),
+            "新密碼與兩次輸入不一致"
+        );
+        // 12 字元閘以 chars 計（中文不炸成 bytes）
+        assert!(validate_change_password("old", "新密码-12345678", "新密码-12345678").is_ok());
+        assert!(
+            validate_change_password(
+                "old",
+                "一二三四五六七八九十一二",
+                "一二三四五六七八九十一二"
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_change_password("old", "一二三四五六七八九十", "一二三四五六七八九十")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn change_password_button_only_when_unlocked() {
+        assert!(can_change_password(&Some(UnlockStateView::Unlocked {
+            epoch: 1,
+            deadline_epoch_ms: None
+        })));
+        assert!(!can_change_password(&Some(UnlockStateView::AuthLocked {
+            items: 0
+        })));
+        assert!(!can_change_password(&None));
     }
 
     #[test]

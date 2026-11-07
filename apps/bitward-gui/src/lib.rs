@@ -113,6 +113,8 @@ pub fn App() -> impl IntoElement {
     let ready_build = core.clone();
     let modal_cond = core.clone();
     let modal_build = core.clone();
+    let pw_modal_cond = core.clone();
+    let pw_modal_build = core.clone();
     view()
         .flex_col()
         .flex_1()
@@ -139,6 +141,10 @@ pub fn App() -> impl IntoElement {
                 None => view().flex_1(),
             },
         ))
+        .child(when(
+            move || pw_modal_cond.pw_modal.get(),
+            move || ui::change_password_modal(pw_modal_build.clone()),
+        ))
 }
 
 /// 標題列：產品名、鎖態指示、解鎖鈕、忙碌指示、匯出提示、匯出/新增。
@@ -151,6 +157,8 @@ fn title_bar(core: AppCore) -> View {
     let notice_build = core.clone();
     let export_core = core.clone();
     let new_core = core.clone();
+    let pw_cond = core.clone();
+    let pw_build = core.clone();
     view()
         .flex_row()
         .items_center()
@@ -212,6 +220,15 @@ fn title_bar(core: AppCore) -> View {
         .child(ui::button("匯出", ui::Btn::Muted, move || {
             export_core.send(Cmd::AskExport)
         }))
+        .child(when(
+            move || state::can_change_password(&pw_cond.vault.get()),
+            move || {
+                let c = pw_build.clone();
+                ui::button("變更主密碼", ui::Btn::Muted, move || {
+                    c.send(Cmd::OpenChangePassword)
+                })
+            },
+        ))
         .child(ui::button("新增", ui::Btn::Primary, move || {
             new_core.send(Cmd::OpenCreate)
         }))

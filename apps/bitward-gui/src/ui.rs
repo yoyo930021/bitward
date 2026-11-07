@@ -191,6 +191,92 @@ pub fn confirm_modal(core: AppCore, confirm: &Confirm) -> View {
         )
 }
 
+/// 改主密碼模態：三欄 secure input（現有/新/確認）+ 繁中錯誤行 +
+/// 變更/取消。背板與點擊穿透語意同 confirm_modal。
+pub fn change_password_modal(core: AppCore) -> View {
+    let close = core.clone();
+    let close2 = core.clone();
+    let submit = core.clone();
+    let current = core.pw.current;
+    let new = core.pw.new;
+    let confirm = core.pw.confirm;
+    let err_core = core.clone();
+    view()
+        .absolute()
+        .inset(px(0.0))
+        .z_index(50)
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .bg(move || theme().background.opacity(0.55))
+        .on_press(move || close.send(crate::state::Cmd::CloseChangePassword))
+        .child(
+            view()
+                .w(px(420.0))
+                .flex_col()
+                .gap_4()
+                .p_5()
+                .rounded_xl()
+                .border(px(1.0))
+                .border_color(move || theme().border)
+                .bg(move || theme().popover)
+                // 卡內點擊不穿透到背板（背板 on_press 會誤關）。
+                .on_press(|| {})
+                .child(
+                    text("變更主密碼")
+                        .text_size(px(16.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(move || theme().popover_foreground),
+                )
+                .child(
+                    text("改密後其他裝置需重新登入；本機鏡像與金鑰鏈保持不變。")
+                        .text_size(px(12.5))
+                        .line_height(px(19.0))
+                        .text_color(move || theme().muted_foreground),
+                )
+                .child(form_field(
+                    "現有主密碼",
+                    "輸入目前的主密碼",
+                    current,
+                    true,
+                    move |v| current.set(v),
+                ))
+                .child(form_field(
+                    "新主密碼",
+                    "至少 12 字元",
+                    new,
+                    true,
+                    move |v| new.set(v),
+                ))
+                .child(form_field(
+                    "確認新密碼",
+                    "再輸入一次新主密碼",
+                    confirm,
+                    true,
+                    move |v| confirm.set(v),
+                ))
+                .child(
+                    text(move || err_core.pw.error.get().unwrap_or_default())
+                        .text_size(px(12.5))
+                        .line_height(px(18.0))
+                        .text_color(move || theme().destructive),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .justify_end()
+                        .gap_2()
+                        .child(button("取消", Btn::Muted, move || {
+                            close2.send(crate::state::Cmd::CloseChangePassword);
+                        }))
+                        .child(button("變更", Btn::Primary, move || {
+                            submit.send(crate::state::Cmd::SubmitChangePassword);
+                        })),
+                ),
+        )
+}
+
 /// 頁面標題列（詳情/表單共用的返回列）。
 pub fn page_header(title: String, on_back: impl Fn() + 'static) -> View {
     view()
