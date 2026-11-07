@@ -31,6 +31,12 @@ bw-proto = { path = "../../crates/bw-proto" }
 bw-crypto = { path = "../../crates/bw-crypto" }
 bw-server = { path = "../../crates/bw-server" }
 bw-store = { path = "../../crates/bw-store" }
+# 明文索引欄位路徑的單一真源（與 daemon reindex 共用，見 bw-vault::plain_index）
+bw-vault = { path = "../../crates/bw-vault" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# 孤島↔中樞的 JNI 橋（src/jni.rs ↔ android-shell NativeHub.kt）
+jni = "0.21"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nsh-platform-linux = { version = "0.3.0", default-features = false }

@@ -53,32 +53,47 @@ cd apps/bitward-android && android-shell/build.sh
 
 | 檔 | 角色 |
 |---|---|
-| `app/src/main/AndroidManifest.xml` | 孤島三 service＋复刻 nsh 的 application/activity 節 |
-| `app/src/main/kotlin/io/bitward/android/BitwardAutofillService.kt` | 填充服務＋`HubBridge` 程序內介面（3 個动作）＋`HubHolder` |
-| `app/src/main/kotlin/io/bitward/android/BitwardCredentialProviderService.kt` | API 34 `android.service.credentials.CredentialProviderService` 轉接 |
+| `app/src/main/AndroidManifest.xml` | 孤島三 service＋复刻 nsh 的 application/activity 節（application 加 `android:name=".BitwardApplication"`） |
+| `app/src/main/kotlin/io/bitward/android/BitwardApplication.kt` | 進程最早期把 `BITWARD_ANDROID_DATA` 指向 `noBackupFilesDir/bitward`（鏡像目錄缺陷修） |
+| `app/src/main/kotlin/io/bitward/android/BitwardAutofillService.kt` | 填充服務＋`HubBridge` 程序內介面（unlocked/candidates/reveal/save）＋`HubHolder.ensureBridge()` |
+| `app/src/main/kotlin/io/bitward/android/NativeHub.kt` | Rust 中樞的 JNI 面（`src/jni.rs` 符號）＋`HubBridge` 的 in-process 實作 |
+| `app/src/main/kotlin/io/bitward/android/BitwardCredentialProviderService.kt` | API 34 `android.service.credentials.CredentialProviderService` 轉接（骨架，bridge 已預留） |
 | `app/src/main/kotlin/io/bitward/android/BitwardKeyStore.kt` | Keystore Class 3（AES wrap 金鑰＋EC 探針，StrongBox 降級路） |
-| `app/src/main/kotlin/io/bitward/android/HubService.kt` | foreground service 保命＋註冊 `HubHolder.bridge`（第二批接） |
-| `app/src/main/res/` | app_name、「尚未解鎖」列版面 |
+| `app/src/main/kotlin/io/bitward/android/HubService.kt` | foreground service 保命（`startForeground` 尚未接，見下） |
+| `app/src/main/res/` | app_name、「尚未解鎖」列與真候選列版面（`autofill_locked.xml`／`autofill_dataset.xml`） |
 | `build.sh` | 上面整條組裝鏈 |
 
-## 孤島↔in-process 中樞的銜接（本批到此、第二批照做）
+本地 `android-35` stub jar 沒打包 `android.view.ViewHints`、
+`android.service.autofill.Presentation` 與 `addDataset(AutofillId, Dataset)`
+（缺件見實測編譯錯誤）：hint 字串寫成常數、候選列呈現改掛在 username 的
+`setValue(field, value, presentation)` 第三參上，語意不變。
 
-孤島與 `libnsh.so` **同程序**（service 不宣告 `android:process`）：系統因
-autofill 拉起進程時只跑 Kotlin（`HubHolder.bridge == null` → 快速失敗）；
-UI 起來後 `libnsh.so` 才載入。銜接方案：
+## 孤島↔in-process 中樞的銜接（2026-11-07 第二批：1–3 已落地）
 
-1. `AppActivity` 的 Rust 中樞就緒時經 JNI 回呼 Java 側，把實作放進
-   `HubHolder.bridge`（實作直接在 JNI 橋封 `Hub` 的候選/解封/save）；
-2. 金鑰只走 `byte[]`（契約 §2.7 規則 1），Kotlin 端不快取、不落地；
-3. 純 service 拉起（沒有 UI）時要開 Store：bw-store 是純 Rust SQLite，可在
-   service 執行緒直接 `nsh` 之外的第二入口載 `libnsh.so` 開 `vault.db`——
-   但**鏡像目錄**得先解決假設 7 的 data dir 缺口（外殼把 `filesDir` 傳進去）；
-4. 背景同步/UnifiedPush 走 `HubService.startForeground`（第二批，含通知權限）。
+孤島與 `libnsh.so` **同程序**（service 不宣告 `android:process`）。落地形態：
+
+1. bridge 裝載是**惰性**的：孤島第一次被系統叫醒（fill/save 請求）時
+   `HubHolder.ensureBridge()` 探 `NativeHub`——UI 已起（libnsh.so 在記憶體）
+   或 service 冷啟（`System.loadLibrary("nsh")` 拉同一顆 .so，Rust 側 `HUB`
+   的 LazyLock 直接開 Store）。不需要 AppActivity 主動回呼。
+2. 金鑰只走 Rust 側：本批 user key 從不過橋（Keystore 封存在下一批）；
+   過橋的只有 metadata 級候選與填充用明文欄位（Dataset 必需形态）。
+3. 純 service 拉起（沒有 UI）時開 Store 的前提＝資料目錄：由
+   `BitwardApplication` 把 `BITWARD_ANDROID_DATA` 指到
+   `noBackupFilesDir/bitward`（鏡像目錄缺陷修：cache 可被系統清、filesDir
+   會進 Auto Backup 把明文索引欄帶出裝置，noBackup 兩者皆免）。
+   但本批**未解鎖的冷啟 service 仍回鎖定態**——金鑰只活在已登入的 UI
+   進程記憶體，這是 Keystore 批之前刻意保留的邊界。
+4. 背景同步/UnifiedPush 走 `HubService.startForeground`（尚未接，含通知權限）。
+
+解鎖引導：鎖定態面板列「Bitward：尚未解鎖」，點它拉開 app 走登入；
+解鎖後的下一次 fill 請求就是真候選列（驗收 A11 走的就是這條路）。
 
 ## 接上去的紀律（別在 Kotlin 端破）
 
-1. **金鑰不進 Kotlin String**：`unwrap` 回 `byte[]`，立刻交回 Rust 側的
-   `UnlockMachine`；Kotlin 端不快取（契約 §2.7 規則 1）。
+1. **金鑰不進 Kotlin**：user key 留在 Rust 的 `UnlockMachine`／`Hub.unlocked`
+   （契約 §2.7 規則 1 的 `byte[]` 限制指的是金鑰；填充用的 username/password
+   明文是 Dataset 的必需形態，只活在單次 fill 回應的生命週期，不快取）。
 2. **孤島不做比對**：`candidatesFor` 只拿 metadata 級候選；分級、去重、
    衝突語意全在 Rust（`bw-vault`/`bw-store`）。
 3. **中樞不在就快速失敗**：`HubHolder.bridge == null` 時回空回應／錯誤，

@@ -136,6 +136,13 @@ nsh 0.3.0 的 Android host 把 Java 層的 `filesDir` 只放進 JS runtime 的
 正式解要嘛上游開一個 Rust 側 data dir API，要嘛 Kotlin 外殼自己傳 `filesDir` 進來
 （外殼已就位＝`android-shell/`，傳路徑的 JNI 通道列第二批）。
 
+**結局（2026-11-07 第二批）**：走外殼傳路徑，不碰 nsh 上游。`BitwardApplication`
+在任何進程入口前把 `BITWARD_ANDROID_DATA` 指向 `noBackupFilesDir/bitward`。
+選 noBackupFilesDir 而非 filesDir：`vault.db` 帶明文索引欄（name/uris/
+username/password），filesDir 會進 Auto Backup＝明文出裝置（破契約 §2.7 R3
+的「0600 不離裝置」承受前提）；noBackup 不被自動清、不進備份，鏡像真丟了
+重 sync 即癒。
+
 ### 假設 8：Kotlin 孤島能進 nsh 產的 APK — 不通（nsh 內）→ 由 Gradle 外殼解決（P4b 第二批，2026-11-07）
 
 `nsh package --help` 的 Android 旗標只有 `--name/--id/--app-version/--build/--icon/
@@ -192,10 +199,35 @@ nsh 管線（三 ABI 交叉編譯、NDK 注入、debug 簽章）全部照用。�
 
 - 導航：Android 可押原生 `nav_stack`（本輪已押，返回鍵＋`on_dismiss` 實測可用）。
 - 打包：in-process 核心零風險；**唯一**必要設定是純 cargo 路徑的 `CC_*`/`AR_*` 兩行。
-- 缺口兩項：(1) 純 Rust app 的 data dir API（否則鏡像放 cache）——仍在第二批前
-  拍板；(2) Kotlin 孤島進 APK 的管道——**已解**（Gradle 外殼 `android-shell/`，
-  見假設 8 結局與 A8–A10）。
-- 驗收入口：`dev/e2e/android-app.sh`（A1..A10：三 ABI＋孤島 dex 合併 APK、啟動到
+- 缺口兩項：(1) 純 Rust app 的 data dir API（否則鏡像放 cache）——**已解**
+  （外殼 `BitwardApplication` 傳 `BITWARD_ANDROID_DATA`＝noBackupFilesDir，
+  見假設 7 結局）；(2) Kotlin 孤島進 APK 的管道——**已解**（Gradle 外殼
+  `android-shell/`，見假設 8 結局與 A8–A10）。
+- 驗收入口：`dev/e2e/android-app.sh`（A1..A11：三 ABI＋孤島 dex 合併 APK、啟動到
   登入畫面、真實 UI 登入＋sync、搜尋、詳情遮罩→Reveal、返回清明文、鎖定＋預填、
-  系統列舉 autofill 服務、fill 請求送達＋面板截圖、Keystore Class 3 EC 生成），
-  截圖留 `apps/bitward-android/shots/`。
+  系統列舉 autofill 服務、fill 請求送達＋面板截圖、Keystore Class 3 EC 生成、
+  解鎖態真候選＋commit 回真 username），截圖留 `apps/bitward-android/shots/`。
+
+### P4b 第二批（2026-11-07）：autofill 真候選接線＋兩項缺陷收斂
+
+- **bridge 接線**：`HubHolder.ensureBridge()` 惰性裝載（fill/save 請求到了才
+  `System.loadLibrary("nsh")`＋探 `nshIsReady`），實作 `NativeHubBridge` 走
+  `src/jni.rs` 的四支符號（ready/unlocked/candidates/reveal）。Rust panic 擋在
+  邊界內（`catch_unwind`→回 null，Kotlin 視同空）。user key 不過橋；填充明文
+  只在單次 `onFillRequest` 生命週期。A11 實測：解鎖後面板列真項目、commit 後
+  欄位出現真 username（`dev/e2e/android-app.sh` 第 11 節）。
+- **鏡像目錄**：cache（TMPDIR）→ `noBackupFilesDir/bitward`，理由見假設 7 結局。
+  副作用：換目錄＝舊装机資料留在 cache（e2e 有 `pm clear`，正式機一次性重登）。
+- **reindex 雙份收斂**：Android `reindex_plain`、daemon `reindex_many` 與
+  `reveal` 的 40 行欄位提取改成共用 `bw_vault::plain_index`（欄位路徑與
+  `flatten` 同座標系，單元測 2 條）。同一批把 **unlock 成功→回填**接到
+  daemon `AuthCall::Unlock` 完成處（`reindex_all`）：macOS demo 實測重啟＋
+  鎖定態 sync 後 `ls` 名字停在信封形態，Android 登入路徑本來就接了回填，
+  兩平台現在同一支函數、同一個時點。回歸罩：`dev/e2e/readpath.sh` A12
+  （重啟→sync→unlock→ls 無 `(pending)`、名字解密）。
+- **本地 stub jar 缺件**：android-35 jar 沒有 `ViewHints`／`Presentation`／
+  `addDataset(AutofillId, Dataset)`，編譯直接紅；以字串常數＋
+  `setValue(field, value, presentation)` 規避（`android-shell/README.md`）。
+- **autofill 服務開著時 app 自我干擾**：本 app 欄位 focus 會彈自家面板並搶
+  焦點，`input text`／按鈕點擊送不到（實測 logcat 無第二次 Auth.Success）。
+  A11 先關服務打字、再開服務驗真候選。

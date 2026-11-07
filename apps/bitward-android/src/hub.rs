@@ -268,6 +268,28 @@ impl Hub {
         self.store.meta(id).map_err(|e| e.to_string())
     }
 
+    /// AutofillService 候選（JNI 橋用）：依 web host 或 app package 查
+    /// Login 項目，比對語意全在 bw-store（host 錨定＋子網域後綴，P5-b3）。
+    /// 未解鎖回空——孤島端以 [`Hub::is_unlocked`] 決定走鎖定態回應。
+    pub fn candidates_for(&self, query: &str, limit: u32) -> Vec<(ItemId, String)> {
+        if !self.is_unlocked() || query.is_empty() {
+            return Vec::new();
+        }
+        let metas = self
+            .store
+            .query(&Query {
+                uri: Some(query.to_owned()),
+                kind: Some(bw_proto::ItemKind::Login),
+                limit,
+                ..Default::default()
+            })
+            .unwrap_or_default();
+        metas
+            .into_iter()
+            .map(|m| (m.id, m.name.clone().unwrap_or_else(|| "(未命名)".to_owned())))
+            .collect()
+    }
+
     /// 本地時鐘（unix ms），給 UI 顯示「上次同步」。
     pub fn now_ms(&self) -> u64 {
         self.store.now_ms()

@@ -22,7 +22,7 @@ import android.util.Log
  * 這裡只做系統介面的轉接。
  *
  * 已進 APK（`android-shell/`）。本批三個回呼一律以「尚未解鎖」錯誤快速
- * 失敗（契約 §1.2：中樞不在不降格）；接 `HubBridge` 的 passkey 面是 P4b 第二批。
+ * 失敗（契約 §1.2：中樞不在不降格）；接 `HubBridge` 的 passkey 面是下一批。
  *
  * 注意：方法名是大寫開頭的 `Get`/`Create`…（框架 API 就長這樣），
  * 且回呼是 `OutcomeReceiver`（實測 android-35 android.jar，非佔位檔当初
@@ -40,9 +40,12 @@ class BitwardCredentialProviderService : CredentialProviderService() {
         cancellationSignal: CancellationSignal,
         callback: OutcomeReceiver<BeginGetCredentialResponse, GetCredentialException>,
     ) {
-        Log.i(ISLAND_TAG, "onBeginGetCredential unlocked=${HubHolder.bridge != null}")
-        // TODO(P4b 第二批): HubHolder.bridge → 依 request 的 option 回 entry。
-        callback.onError(GetCredentialException("Bitward 尚未解鎖"))
+        // bridge 已預留（同程序 in-process 中樞）；passkey 的 Get/Register 面接上来是下一批。
+        val unlocked = HubHolder.ensureBridge()?.unlocked() == true
+        Log.i(ISLAND_TAG, "onBeginGetCredential unlocked=$unlocked")
+        callback.onError(
+            GetCredentialException(if (unlocked) "Bitward passkey 面尚未接" else "Bitward 尚未解鎖"),
+        )
     }
 
     override fun onBeginCreateCredential(

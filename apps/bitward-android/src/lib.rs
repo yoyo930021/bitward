@@ -10,6 +10,8 @@
 //! 證據見 `docs/design/android-findings.md` 與 `spike/android/navprobe/`。
 
 pub mod hub;
+#[cfg(target_os = "android")]
+mod jni;
 pub mod ui;
 
 use std::sync::{Arc, LazyLock};
@@ -19,8 +21,8 @@ use hub::{Hub, Revealed, Snapshot, data_dir};
 use nsh_base::{nav_page, nav_stack, theme};
 use nsh_core::prelude::*;
 
-/// 進程內的中樞（開不起來時把錯誤留給 UI 顯示）。
-static HUB: LazyLock<Result<Arc<Hub>, String>> = LazyLock::new(|| Hub::open(data_dir()));
+/// 進程內的中樞（開不起來時把錯誤留給 UI 顯示；JNI 橋同享這個實例）。
+pub(crate) static HUB: LazyLock<Result<Arc<Hub>, String>> = LazyLock::new(|| Hub::open(data_dir()));
 
 /// 畫面狀態機：登入 → 同步 → 金庫。金鑰在不在記憶體是唯一的分支依據。
 #[derive(Clone, Debug, PartialEq)]
