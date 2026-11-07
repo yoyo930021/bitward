@@ -7,6 +7,11 @@
 	<true/>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
+	<!-- APNs（§1.2 推播）：本機 Mac Developer 簽章無 portal capability 時
+	     registerForRemoteNotifications 走 didFail 日誌路徑（預期）；
+	     Developer ID＋App ID 開 push 後即刻生效，不需再改 entitlements。 -->
+	<key>aps-environment</key>
+	<string>development</string>
 	<key>com.apple.security.application-groups</key>
 	<array>
 		<string>group.8V5224A99M.io.bitward.dev</string>
