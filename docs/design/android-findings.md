@@ -231,3 +231,24 @@ nsh 管線（三 ABI 交叉編譯、NDK 注入、debug 簽章）全部照用。�
 - **autofill 服務開著時 app 自我干擾**：本 app 欄位 focus 會彈自家面板並搶
   焦點，`input text`／按鈕點擊送不到（實測 logcat 無第二次 Auth.Success）。
   A11 先關服務打字、再開服務驗真候選。
+
+## P4b 第三批（2026-11-08）：vault 寫入 UI（新增／編輯／刪除）＋一個既有狀態機缺陷
+
+- **寫入路徑接法**：UI 寫入走 in-process `Hub::create/patch/delete`，語意與
+  daemon P2 同源（鏡像＋outbox 同交易、同 item FIFO、base_rev CAS＋欄位級
+  三方合併，全部沿用 `bw_store`／`bw_vault` 原語，零新抽象）。本批 drain
+  只在「重新同步」與登入 pull 前觸發（背景同步未接，自動 push 反而讓
+  「待推送」斷言變成競態）；pull 前先推、outbox 未結算時跳過全量重建，
+  「待推送」列不會被鏡像重建吞掉。org 共享項目寫入直接拒絕（本批無 akey
+  解封路徑，絕不產生解不開的密文）。
+- **既有缺陷：「重新同步」成功後永卡 Busy**。handler 先 `phase.set(Busy)`
+  蓋掉快照，完成時再 `if let Phase::Vault(s) = phase.get()` 永遠不匹配，
+  UI 停在登入頁（Busy 分支）不動。A1–A11 從未斷言同步後的列表態所以沒被
+  發現；A12 首次踩中（實測：VW 端已收 create、logcat 無錯誤、按鈕標籤停在
+  「登入中…」）。修法：完成後由帳號檔重建 Snapshot。教訓：**凡「按下去
+  設 Busy、回來改 phase」的按鈕，成功分支不能假設 phase 還是原樣**。
+- **模態表單自動化**：編輯模態四欄以 placeholder 文字定位（與登入頁
+  「me@example.com」同法）；改欄位現值用 MOVE_END＋30×DEL 再打新值。
+  欄位間切換**必隱鍵盤**（`input keyevent 111`）：模態總高度超過 IME 抬昇
+  後的可視區時，下一欄的 tap 落在鍵盤上，文字接進前一欄（A12 首輪實錄：
+  uri 字串接到密碼欄變成 `e2epasshttps://…`，VW reveal 斷言當場抓到）。

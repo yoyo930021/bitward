@@ -6,16 +6,17 @@ NSH（`longbridge/nsh` 0.3.0，契約 §0.2）的純 Rust app，以 **in-process
 綁定面，也沒有「GUI 內嵌第二份金鑰」之外的信任邊界（契約 §1：Android 的
 Full 形態＝app 內等位物）。
 
-已交付的是**能用的登入路徑＋autofill 真候選**，不是完整 UI：
+已交付的是**能用的登入路徑＋autofill 真候選＋vault 寫入 UI**，不是完整 UI：
 
 | 有 | 還沒有 |
 |---|---|
-| 登入頁（伺服器／信箱／主密碼，預填上次帳號） | 新增／編輯／刪除（寫入路徑要 outbox＋衝突 UI） |
-| prelogin → 派生 → password grant → user key 解封 | Keystore 封存本體（Class 3 生成路徑已通，wrap/unwrap 接 `UnlockMachine` 在下一批） |
-| 全量 sync → 鏡像落地 → 明文索引回填 | 背景同步（`HubService` 已宣告，`startForeground` 尚未接） |
-| AutofillService 解鎖態真候選填充（JNI 橋接同程序中樞；鎖定態面板列「尚未解鎖」，點它拉開 app 解鎖＝解鎖引導） | 附件、org 共享、衝突收件匣 |
-| 列表（搜尋走 bw-store 的 FTS5／LIKE）、詳情 Reveal、TOTP 現算 | Autofill save 回填（`HubBridge.save` 界面就緒，落地等寫入路徑） |
+| 登入頁（伺服器／信箱／主密碼，預填上次帳號） | Keystore 封存本體（Class 3 生成路徑已通，wrap/unwrap 接 `UnlockMachine` 在下一批） |
+| prelogin → 派生 → password grant → user key 解封 | 背景同步（`HubService` 已宣告，`startForeground` 尚未接；drain 目前只在「重新同步」與登入 pull 前觸發） |
+| 全量 sync → 鏡像落地 → 明文索引回填 | 附件、org 共享（共享項目寫入直接拒絕，不產生壞密文）、衝突收件匣 UI |
+| AutofillService 解鎖態真候選填充（JNI 橋接同程序中樞；鎖定態面板列「尚未解鎖」，點它拉開 app 解鎖＝解鎖引導） | Autofill save 回填（寫入路徑已就位＝`Hub::create`；`HubBridge.save` 掛點仍佔位，接線是下一批） |
+| 列表（搜尋走 bw-store 的 FTS5／LIKE）、詳情 Reveal、TOTP 現算 | |
 | 鎖定＝丟棄 user key（Drop 歸零）、重新同步 | |
+| 新增／編輯／刪除：四欄編輯模態（預填走 Reveal、送欄位級差量）＋刪除二次確認；寫入走鏡像＋outbox 同交易（契約 §2.4），「待推送」由「重新同步」drain 收斂（驗收 A12–A14） | |
 
 ## 建與跑
 

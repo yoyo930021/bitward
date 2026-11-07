@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Android P4b 驗收（契約 §5 P4 列「Android track 自此起平行」）。
 #
-# 十一斷言（A1–A11）：
+# 十四斷言（A1–A14）：
 #   A1 in-process 核心（bw-crypto/bw-server/bw-store）交叉編譯進三 ABI 的 APK
 #   A2 app 裝進 emulator 並啟動到登入畫面（原生 nav 標題渲染）
 #   A3 真實 UI 路徑完成登入：prelogin→派生→password grant→user key 解封→sync→明文索引
@@ -14,6 +14,11 @@
 #   A10 Keystore 橋：service 內 Android Keystore 生成 Class 3 EC 金鑰、回顯 alias
 #   A11 解鎖態真候選：重新登入後 fill 請求回真 dataset（非佔位），commit 後
 #       欄位出現真 username（logcat＋層級雙證據）
+#   A12 vault 新增：本地鏡像即刻可見＋「待推送」→「重新同步」（drain 先推
+#       再拉）收斂清標記→暫時 daemon 對 VW reveal 出新明文（金鑰鏈沒斷）
+#   A13 編輯只動密碼欄：預填走 reveal、送欄位級差量→同步後 VW 端帳號欄存活
+#   A14 刪除＝軟刪：tombstone 即刻離列→同步後 VW 端鏡像不再列出（restore
+#       語意在 Hub，UI 本批不掛）
 # 產物：apps/bitward-android/shots/*.png（截圖）與 .nsh/out/bitward-islands.apk
 #       （孤島＋nsh 中樞的合併 APK；A1–A7 裝的就是這顆）
 set -euo pipefail
@@ -84,18 +89,30 @@ wait_text() {  # wait_text <text> <秒>
   done
   return 1
 }
+wait_gone() {  # wait_gone <text> <秒>：等某段文字從層級消失（drain 收斂用）
+  for _ in $(seq 1 "${2:-30}"); do
+    dump /tmp/android-gone.xml
+    has_text /tmp/android-gone.xml "$1" || return 0
+    sleep 1
+  done
+  return 1
+}
 tap_first_edittext() {  # focus 第一個原生 EditText（autofill 面板由 focus 觸發）
   dump "/tmp/$1"
+  tap_edittext_of "/tmp/$1" 0
+}
+tap_edittext_of() {  # tap_edittext_of <留檔> <第幾個 EditText（0 起）>
+  # 遮罩欄的 text 是圓點不是 placeholder（實錄），改欄位現值時按序定位。
   local xy
   xy=$(python3 -c "
 import re, sys
 x = open(sys.argv[1]).read()
-m = re.search(r'class=\"android.widget.EditText\"[^>]*bounds=\"\[(\d+),(\d+)\]\[(\d+),(\d+)\]\"', x)
-if m:
-    x1, y1, x2, y2 = map(int, m.groups())
+ms = re.findall(r'class=\"android.widget.EditText\"[^>]*bounds=\"\[(\d+),(\d+)\]\[(\d+),(\d+)\]\"', x)
+if len(ms) > int(sys.argv[2]):
+    x1, y1, x2, y2 = map(int, ms[int(sys.argv[2])])
     print((x1 + x2) // 2, (y1 + y2) // 2)
-" "/tmp/$1")
-  [[ -n "$xy" ]] || fail "層級裡找不到 EditText（見 /tmp/$1）"
+" "$1" "$2")
+  [[ -n "$xy" ]] || fail "層級裡沒有第 $2 個 EditText（見 $1）"
   $ADB shell input tap $xy </dev/null >/dev/null 2>&1
   sleep 1
 }
@@ -340,6 +357,122 @@ dump /tmp/android-a11-filled.xml
 has_text /tmp/android-a11-filled.xml "dave" || fail "A11 commit 後欄位內不是真 username（dave）"
 shot 11-autofill-filled
 pass "A11 解鎖態真候選：面板列 bitward-selftest、commit 後欄位＝dave（非佔位）"
+
+# --- 12. A12：vault 新增（本地先行→待推送→drain 收斂→VW reveal） -------------
+# 重新起一個乾淨 app 態（A11 後搜尋欄殘留「dave」＋面板開著）。autofill 服務
+# 先關：自家欄位 focus 會彈面板搶焦點（A11 段同款陷阱，模態四欄都要打字）。
+$ADB shell am force-stop $PKG
+$ADB shell settings put secure autofill_service null >/dev/null 2>&1 || true
+$ADB shell settings put secure current_autofill_service null >/dev/null 2>&1 || true
+$ADB shell monkey -p $PKG -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+wait_text "登入你的密碼庫" 30 || fail "A12 重啟後登入畫面沒出現"
+tap_text pw-field2 "只用於派生金鑰，不落地"
+type_text "$WP"
+hide_ime
+$ADB logcat -c
+tap_text login-btn2 "登入"
+wait_text "鏡像 4 筆" 40 || { $ADB logcat -d | grep -E 'bitward|nsh|AndroidRuntime' | tail -20; fail "A12 重新登入失敗"; }
+$ADB logcat -c
+tap_text a12-add "新增"
+wait_text "新增項目" 10 || fail "A12 編輯模態沒出現"
+shot 12-editor-modal
+tap_text a12-name "項目名稱（必填）"
+type_text "e2e-added"
+# 每欄打完先收鍵盤再點下一欄：模態四欄加按鈕高於視窗，鍵盤開著時下一欄
+# 常被 IME 蓋住，tap 落在鍵盤上、文字接錯欄（A12 首輪實錄：uri 接進密碼欄）。
+hide_ime
+tap_text a12-user "帳號（可留空）"
+type_text "e2euser"
+hide_ime
+tap_text a12-pass "密碼（可留空）"
+type_text "e2epass"
+hide_ime
+tap_text a12-uri "網址（可留空）"
+type_text "https://added.example.com"
+hide_ime
+tap_text a12-save "儲存"
+wait_text "e2e-added" 15 || { $ADB logcat -d | grep -E 'nsh_app|bitward' | tail -20; fail "A12 新增後列表沒出現該筆"; }
+dump /tmp/android-a12-pending.xml
+has_text /tmp/android-a12-pending.xml "待推送" || fail "A12 新增列應掛「待推送」（outbox 未推，本地先行）"
+shot 12-vault-pending
+APP_LOG=$($ADB logcat -d)
+[[ "$APP_LOG" == *'create'*'待推送'* ]] || fail "logcat 沒有 create 入列軌跡"
+# 「重新同步」＝drain 先推再拉（契約 §2.4）：Busy 期間列表暫卸，等按鈕回
+# 到層級＝已回 Vault 態；此時 pending 必已結算（drain 在 pull 前完成）。
+tap_text a12-sync "重新同步"
+wait_text "重新同步" 60 || fail "A12 同步沒完成（一直卡在 Busy）"
+dump /tmp/android-a12-synced.xml
+has_text /tmp/android-a12-synced.xml "e2e-added" || fail "A12 同步後新增列被全量重建吞了"
+if has_text /tmp/android-a12-synced.xml "待推送"; then fail "A12 同步後「待推送」沒清（drain 未收斂）"; fi
+shot 12-vault-synced
+# VW 端收斂：暫時 daemon（seed 用的帳號檔還在 $DA）登入拉鏡像、reveal 明文。
+BITWARD_DATA_DIR="$PWD/$DA" "$DAEMON" --data-dir "$DA" --sock "$DA/s2" >"$DA/log2" 2>&1 &
+HUB_PID=$!
+trap 'kill $HUB_PID 2>/dev/null || true' EXIT
+sleep 1
+B2() { "$CLI" --sock "$DA/s2" "$@"; }
+echo "$WP" | B2 login --server "$SRV_HOST" --email "$EMAIL" --password-stdin >/dev/null \
+  || fail "A12 暫時 daemon 登入失敗"
+B2 sync >/dev/null
+ADDED_ID=$(B2 --json ls --text "e2e-added" | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(rows[0]["meta"]["id"] if rows else "")')
+[[ -n "$ADDED_ID" ]] || fail "A12 伺服器鏡像沒有 e2e-added（push 未送達 VW）"
+REVEAL=$(B2 --json reveal "$ADDED_ID")
+[[ "$REVEAL" == *'"password": "e2epass"'* ]] || fail "A12 VW 端 reveal 密碼不對：$REVEAL"
+[[ "$REVEAL" == *"e2euser"* ]] || fail "A12 VW 端 reveal 帳號欄缺失：$REVEAL"
+pass "A12 新增：本地先行掛「待推送」→同步收斂→VW 端 reveal 明文 OK"
+
+# --- 13. A13：編輯只動密碼欄（欄位級存活） ------------------------------------
+tap_text a13-row "e2e-added"
+tap_text a13-edit "編輯"
+wait_text "編輯項目" 10 || fail "A13 編輯模態沒出現"
+dump /tmp/android-a13-prefill.xml
+has_text /tmp/android-a13-prefill.xml "e2euser" || fail "A13 帳號欄沒預填（reveal 預填路徑斷了）"
+shot 13-editor-prefilled
+# 清空密碼欄再打新值：遮罩欄的 text 是圓點（實錄），按第 3 個 EditText 定位；
+# 移到行尾逐字退（欄內現值 e2epass＝7 字，30 下留足餘量）。
+dump /tmp/android-a13-fields.xml
+tap_edittext_of /tmp/android-a13-fields.xml 2
+$ADB shell input keyevent 123 </dev/null >/dev/null 2>&1
+for _ in $(seq 1 30); do $ADB shell input keyevent 67 </dev/null >/dev/null 2>&1; done
+type_text "e2epass2"
+hide_ime
+tap_text a13-save "儲存"
+wait_text "待推送" 15 || fail "A13 編輯後列表沒回到「待推送」態"
+tap_text a13-sync "重新同步"
+wait_text "重新同步" 60 || fail "A13 同步沒完成（一直卡在 Busy）"
+dump /tmp/android-a13-synced.xml
+if has_text /tmp/android-a13-synced.xml "待推送"; then fail "A13 同步後「待推送」沒清"; fi
+B2 sync >/dev/null
+REVEAL=$(B2 --json reveal "$ADDED_ID")
+[[ "$REVEAL" == *'"password": "e2epass2"'* ]] || fail "A13 VW 端密碼沒更新：$REVEAL"
+[[ "$REVEAL" == *"e2euser"* ]] || fail "A13 只改密碼卻弄丟帳號欄（欄位級存活斷了）"
+shot 13-after-sync
+pass "A13 編輯：預填走 reveal、差量只動 password，VW 端 username 欄存活"
+
+# --- 14. A14：刪除（軟刪 tombstone 即刻離列→同步後 VW 端不再列出） ------------
+# Hub::delete 語意＝軟刪（deletedDate tombstone，同 daemon write_delete）；
+# 本批 UI 定案：列表即刻消失＋outbox 掛 delete 列，restore 入口留後續批。
+tap_text a14-row "e2e-added"
+tap_text a14-del "刪除"
+wait_text "確定刪除這筆" 10 || fail "A14 二次確認列沒出現"
+shot 14-delete-confirm
+tap_text a14-ok "確定刪除"
+wait_gone "e2e-added" 20 || fail "A14 確認後該筆沒立刻離列（tombstone 未生效）"
+dump /tmp/android-a14-gone.xml
+if has_text /tmp/android-a14-gone.xml "e2e-added"; then fail "A14 刪除後列表仍有該列"; fi
+shot 14-vault-after-delete
+tap_text a14-sync "重新同步"
+wait_text "重新同步" 60 || fail "A14 同步沒完成（一直卡在 Busy）"
+B2 sync >/dev/null
+# 全量重建後本地鏡像也不該有它（伺服器已標 deletedDate）。
+dump /tmp/android-a14-final.xml
+if has_text /tmp/android-a14-final.xml "e2e-added"; then fail "A14 同步後該筆又回來（VW 端沒標刪除）"; fi
+# VW 端收斂：daemon 鏡像重拉後查無此筆（deleted 列不進列表）。
+LEFT=$(B2 --json ls --text "e2e-added" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+[[ "$LEFT" == "0" ]] || fail "A14 VW 端鏡像仍列出 e2e-added（軟刪未送達）"
+kill $HUB_PID 2>/dev/null || true
+trap - EXIT
+pass "A14 刪除：軟刪即刻離列、同步後 VW 端收斂（列表不再含該筆）"
 
 echo
 echo "截圖：$(ls "$SHOTS" | tr '\n' ' ')"
