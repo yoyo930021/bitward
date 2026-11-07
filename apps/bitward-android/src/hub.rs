@@ -223,14 +223,16 @@ impl Hub {
         Ok(self.store.cipher_count().unwrap_or(0) as usize)
     }
 
-    /// 鏡像落盤後的明文索引回填（與 daemon 同語意）：解密只在拿得到 user key
-    /// 時發生，單筆失敗容忍跳過（欄位漂移防禦）。
+    /// 鏡像落盤後的明文索引回填（與 daemon 同語意、同函數：欄位路徑見
+    /// `bw_vault::plain_index`）：解密只在拿得到 user key 時發生，單筆失敗
+    /// 容忍跳過（欄位漂移防禦）。登入＝本批唯一的解鎖完成點，回填接在這裡。
     fn reindex_plain(&self) -> Result<(), String> {
         let user_key = {
             let g = self.unlocked.lock().expect("hub mutex poisoned");
             let u = g.as_ref().ok_or("尚未解鎖")?;
             u.user_key.clone()
         };
+        let dec = |s: &str| bw_crypto::decrypt_bytes(&user_key, s).ok().and_then(|b| String::from_utf8(b).ok());
         let metas = self
             .store
             .query(&Query {
@@ -242,28 +244,11 @@ impl Hub {
             let Some(row) = self.store.item(m.id).map_err(|e| e.to_string())? else {
                 continue;
             };
-            let dec = |s: Option<&Value>| -> Option<String> {
-                s.and_then(Value::as_str)
-                    .and_then(|e| bw_crypto::decrypt(&user_key, &e.to_string()).ok())
-            };
-            let login = row.enc_cipher.get("login");
-            let name = dec(row.enc_cipher.get("name"));
-            let username = dec(login.and_then(|l| l.get("username")));
-            let password = dec(login.and_then(|l| l.get("password")));
-            let uris: Vec<String> = login
-                .and_then(|l| l.get("uris"))
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|u| u.get("uri").and_then(Value::as_str))
-                        .filter_map(|e| bw_crypto::decrypt(&user_key, &e.to_string()).ok())
-                        .collect()
-                })
-                .unwrap_or_default();
-            let _ = self.store.set_plain_meta(m.id, name.as_deref(), &uris);
+            let idx = bw_vault::plain_index(&row.enc_cipher, &dec);
+            let _ = self.store.set_plain_meta(m.id, idx.name.as_deref(), &idx.uris);
             let _ = self
                 .store
-                .set_plain_secrets(m.id, username.as_deref(), password.as_deref());
+                .set_plain_secrets(m.id, idx.username.as_deref(), idx.password.as_deref());
         }
         Ok(())
     }
@@ -304,24 +289,18 @@ impl Hub {
             .item(id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "找不到這筆項目".to_owned())?;
-        let dec = |s: Option<&Value>| -> Option<String> {
-            s.and_then(Value::as_str)
-                .and_then(|e| bw_crypto::decrypt(&user_key, &e.to_string()).ok())
+        // 欄位路徑與 reindex 同源（bw_vault::plain_index）；totp 只有這裡要。
+        let dec = |s: &str| {
+            bw_crypto::decrypt_bytes(&user_key, s)
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok())
         };
-        let login = row.enc_cipher.get("login");
-        let uris: Vec<String> = login
-            .and_then(|l| l.get("uris"))
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|u| u.get("uri").and_then(Value::as_str))
-                    .filter_map(|e| bw_crypto::decrypt(&user_key, &e.to_string()).ok())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let totp = login
-            .and_then(|l| l.get("totp"))
-            .and_then(|e| bw_crypto::decrypt(&user_key, &e.to_string()).ok())
+        let idx = bw_vault::plain_index(&row.enc_cipher, &dec);
+        let totp = row
+            .enc_cipher
+            .pointer("/login/totp")
+            .and_then(Value::as_str)
+            .and_then(dec)
             .and_then(|seed| {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -331,10 +310,10 @@ impl Hub {
             });
         Ok(Revealed {
             name: meta.name.clone().unwrap_or_else(|| "(未命名)".to_owned()),
-            username: dec(login.and_then(|l| l.get("username"))),
+            username: idx.username,
             // 明文密碼進 Zeroizing：詳情元件 set(None) 時 Drop 歸零。
-            password: dec(login.and_then(|l| l.get("password"))).map(Zeroizing::new),
-            uris,
+            password: idx.password.map(Zeroizing::new),
+            uris: idx.uris,
             tags: meta.tags.clone(),
             totp,
             updated_at: meta.updated_at.clone(),
@@ -387,8 +366,11 @@ fn kdf_wire(k: &bw_crypto::KdfParams) -> (i64, u64, Option<u64>, Option<u64>) {
 ///
 /// Android 的 app 進程沒有可寫的 `$HOME`；nsh 0.3.0 把 Java 層的 `filesDir`
 /// 只放進 JS runtime 的 `System.data_dir`，純 Rust app 拿不到（實測見
-/// `docs/design/android-findings.md`）。退而用 zygote 給 app 的 `TMPDIR`
-/// （app 私有 cache 目錄，其他 app 讀不到），並允許 `BITWARD_ANDROID_DATA` 覆寫。
+/// `docs/design/android-findings.md`）。正式解已就位：外殼的
+/// `BitwardApplication` 在**任何進程入口之前**把 `BITWARD_ANDROID_DATA`
+/// 指向 `noBackupFilesDir/bitward`（不被系統清、不進 Auto Backup——鏡像含
+/// 明文索引欄，備份出裝置即破契約 §2.7 R3 的本地承載紀律；見 2026-11-07
+/// 缺陷修）。TMPDIR 退路只留給沒跑外殼 Application 的場合（純 nsh 包 dev 迴圈）。
 pub fn data_dir() -> PathBuf {
     if let Ok(d) = std::env::var("BITWARD_ANDROID_DATA") {
         return PathBuf::from(d);
