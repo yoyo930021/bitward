@@ -129,6 +129,45 @@ impl OrgKey {
 mod tests {
     use super::*;
 
+    /// 互操作金標：密文由外部工具（LibreSSL `openssl rsautl -oaep`＝OAEP-SHA1）
+    /// 產生、私鑰 PKCS#8——證明與官方 WebCrypto RSA-OAEP-SHA1 線格式互通，
+    /// 非自家 real 環自我循環。
+    #[test]
+    fn interop_openssl_oaep_sha1_vector() {
+        let pem_b64 = concat!(
+            "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDgTUV2PTzrACgI",
+            "oURq0c3OnCKSqhWElDVBJDuktny3e1ra1O2nlAGN76bKOEaH0EJKjCGIM2cTW4TD",
+            "S3Vw+H5kDvCG177lXVL+La1bWIwOSiW0SOwZuBVEfortk0n9eVdfwaW4vXfgfZbW",
+            "B/YVtusDQHhpqq4vtnEk6Grectptzu+JcyCc/qasGV1EVGMMuQVCFRw2hcExgetj",
+            "LPaDw4YpL7ZBFuZ328AG+lXRpj86GkZUo5kjGy3Ej+sZHJ9qUX6/0ZKQs9l1RF/y",
+            "wWZFThBATLFXDek06wj5nmdEUy7POTZ+Ed7BxvsqwTEaA2Xs6ZBQeF8EwWUWpz6l",
+            "zBJ66pblAgMBAAECggEBAJNxN9/pkUnI6IgDuj2dfHP8Hp3aQBrOcdNIRgyYCJNz",
+            "+t0uaqplmD/88N6s73AHbgwi4UfuwirvVe4qhCCmuC59w45f85RCLHP5AqOxKR+b",
+            "jf1ckha18wT7Scexskl0ogLIAG/X3B0tcSFwSksr2oBguMZ889NZUja4sMdZKExV",
+            "J6BtasRMZCdDtYpTgMTkCiNTgqvvg/uigU0uqUepDl2YQBHa/NSbFcGvHHjQRnef",
+            "jJr9h83SR+erRidt+VA9gB5Ak91XaffkUVOSrYtwcVU77/7z8N1OMmj98/BFdSox",
+            "D72c57A43x6pfy+cC9zF11QsE8MnoxpSJhdi0A9plGECgYEA/ALcFUP7x3RXPBmK",
+            "H2cQ9CDE3prpvhiCMVTMnGUBwcB5I6I3LWtUWfC/5anUj334SxP6/u2++LWFy5GV",
+            "Z6wIphLeCJGdjUoacBF6V5G5IgvxPL+5Sa56YBJdc0srDAGHWR/DdnQwN/VaUFuo",
+            "WF0pguIAiySB0GbC97y6zj7U6kcCgYEA49oiaTpab9vRXHXlcDyc/vlMl45JDmSw",
+            "1FjrIPzY7kB0mhJga4O1+TFwgF3wNgjTX6QNCWIhRZdEzL9Ed8ohAZWzTPfXdFf0",
+            "x9o3ymYCYrCkQTs5JXvkUzHLHvWhbKJlmZXB2Wqh19fvhOQJBtqFCBhal1zgassN",
+            "lhofb8SDX3MCgYAJrMJuPpHn8lt2/zQCSJ6qAKgOM7xNg/tbkXnZdzc+DPmZmJyt",
+            "rbUrTsbPNlnmuFtT5ox4RQBT5AQi8I/fzwb1+Tt08MIvrmydaM5dlkaZPAQi5Olk",
+            "HsKr9YiI6JXafCSKE2IZphRD0bOJ6jroSYtSbwK+VMR3D7rkb+ZsDJV3+QKBgCmZ",
+            "QKEPi0VSz5Ve3OWx20PdxfMBgisDjRknpr3eC8jrsZ4TbtESOd3l/dEh1WI4GEck",
+            "z1CAPuzSojfzT4/DMmV0rEiIEyjligYWvArSturHryVNp7BFPzlFJP1hAPixaXUx",
+            "1zNXeXbLsKoFa/R5XsJMl/V8emhk6/UUjdq8+PMrAoGBAK1dOUf6UXi9C2/cCjuI",
+            "HEG5U4OC+zmp9yg7LsiH/IKputAUCZJCpt1qE0ESoZvXh6bcOsqBguqM+3seloKn",
+            "hTc/dDRGdDOZF03piHzC4d6zR8T4c++crS3pOR585A94DmGDBm89sCXgHSEscnPX",
+            "3NQuTbv3T7B1UysaMSX8yJNm",
+        );
+        let der = b64_decode(pem_b64).unwrap();
+        let want = b64_decode("s9yr9SAsBQp/saBPX1JVBrzcftqHtUJ6pNKVXH1iFum45l+VtY2bj9kr+R37XqYnTLiKMPvXzwR4TpYJpHbtuw==").unwrap();
+        let got = unwrap_org_key_rsa(&der, "4.xBMyA53zvoq1fDkl3JYTbkuevBjZvtrUHDHGZLlReEkfvfzjB6FRCfMnS+AOmkZEpNAfivBMBZjeBbkkKBGZcxnBvNw59k1yNIYIpneqXHKEtCNtIXbN2zDaR7FHKDUUnkx2kshxxSn0VlUyRhygsEallmLd9NXBFClZNHb0GHXtSGyZ0v6Qw+KN0sH7g2YZNsYWHhbOWgMm/tM3tOfSRCKu7AHUc4Qj5afvJNnCiIk7eenEx4qgI1p06F09C3GXgOBgh86MXkDqV39uFU6a5YlC2UN22zSjBouxMe6aV7qXXGHv6jT2ItM1jr2hunato+vmiuriQ7R3srdJ1Qq26w==").unwrap();
+        assert_eq!(got.as_bytes(), want.as_slice());
+    }
+
     fn key64() -> UserKey {
         UserKey::from_bytes((0u8..64).collect()).unwrap()
     }
