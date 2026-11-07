@@ -7,11 +7,10 @@
 	<true/>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
-	<!-- APNs（§1.2 推播）：本機 Mac Developer 簽章無 portal capability 時
-	     registerForRemoteNotifications 走 didFail 日誌路徑（預期）；
-	     Developer ID＋App ID 開 push 後即刻生效，不需再改 entitlements。 -->
-	<key>aps-environment</key>
-	<string>development</string>
+	<!-- APNs（§1.2 推播）：aps-environment 未加——現行 provisioning profile
+	     「Bitward Mac Dev」不含 Push capability（xcodebuild 實測报错），
+	     需先在 portal 為 App ID 開 push 並重產 profile（Developer ID 批次一併做）。
+	     代碼側（PushAppDelegate）已就位：無 entitlement 走 didFail 日誌路徑。 -->
 	<key>com.apple.security.application-groups</key>
 	<array>
 		<string>group.8V5224A99M.io.bitward.dev</string>
