@@ -1,5 +1,6 @@
 #!/bin/bash
 # dev-install.sh — 一鍵建置＋部署 macOS App（含 daemon helper）。
+# 正式安裝（pkg＋installer receipt，BTM 生命週期判定用）見 pkg-build.sh。
 # 會話中被「殭屍二進位」咬過三次後的教訓：Xcode script phase 增量不可靠、
 # ditto 會蓋回舊 staging——本腳本在 ditto 後強制重拷＋重簽＋sha 驗證。
 set -euo pipefail

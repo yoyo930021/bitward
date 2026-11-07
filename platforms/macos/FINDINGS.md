@@ -245,3 +245,73 @@ DER/hash 直簽修復生效）。本輪新增的實測坑：
   **判別實驗（需使用者）：重登入一次**→ 若 job 出現即屬實；否則剩 MAS 分發
   限定假說。現行可用常駐＝`bitwarderd --service install`（legacy LaunchAgents，
   kill -9 自愈已驗），其群組 socket 限制見 §8。
+
+## 10. 正式安裝管線＋BTM 判定實驗（2026-11-07，pkg 批次）
+- **新增 `scripts/pkg-build.sh`（冪等）**：cargo release → xcodebuild Release →
+  staging（殭屍二進位保險沿用 dev-install：強制重拷 helper＋重簽＋功能探測；
+  **另發現 helper 重簽改變 bytes 後必須重封 App 外層**，否則 codesign
+  --verify --deep --strict 對新裝 bundle 會炸）→ `pkgbuild --root`（component.plist
+  `BundleOverwriteAction=update`，同版本重裝也覆蓋）→ `productbuild --synthesize`
+  ＋`--distribution` → `dist/Bitward-<version>.pkg` → `sudo -n installer`，
+  失敗 fallback `osascript do shell script … with administrator privileges`
+  （SecurityAgent 彈框，使用者按一次密碼/Touch ID）→ 斷言（pkg 簽章（有簽名才查）、
+  bundle 深驗、/Applications 落地、receipt `io.bitward.dev.pkg`、helper 功能探測）
+  → `--experiment` 段做 BTM 判定（AX 按「啟用」＋launchctl/log/BTM db 取證）。
+- **工具鏈坑（macOS 27.2／Xcode 27.2 實測）**：
+  · `productbuild` 不吃 `--component-plist`/`--install-location`（那是 `pkgbuild`
+    的選項；productbuild component 模式只有 positional install-path）→
+    component.plist 要生效必須走 `pkgbuild --root` 再 `productbuild --distribution`。
+  · `productsign` **拒絕一切 Code Signing EKU 身分**（含 Mac Developer
+    LUL69RR52T 與 Apple Distribution）：「An installer signing identity
+    (not an application signing identity) is required for signing flat-style
+    products.」本機六張憑證 EKU 全是 Code Signing → pkg 以未簽名落地
+    （`installer -target /` 本機不吃 pkg 簽章）；上架批次需另申請
+    **Developer ID Installer**（公證則要 ASC API key，見腳本 BW_NOTARIZE 段）。
+- **BTM 判定實驗（pkg 正式安裝後，第一輪）：「非正式安裝不被 BTM 接受」假說被駁
+  ——pkg＋receipt 正式安裝後 register 照樣 EINVAL。** 差分矩陣（全部實測）：
+
+  | bundle 來源 | 舊兄弟 plist | Standard*Path | 位置 | register 結果 |
+  |---|---|---|---|---|
+  | Xcode 封裝（run6 裝 /Applications） | 有 | 有 | /Applications | EINVAL |
+  | 管線重封（staging） | 無 | 有 | repo dist | EINVAL |
+  | 純 Xcode 封裝（btm-sink2 複製） | 無 | 有 | DerivedData | EINVAL |
+  | 管線重封（staging／sink 複製） | 無 | **無** | repo／DerivedData | **EPERM** |
+
+  · 舊兄弟 plist（`io.bitward.daemon.plist`，增量建置殘留）**不是** EINVAL 成因
+    （有無皆 EINVAL），但仍是必須清的髒（project.yml phase 已改 `rm -rf "$LA"`
+    再拷＋pkg-build.sh staging 以源檔為唯一事實重建該目錄）。
+  · EINVAL 與 plist 的 `Standard{Out,Error}Path` 一一對應（4/4），移除後錯誤推進
+    為 EPERM（2/2）。smd log 每次 EINVAL 嘗試都打
+    「SMAppServiceFactory: Not allowed to use StandardInPath, StandardOutPath,
+    and StandardErrorPath keys from AppSandboxed submitters」→ 源檔 plist 已刪
+    這兩鍵（沙盒 App 送件不給指定 stdout/stderr 落點；daemon 日誌本就該走 os_log）。
+  · EPERM 閘門**已隔離**（最終判定實驗，/Applications 裝修正後 bundle、
+    `--experiment-only`）：smd 明打
+    「`BTMManager registerLaunchItemWithAuditToken: error: SMAppService target
+    executable must be sandboxed because the app is sandboxed` → Register
+    rejected by BTM」。即：**容器 App 是沙盒 App，SMAppService 就要求
+    BundleProgram 目標（Contents/Helpers/bitwarderd）也沙盒化**，而
+    helper.entitlements 目前無 `com.apple.security.app-sandbox` → EPERM。
+    register 被拒時 BTM store 仍留 record 殘跡（strings 見
+    `file:///Applications/Bitward.app`＋DR＋Label）但 status()=notFound、
+    `launchctl print gui/501/io.bitward.dev.daemon` 查無 job；unregister 則報
+    -95 record not found。
+  · 判定：**「非正式安裝」假說不足以解釋 G2**——pkg＋receipt 下 EINVAL、EPERM
+    依序解鎖到同一堵沙盒牆。下一批的解法二選一（語意改動，超出本切片）：
+    (a) helper 加 app-sandbox＋temporary-exception（/private/tmp sock、資料目錄）
+    ＋沿用 app-group entitlement，走 SMAppService 正道；(b) 容器 App 撤沙盒
+    （牵動 P5 provider 鏈，得不償失）。
+  · 殘留矛盾（老實記）：§8 的 10:46 成功是用**含 Standard*Path**、helper 未沙盒
+    的同型 bundle register 上去的（status 曾現「已啟用」）——本 session（11-07
+    10:39 boot）無法重現該成功，且上述 smd 政策行在每次嘗試都出現。若使用者
+    重登入後 `launchctl print gui/501/io.bitward.dev.daemon` 出現 job，則
+    「先註銷再重登」可能是 BTM 卡死的解藥；請見交付之重登入驗證步驟。
+- **本機現況＋待辦（寫給下一次 session 的你）**：`/Applications/Bitward.app`
+  ＝修正後 bundle（單 plist、無 Standard*Path），但 **receipt 是 run6 舊 payload**
+  （23:47 安裝；之後因授權框無人按，改 `ditto` 手動換裝同產物）。要還原一致性：
+  `sudo installer -pkg dist/Bitward-0.1.0.pkg -target /`（pkg 已含修正後 payload）。
+  重登入驗證步驟（G2 正解判定，需使用者）：重登入 → `open -a Bitward` →
+  狀態頁按「啟用」→ 若顯示「已啟用」或 `launchctl print gui/501/io.bitward.dev.daemon`
+  有 job＝沙盒牆外的 BTM 卡死被重登解除；仍 EPERM＋smd「must be sandboxed」
+  ＝必須先做上面 (a) helper 沙盒化才有閉環。`scripts/pkg-build.sh
+  --experiment-only` 可重複跑實驗段不再觸發授權。

@@ -57,7 +57,10 @@ targets:
             echo "warning: bitwarderd not found (cargo build first)"
           fi
           # SMAppService.agent(plistName:) 規定 plist 在 Contents/Library/LaunchAgents/
+          # 先清空再拷：增量建置不刪舊檔，殘留的 io.bitward.daemon.plist（不合規
+          # Label）讓 register 對整個目錄拋 EINVAL（2026-11-07 pkg 實驗實測）。
           LA="$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME/Contents/Library/LaunchAgents"
+          rm -rf "$LA"
           mkdir -p "$LA"
           cp -f "$SRCROOT/Bitward/Resources/io.bitward.dev.daemon.plist" "$LA/io.bitward.dev.daemon.plist"
         # 不宣告 outputFiles：xcodegen 版不支援 alwaysOutOfDate，改用「無輸出

@@ -24,9 +24,8 @@
 	<true/>
 	<key>ThrottleInterval</key>
 	<integer>1</integer>
-	<key>StandardOutPath</key>
-	<string>/tmp/io.bitward.daemon.log</string>
-	<key>StandardErrorPath</key>
-	<string>/tmp/io.bitward.daemon.log</string>
+	<!-- 沙盒 App 經 SMAppService 送件時，smd 政策明令禁止 Standard{In,Out,Error}Path
+	     （log 實拍「Not allowed to use StandardInPath, StandardOutPath, and StandardErrorPath
+	     keys from AppSandboxed submitters」→ register EINVAL）。daemon 日誌走 os_log。 -->
 </dict>
 </plist>
