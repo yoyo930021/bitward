@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P1 read-path e2e（契約 §6）。斷言 A2/A3/A4/A5/A6/A8/A11。
+# P1 read-path e2e（契約 §6）。斷言 A2/A3/A4/A5/A6/A8/A11/A12。
 # 用法：dev/e2e/readpath.sh（需要 docker；A1/A2b 在 cargo test，A10 在 arena 單元測試）
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -125,6 +125,27 @@ CHAIN=$(B audit --verify --json | jq -r '.ok')
 N_CALLS=$(B audit --tail 1000 --json | jq 'length')
 [[ "$N_CALLS" -ge 10 ]] || fail "A8 audit 筆數過少（$N_CALLS）"
 pass "A8 全 Call 審計 + hash 鏈 ok（$N_CALLS 筆）"
+
+# A12：daemon 重啟→鎖定態 sync 蓋回信封→unlock→明文索引回填。
+# （解鎖完成處呼叫 reindex_all，與 Android 登入回填同一支 bw_vault::plain_index；
+# 2026-11-07 macOS demo 實測重啟後 ls 名字未回填的缺陷回歸罩。）
+kill "$DAEMON_PID" 2>/dev/null || true
+wait "$DAEMON_PID" 2>/dev/null || true
+# 舊 daemon 死後 socket 檔可能還掛在那裡（新 daemon 見活口會拒綁）：先清掉。
+rm -f "$SOCK"
+BITWARD_DATA_DIR="$PWD/$DATA" ./target/debug/bitwarderd --data-dir "$DATA" --sock "$SOCK" >>"$DATA/log" 2>&1 &
+DAEMON_PID=$!
+for i in $(seq 1 40); do [[ -S "$SOCK" ]] && break; sleep 0.25; done
+[[ -S "$SOCK" ]] || fail "A12 daemon 重啟沒起來（見 $DATA/log）"
+B status >/dev/null || fail "A12 重啟後 CLI 連不上 daemon"
+B sync >/dev/null || fail "A12 鎖定態 sync 失敗"
+LOCKED_LS=$(B ls) || fail "A12 鎖定態 ls 失敗"
+[[ "$LOCKED_LS" != *github* ]] || fail "A12 前提失效：鎖定態 sync 後名字就已明文（沒被蓋回信封？）"
+B unlock >/dev/null || fail "A12 unlock 失敗"
+LS=$(B ls) || fail "A12 unlock 後 ls 失敗"
+[[ "$LS" == *github* ]] || fail "A12 unlock 後 ls 沒回填出明文名字"
+[[ "$LS" != *" (pending)"* ]] || fail "A12 unlock 後 ls 仍含 (pending)"
+pass "A12 重啟→unlock→明文索引回填（ls 無 (pending)、名字解密成功）"
 
 # A11：ps 與 daemon 環境不含主密碼
 ps -axo command | grep -v grep | grep -q "$WP" && fail "A11 argv 洩漏主密碼" || true

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Android P4b 驗收（契約 §5 P4 列「Android track 自此起平行」）。
 #
-# 名斷言：
+# 十一斷言（A1–A11）：
 #   A1 in-process 核心（bw-crypto/bw-server/bw-store）交叉編譯進三 ABI 的 APK
 #   A2 app 裝進 emulator 並啟動到登入畫面（原生 nav 標題渲染）
 #   A3 真實 UI 路徑完成登入：prelogin→派生→password grant→user key 解封→sync→明文索引
@@ -12,6 +12,8 @@
 #   A8 系統列舉我們的 AutofillService（settings 切換成功、dumpsys 認得）
 #   A9 表單觸發 autofill 面板＋logcat 證明系統真的 bind 到我們並送 fill 請求
 #   A10 Keystore 橋：service 內 Android Keystore 生成 Class 3 EC 金鑰、回顯 alias
+#   A11 解鎖態真候選：重新登入後 fill 請求回真 dataset（非佔位），commit 後
+#       欄位出現真 username（logcat＋層級雙證據）
 # 產物：apps/bitward-android/shots/*.png（截圖）與 .nsh/out/bitward-islands.apk
 #       （孤島＋nsh 中樞的合併 APK；A1–A7 裝的就是這顆）
 set -euo pipefail
@@ -132,14 +134,16 @@ sleep 1
 B() { "$CLI" --sock "$DA/s" "$@"; }
 echo "$WP" | B --json dev-register --server "$SRV_HOST" --email "$EMAIL" --password-stdin >/dev/null
 echo "$WP" | B login --server "$SRV_HOST" --email "$EMAIL" --password-stdin >/dev/null
-for n in github:alice:pw-github gitlab:bob:pw-gitlab cloudflare:carol:pw-cf; do
-  IFS=: read -r name user pw <<<"$n"
-  echo "$pw" | B new --name "$name" --username "$user" --uri "https://$name.example.com" --password-stdin >/dev/null
+# 第四筆是 A11 自用：uri 存本 app 的 package 名（原生欄位的查詢鍵就是
+# package，見 BitwardAutofillService.analyze），autofill 面板 commit 斷言靠它。
+for n in github:alice:pw-github gitlab:bob:pw-gitlab cloudflare:carol:pw-cf bitward-selftest:dave:pw-selftest:io.bitward.android; do
+  IFS=: read -r name user pw host <<<"$n"
+  echo "$pw" | B new --name "$name" --username "$user" --uri "https://${host:-$name.example.com}" --password-stdin >/dev/null
 done
 B sync >/dev/null
 kill $HUB_PID 2>/dev/null || true
 trap - EXIT
-pass "seed：$EMAIL 三筆項目入庫"
+pass "seed：$EMAIL 四筆項目入庫（第四筆 uri＝本 app package，A11 用）"
 
 # --- 2. emulator --------------------------------------------------------------
 if ! $ADB get-state >/dev/null 2>&1; then
@@ -218,11 +222,11 @@ hide_ime
 shot 2-login-filled
 $ADB logcat -c
 tap_text login-btn "登入"
-wait_text "鏡像 3 筆" 40 || { $ADB logcat -d | grep -E 'nsh|AndroidRuntime' | tail -20; fail "登入後列表沒出現"; }
+wait_text "鏡像 4 筆" 40 || { $ADB logcat -d | grep -E 'nsh|AndroidRuntime' | tail -20; fail "登入後列表沒出現"; }
 APP_LOG=$($ADB logcat -d)
-[[ "$APP_LOG" == *'已登入：3 筆鏡像'* ]] || fail "logcat 沒有登入成功軌跡"
+[[ "$APP_LOG" == *'已登入：4 筆鏡像'* ]] || fail "logcat 沒有登入成功軌跡"
 shot 3-vault
-pass "A3 in-process 登入＋sync＋明文索引回填（3 筆）"
+pass "A3 in-process 登入＋sync＋明文索引回填（4 筆）"
 
 # --- 6. A4：搜尋過濾 ----------------------------------------------------------
 tap_text search-field "搜尋名稱或網址"
@@ -233,7 +237,7 @@ dump /tmp/android-search.xml
 has_text /tmp/android-search.xml "gitlab" || fail "搜尋 git 應留 gitlab"
 if has_text /tmp/android-search.xml "cloudflare"; then fail "搜尋 git 不應留 cloudflare"; fi
 shot 4-search
-pass "A4 搜尋走 bw-store 的 FTS5 索引（3→2 筆）"
+pass "A4 搜尋走 bw-store 的 FTS5 索引（4→2 筆）"
 
 # --- 7. A5/A6：詳情遮罩 → Reveal → 返回清明文 --------------------------------
 tap_text gitlab-row "gitlab"
@@ -298,6 +302,44 @@ pass "A9 系統真的 bind 到我們並送 fill 請求（面板截圖 9-autofill
 [[ "$APP_LOG" == *'bitward-island: keystore EC class3 key'*'alias=bitward-class3-ec-probe'* ]] \
   || fail "logcat 沒有 Keystore Class 3 EC 金鑰標記"
 pass "A10 Keystore 橋生成 Class 3 EC 金鑰並回顯 alias"
+
+# --- 11. A11：解鎖態真候選（孤島真回密碼，不是佔位列） ------------------------
+# 實測：autofill service 開著時，app 自己欄位 focus 會彈「尚未解鎖」面板並
+# 搶走輸入焦點，之後的 input text／按「登入」都送不到 app（logcat 完全沒有
+# 第二次 Auth.Success）。所以重登這一段先關服務打字，再開服務驗真候選
+# （服務已在 A8–A10 被系統 bind 過，重設 key 立即生效）。
+$ADB shell am force-stop $PKG
+$ADB shell settings put secure autofill_service null >/dev/null 2>&1 || true
+$ADB shell settings put secure current_autofill_service null >/dev/null 2>&1 || true
+$ADB shell monkey -p $PKG -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+wait_text "登入你的密碼庫" 30 || fail "A11 重啟後登入畫面沒出現"
+tap_text pw-field "只用於派生金鑰，不落地"
+type_text "$WP"
+hide_ime
+$ADB logcat -c
+tap_text login-btn "登入"
+wait_text "鏡像 4 筆" 40 || { $ADB logcat -d | grep -E 'bitward|nsh|AndroidRuntime' | tail -20; fail "A11 重新登入失敗"; }
+$ADB shell settings put secure autofill_service "$AF_SVC"
+$ADB shell settings put secure current_autofill_service "$AF_SVC"
+sleep 2
+# 列表頁搜尋欄（第一個原生 EditText）focus → fill 請求走解鎖態分支
+hide_ime
+$ADB logcat -c
+tap_first_edittext android-a11-focus.xml
+wait_text "bitward-selftest" 15 || { $ADB logcat -d | grep bitward-island | tail -5; fail "A11 autofill 面板沒出現真候選列"; }
+APP_LOG=$($ADB logcat -d)
+[[ "$APP_LOG" == *'bitward-island: onFillRequest unlocked=true'* ]] \
+  || fail "A11 logcat 沒有 unlocked=true 的 fill 請求標記"
+[[ "$APP_LOG" == *'bitward-island: fill response datasets=1'* ]] \
+  || fail "A11 沒有回真 dataset（fill response 標記缺失）"
+[[ "$APP_LOG" == *'jni: candidates q=io.bitward.android n=1'* ]] \
+  || fail "A11 Rust 側沒有命中候選（JNI log 缺失）"
+shot 10-autofill-real-panel
+tap_text a11-pick "bitward-selftest"
+dump /tmp/android-a11-filled.xml
+has_text /tmp/android-a11-filled.xml "dave" || fail "A11 commit 後欄位內不是真 username（dave）"
+shot 11-autofill-filled
+pass "A11 解鎖態真候選：面板列 bitward-selftest、commit 後欄位＝dave（非佔位）"
 
 echo
 echo "截圖：$(ls "$SHOTS" | tr '\n' ' ')"
