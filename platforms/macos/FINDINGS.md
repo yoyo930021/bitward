@@ -315,3 +315,42 @@ DER/hash 直簽修復生效）。本輪新增的實測坑：
   有 job＝沙盒牆外的 BTM 卡死被重登解除；仍 EPERM＋smd「must be sandboxed」
   ＝必須先做上面 (a) helper 沙盒化才有閉環。`scripts/pkg-build.sh
   --experiment-only` 可重複跑實驗段不再觸發授權。
+- **helper 沙盒化切片（同夜，Main 追加）**：
+  · 裸二進位（Contents/Helpers/bitwarderd）加 app-sandbox：register 過（狀態頁
+    「已啟用」、BTM uuid 落地、launchd 收單），但 spawn 後 dyld
+    `libsystem_secinit _libsecinit_appsandbox.cold.6` **SIGTRAP**（terminal 與
+    launchd 皆掛；containermanagerd query 後即退）。換 reverse-DNS 簽章識別碼
+    （-i）也無解——**裸二進位沒有 bundle 身分，沙盒容器建不起來**。
+  · 正解形態（已落地 main 線）：巢狀 `Contents/Helpers/BitwardDaemon.app`
+    （Resources/BitwardDaemon-Info.plist＋daemon.entitlements：sandbox＋
+    application-groups＋network.client＋/private/tmp 絕對路徑例外；
+    helper.entitlements 維持非沙盒供裸二進位/legacy 用）。沙盒 daemon
+    **過 secinit、能被 launchd 跑起來**（Mac Developer 簽即可，SIGTRAP 牆只在
+    裸二進位形態）。
+  · 沙盒執行期語意（實測）：容器＝`~/Library/Containers/io.bitward.dev.daemon`
+    （依 bundle ID，非 Main 預設的 App 容器）；預設 data_dir/sock 拼出 110 字元
+    ＞ UDS SUN_LEN(104) → daemon exit(1) 迴圈（「path must be shorter than
+    SUN_LEN」）。修：main.rs `real_user_home()`（getpwuid 回真 home，沙盒內
+    $HOME 是容器路徑）給 group sock 用＋plist args 補
+    `--sock /private/tmp/io.bitward.dev/daemon.sock`。沙盒內綁容器 sock OK；
+    **綁 /private/tmp 即使有 temporary-exception 仍 EPERM**（seatbelt 對
+    unix-bind 只放行容器內，檔案例外不覆蓋 network-bind）→ 沙盒形態的
+    CLI/tmp sock 路徑不可用，provider 用的 group sock 綁定能否放行**未驗**
+    （需先解 SUN_LEN 後再測；§8「沙盒 App 綁 group EPERM」同牆疑慮仍在）。
+  · **分發形態決策點（給上架批次，smd 原文「because the app is sandboxed」
+    ＝沙盒要求是連鎖的，只在送件 App 沙盒時成立）**：
+    (MAS 路) App 留沙盒→helper 必須沙盒（BitwardDaemon.app 形態）→還得跨過
+      沙盒 unix-bind 牆（tmp/group sock 皆 EPERM 風險）→可能改 XPC/Mach 服務。
+    (Developer ID 直裝路) App 拿掉 app-sandbox→helper 免沙盒→裸二進位即可
+      常駐。本機以临时建構驗證（dist/stage-nosb：App 去 sandbox＋BundleProgram
+      指回裸二進位）：**register 通過、狀態「已啟用」、launchd 開始 spawn**
+      ——secinit 牆消失；但 spawn「failed init」0 秒 exit（runs++循環），
+      嫌疑＝taskgated「Disallowing bitwarderd because no eligible provisioning
+      profiles found」（profile 不含 application-groups）→ 直裝路的下一道閘是
+      **重產含 App Groups 的 provisioning profile**（portal 動作，非本機）。
+    兩條路的共同前提仍是正式簽章批次。
+- **本機收尾狀態**：/Applications＝mainline staging 產物（沙盒 App＋雙 helper）；
+  SMAppService job 已 bootout（未註冊）；legacy LaunchAgent 未裝；
+  demo daemon（pid 8934）活著，但 group `daemon.sock` 檔案現指向已死的
+  手動實例 inode（我實測綁定權限所留），**重啟 demo daemon 才能恢復 group sock
+  服務**（使用者方便時）。readpath／pushpath e2e 全綠（未沙盒 dev 形態不受影響）。

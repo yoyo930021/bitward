@@ -38,8 +38,26 @@ echo "==> staging（殭屍二進位保險）"
 rm -rf "$STAGE"; mkdir -p "$REPO/dist" "$STAGE/root"
 ditto "$BUNDLE" "$STAGE/root/Bitward.app"
 cp -f target/release/bitwarderd "$STAGE/root/Bitward.app/Contents/Helpers/bitwarderd"
+# 新鮮度：重簽前 cmp 內容（簽章後 sha 必變，只能在此之前比）
+cmp -s target/release/bitwarderd "$STAGE/root/Bitward.app/Contents/Helpers/bitwarderd" \
+  || { echo "FATAL: staged helper 與 cargo release 內容不符（殭屍拷貝？）"; exit 1; }
+# 功能探測跑 cargo 產物本尊（同 bytes、未沙盒）：staged helper 沙盒化後
+# 從 terminal 直接跑會卡在 secinit（容器歸屬），其真運行環境是 launchd。
+target/release/bitwarderd --service status >/dev/null 2>&1 \
+  || { echo "FATAL: bitwarderd 不支援 --service（舊殭屍二進位？）"; exit 1; }
 codesign -f -s "$IDENTITY" --entitlements bins/bitwarderd/helper.entitlements \
   "$STAGE/root/Bitward.app/Contents/Helpers/bitwarderd"
+# 沙盒 daemon（SMAppService 目標）：重組嵌套 BitwardDaemon.app（同殭屍保險）
+DA_STAGED="$STAGE/root/Bitward.app/Contents/Helpers/BitwardDaemon.app"
+rm -rf "$DA_STAGED"; mkdir -p "$DA_STAGED/Contents/MacOS"
+cp -f target/release/bitwarderd "$DA_STAGED/Contents/MacOS/bitwarderd"
+cmp -s target/release/bitwarderd "$DA_STAGED/Contents/MacOS/bitwarderd" \
+  || { echo "FATAL: staged daemon app 二進位不符"; exit 1; }
+cp -f platforms/macos/Bitward/Resources/BitwardDaemon-Info.plist "$DA_STAGED/Contents/Info.plist"
+codesign -f -s "$IDENTITY" -i io.bitward.dev.daemon --entitlements bins/bitwarderd/daemon.entitlements \
+  "$DA_STAGED/Contents/MacOS/bitwarderd"
+codesign -f -s "$IDENTITY" -i io.bitward.dev.daemon --entitlements bins/bitwarderd/daemon.entitlements \
+  "$DA_STAGED"
 # 殭屍 plist 保險：增量建置可能殘留舊 LaunchAgents（不合規 Label 的兄弟檔會讓
 # SMAppService register 拋 EINVAL，2026-11-07 實測）→ 以源檔為唯一事實重建目錄。
 LA_STAGED="$STAGE/root/Bitward.app/Contents/Library/LaunchAgents"
@@ -51,11 +69,8 @@ find "$STAGE/root" -name '._*' -delete
 # 與 project.yml CODE_SIGN_ENTITLEMENTS 一致；原簽章 flags=none，不加 -o runtime）
 codesign -f -s "$IDENTITY" --entitlements platforms/macos/Bitward/Bitward.entitlements \
   "$STAGE/root/Bitward.app"
-# 功能探測（舊殭屍二進位不認 --service）
-"$STAGE/root/Bitward.app/Contents/Helpers/bitwarderd" --service status >/dev/null 2>&1 \
-  || { echo "FATAL: staged helper 不支援 --service（舊殭屍二進位？）"; exit 1; }
 codesign --verify --deep --strict "$STAGE/root/Bitward.app"
-echo "    staged helper functional + bundle seal OK"
+echo "    staged helper fresh + bundle seal OK"
 VERSION=$(plutil -extract CFBundleShortVersionString raw \
   "$STAGE/root/Bitward.app/Contents/Info.plist")
 
@@ -119,7 +134,9 @@ fi
 
 echo "==> installer -pkg -target /"
 pgrep -x Bitward >/dev/null && kill -9 "$(pgrep -x Bitward)" 2>/dev/null || true
-if ! sudo -n installer -pkg "$PKG" -target /; then
+if [ "${BW_NO_INSTALL:-0}" = 1 ]; then
+  echo "    BW_NO_INSTALL=1：跳過安裝（產物以 ditto 手動換裝，receipt 維持既有）"
+elif ! sudo -n installer -pkg "$PKG" -target /; then
   echo "    無免密 sudo → 系統授權框（SecurityAgent），需要使用者按一次密碼/Touch ID"
   osascript -e "do shell script \"/usr/sbin/installer -pkg '$PKG' -target /\" with administrator privileges"
 fi
@@ -135,8 +152,13 @@ fi
 codesign --verify --deep --strict /Applications/Bitward.app
 [ -d /Applications/Bitward.app ] || { echo "FATAL: /Applications/Bitward.app 不存在"; exit 1; }
 pkgutil --pkgs | grep -qx "$PKG_ID" || { echo "FATAL: receipt 缺失"; exit 1; }
-/Applications/Bitward.app/Contents/Helpers/bitwarderd --service status >/dev/null 2>&1 \
-  || { echo "FATAL: 已裝 helper 不支援 --service"; exit 1; }
+cmp -s /Applications/Bitward.app/Contents/Helpers/bitwarderd \
+     "$STAGE/root/Bitward.app/Contents/Helpers/bitwarderd" \
+  || { echo "FATAL: 已裝 helper 與 staging 產物不符"; exit 1; }
+cmp -s /Applications/Bitward.app/Contents/Helpers/BitwardDaemon.app/Contents/MacOS/bitwarderd \
+     "$STAGE/root/Bitward.app/Contents/Helpers/BitwardDaemon.app/Contents/MacOS/bitwarderd" \
+  || { echo "FATAL: 已裝 BitwardDaemon.app 與 staging 產物不符"; exit 1; }
+echo "    已裝 helper ＝ staging 產物（沙盒 helper 的執行探測交給 launchd＋實驗段）"
 echo "    pkg 簽章 / bundle 簽章 / 落地路徑 / receipt / helper 功能：全部 OK"
 pkgutil --pkg-info "$PKG_ID" | sed 's/^/    /'
 fi

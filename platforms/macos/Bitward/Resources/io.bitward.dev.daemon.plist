@@ -11,10 +11,12 @@
 	<key>__CFBundleIdentifier</key>
 	<string>io.bitward.dev</string>
 	<key>BundleProgram</key>
-	<string>Contents/Helpers/bitwarderd</string>
+	<string>Contents/Helpers/BitwardDaemon.app/Contents/MacOS/bitwarderd</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>bitwarderd</string>
+		<string>--sock</string>
+		<string>/private/tmp/io.bitward.dev/daemon.sock</string>
 		<string>--push-app-group</string>
 		<string>group.8V5224A99M.io.bitward.dev</string>
 	</array>

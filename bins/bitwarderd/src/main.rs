@@ -71,6 +71,23 @@ pub(crate) fn default_data_dir() -> PathBuf {
         .join("bitward")
 }
 
+/// 真使用者 home：沙盒進程的 `$HOME` 被改寫進容器深路徑（UDS SUN_LEN 會爆），
+/// getpwuid 不受影響。取不到就退回 `dirs::home_dir()`。
+#[cfg(target_os = "macos")]
+fn real_user_home() -> PathBuf {
+    // SAFETY: pw 為 NULL 時跳過；非 NULL 時 pw_dir 為 NUL-terminated C 字串。
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if !pw.is_null() && !(*pw).pw_dir.is_null() {
+            let s = std::ffi::CStr::from_ptr((*pw).pw_dir).to_string_lossy();
+            if !s.is_empty() {
+                return PathBuf::from(s.into_owned());
+            }
+        }
+    }
+    dirs::home_dir().unwrap_or_default()
+}
+
 /// socket 綁定 + 單實例守衛（flock）。崩潰／kill -9 留下的屍体 sock 檔案必須
 /// 清掉重綁（Make Operations Idempotent），但「先 unlink 再 bind」只有在
 /// **沒有別的 live 實例**時才安全——否則第二個實例會把第一個的位址蓋掉，
@@ -224,7 +241,11 @@ async fn main() -> Result<(), String> {
     // macOS provider：app group 容器內多綁一條 UDS（§1.4，Xcode worker 依賴）
     #[cfg(target_os = "macos")]
     if let Some(group) = args.push_app_group.clone() {
-        let base = dirs::home_dir().unwrap_or_default();
+        // 沙盒形態（BitwardDaemon.app via SMAppService）下 $HOME 落在容器深路徑，
+        // 拼出的 group sock 超過 UDS SUN_LEN(104) → bind 必掛（2026-11-08 實測
+        // 「path must be shorter than SUN_LEN」）。getpwuid 回真 home，
+        // 沙盒內外同值且 Group Containers 路由 app-group entitlement 放行。
+        let base = real_user_home();
         let group_dir = base.join("Library/Group Containers").join(&group);
         if std::fs::create_dir_all(&group_dir).is_ok() {
             let gsock = group_dir.join("daemon.sock");

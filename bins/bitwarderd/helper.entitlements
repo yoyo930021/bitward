@@ -3,7 +3,11 @@
 <plist version="1.0">
 <dict>
 	<!-- launchd 常駐 daemon 要碰 app-group 容器（provider 的 daemon.sock）：
-	     macOS 15+ 要求 team 身分 + 對應 entitlement，ad-hoc 簽章會被 EPERM 拒。 -->
+	     macOS 15+ 要求 team 身分 + 對應 entitlement，ad-hoc 簽章會被 EPERM 拒。
+	     注意：本檔是「裸二進位」（legacy service install 用）的簽章形態，
+	     **不加 app-sandbox**——裸二進位沙盒化後 dyld secinit 直接 SIGTRAP
+	     （實測：terminal 與 launchd 皆掛，見 FINDINGS §10）；沙盒形態走
+	     daemon.entitlements＋BitwardDaemon.app 容器化佈局。 -->
 	<key>com.apple.security.application-groups</key>
 	<array>
 		<string>group.8V5224A99M.io.bitward.dev</string>

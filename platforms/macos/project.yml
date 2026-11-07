@@ -50,11 +50,26 @@ targets:
             cp -f "$SRC" "$DEST/bitwarderd"
             # team 簽章 + app-group entitlement：macOS 15+ 的 group container
             # 只放行「有 team 身分且宣告對應 group」的進程（ad-hoc 會 EPERM）。
-            codesign -f -s "$EXPANDED_CODE_SIGN_IDENTITY" \
+            # -i io.bitward.dev.daemon：沙盒容器的鍵需 reverse-DNS 識別碼
+            #（SMAppService 政策要求 helper 沙盒化，見 FINDINGS §10）。
+            codesign -f -s "$EXPANDED_CODE_SIGN_IDENTITY" -i io.bitward.dev.daemon \
               --entitlements "$SRCROOT/../../bins/bitwarderd/helper.entitlements" \
               "$DEST/bitwarderd"
           else
             echo "warning: bitwarderd not found (cargo build first)"
+          fi
+          # 沙盒化 SMAppService daemon：嵌套 BitwardDaemon.app（裸二進位沙盒化會
+          # 死在 dyld secinit；沙盒容器需要 bundle 身分，FINDINGS §10）。
+          if [ -x "$SRC" ]; then
+            DA="$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME/Contents/Helpers/BitwardDaemon.app"
+            rm -rf "$DA"; mkdir -p "$DA/Contents/MacOS"
+            cp -f "$SRC" "$DA/Contents/MacOS/bitwarderd"
+            cp -f "$SRCROOT/Bitward/Resources/BitwardDaemon-Info.plist" "$DA/Contents/Info.plist"
+            codesign -f -s "$EXPANDED_CODE_SIGN_IDENTITY" -i io.bitward.dev.daemon \
+              --entitlements "$SRCROOT/../../bins/bitwarderd/daemon.entitlements" \
+              "$DA/Contents/MacOS/bitwarderd"
+            codesign -f -s "$EXPANDED_CODE_SIGN_IDENTITY" -i io.bitward.dev.daemon \
+              --entitlements "$SRCROOT/../../bins/bitwarderd/daemon.entitlements" "$DA"
           fi
           # SMAppService.agent(plistName:) 規定 plist 在 Contents/Library/LaunchAgents/
           # 先清空再拷：增量建置不刪舊檔，殘留的 io.bitward.daemon.plist（不合規
