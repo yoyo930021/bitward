@@ -18,7 +18,7 @@ use std::sync::{Arc, LazyLock};
 
 use bw_proto::ItemId;
 use hub::{Hub, Revealed, Snapshot, data_dir};
-use nsh_base::{nav_page, nav_stack, theme};
+use nsh_base::{dialog, nav_page, nav_stack, theme};
 use nsh_core::prelude::*;
 
 /// 進程內的中樞（開不起來時把錯誤留給 UI 顯示；JNI 橋同享這個實例）。
@@ -50,6 +50,10 @@ pub fn App() -> impl IntoElement {
     let phase = signal(Phase::SignedOut);
     let status = signal(String::new());
     let selected = signal(None::<ItemId>);
+    // 編輯模態的目標（None＝沒開）；`rev` 是寫入後的重算訊號：patch 不改
+    // 計數、phase 值不動，列表 computed 需要這個獨立扳機。
+    let editor = signal(None::<ui::Editor>);
+    let rev = signal(0_u64);
     // 明文只存活在這個訊號：詳情頁離開時 set(None) → Zeroizing 歸零。
     // 用 SignalEquals::Never，寫回同值也照樣通知（不讓「值相等」吞掉清零）。
     let plain = signal_with(None::<Revealed>, SignalEquals::Never);
@@ -57,6 +61,7 @@ pub fn App() -> impl IntoElement {
     let hub_vault = hub.clone();
     let hub_login = hub.clone();
     let hub_detail = hub.clone();
+    let hub_edit = hub.clone();
 
     view()
         .flex_1()
@@ -69,7 +74,16 @@ pub fn App() -> impl IntoElement {
                     nav_page().key("root").title("bitward").child(
                         when(
                             move || matches!(phase.get(), Phase::Vault(_)),
-                            move || ui::vault_page(hub_vault.clone(), phase, status, selected),
+                            move || {
+                                ui::vault_page(
+                                    hub_vault.clone(),
+                                    phase,
+                                    status,
+                                    selected,
+                                    editor,
+                                    rev,
+                                )
+                            },
                         )
                         .otherwise(move || ui::login_page(hub_login.clone(), phase, status)),
                     ),
@@ -78,8 +92,23 @@ pub fn App() -> impl IntoElement {
                     move || selected.get().is_some(),
                     move || {
                         let id = selected.get().unwrap_or_default();
-                        ui::detail_page(hub_detail.clone(), id, selected, plain)
+                        ui::detail_page(hub_detail.clone(), id, selected, plain, editor, phase, rev)
                     },
                 )),
         )
+        // 編輯模態：覆蓋整個棧（navprobe 實測 `dialog()` 在 Android 渲染正常，
+        // 且系統返回鍵不會誤 pop 底下的頁面）。
+        .child(when(
+            move || editor.get().is_some(),
+            move || {
+                dialog().child(ui::editor_modal(
+                    hub_edit.clone(),
+                    editor,
+                    phase,
+                    selected,
+                    plain,
+                    rev,
+                ))
+            },
+        ))
 }

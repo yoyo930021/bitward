@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use bw_proto::{ItemId, ItemKind, ItemMeta};
+use bw_proto::{CipherDraft, FieldEdit, ItemId, ItemKind, ItemMeta};
 use nsh_base::{input, nav_page, theme};
 use nsh_core::EllipsizeMode;
 use nsh_core::element::Screen;
@@ -16,6 +16,13 @@ use nsh_core::prelude::*;
 
 use crate::Phase;
 use crate::hub::{Hub, Revealed};
+
+/// 編輯模態的目標：新增一筆，或編輯既有的某筆（預填走 `Hub::reveal`）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Editor {
+    New,
+    Edit(ItemId),
+}
 
 /// 中樞開不起來（資料目錄不可寫等）：明確失敗畫面，不靜默降格。
 pub fn broken_page(err: String) -> View {
@@ -140,19 +147,23 @@ pub fn login_page(hub: Arc<Hub>, phase: Signal<Phase>, status: Signal<String>) -
 }
 
 /// 金庫列表：搜尋 + 原生虛擬列表；點列 push 詳情頁。
+/// `rev` 由寫入路徑（模態／刪除）遞增，驅動列表重算；`editor` 開編輯模態。
 pub fn vault_page(
     hub: Arc<Hub>,
     phase: Signal<Phase>,
     status: Signal<String>,
     selected: Signal<Option<ItemId>>,
+    editor: Signal<Option<Editor>>,
+    rev: Signal<u64>,
 ) -> View {
     let query = signal(String::new());
     let filtered = computed({
         let hub = hub.clone();
         let count_phase = phase;
         move || {
-            // 同步/鎖定改寫 phase 時才重算：訊號驅動，不另設輪詢。
+            // 同步/鎖定/寫入改動訊號時才重算：訊號驅動，不另設輪詢。
             let _ = count_phase.get();
+            let _ = rev.get();
             Arc::new(hub.list(&query.get()))
         }
     });
@@ -199,6 +210,9 @@ pub fn vault_page(
                                 .flex_row()
                                 .items_center()
                                 .gap_2()
+                                .child(ghost_button("新增", move || {
+                                    editor.set(Some(Editor::New));
+                                }))
                                 .child(ghost_button("重新同步", move || {
                                     if phase.get() == Phase::Busy {
                                         return;
@@ -365,11 +379,16 @@ pub fn vault_page(
 }
 
 /// 詳情頁（push 在棧上）：metadata 全欄位；密碼預設遮罩，按「顯示」才解密。
+/// 「編輯」開預填模態；「刪除」走二次確認後軟刪（`Hub::delete`，待推送語意
+/// 同列表的 pending 標記——tombstone 即刻離列，伺服器標記等同步收斂）。
 pub fn detail_page(
     hub: Arc<Hub>,
     id: ItemId,
     selected: Signal<Option<ItemId>>,
     plain: Signal<Option<Revealed>>,
+    editor: Signal<Option<Editor>>,
+    phase: Signal<Phase>,
+    rev: Signal<u64>,
 ) -> Screen {
     let title = hub
         .meta(id)
@@ -380,6 +399,7 @@ pub fn detail_page(
 
     let show_hub = hub.clone();
     let show_status = signal(String::new());
+    let confirm_del = signal(false);
 
     let content = view().flex_1().flex_col().child(
         scroll().flex_1().child(
@@ -473,7 +493,64 @@ pub fn detail_page(
                         .text_size(px(12.0))
                         .line_height(px(17.0))
                         .text_color(move || theme().destructive),
-                ),
+                )
+                .child(divider())
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(ghost_button("編輯", move || {
+                            editor.set(Some(Editor::Edit(id)));
+                        }))
+                        .child(ghost_button("刪除", move || {
+                            confirm_del.set(true);
+                        })),
+                )
+                .child(when(
+                    move || confirm_del.get(),
+                    move || {
+                        let ok_hub = hub.clone();
+                        let ok_phase = phase;
+                        view()
+                            .flex_col()
+                            .gap_3()
+                            .p_4()
+                            .rounded_lg()
+                            .border(px(1.0))
+                            .border_color(move || theme().destructive)
+                            .child(
+                                text("確定刪除這筆？（軟刪：即刻從列表消失，同步後伺服器才標記刪除）")
+                                    .text_size(px(13.0))
+                                    .line_height(px(19.0)),
+                            )
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .gap_2()
+                                    .child(ghost_button("取消刪除", move || {
+                                        confirm_del.set(false);
+                                    }))
+                                    .child(primary_button("確定刪除", move || {
+                                        match ok_hub.delete(id) {
+                                            Ok(()) => {
+                                                log::info!("ui: 已軟刪 {id}（待推送）");
+                                                confirm_del.set(false);
+                                                // 返回列表並清明文；計數與列舉同步刷新。
+                                                plain.set(None);
+                                                selected.set(None);
+                                                if let Phase::Vault(mut s) = ok_phase.get() {
+                                                    s.items = ok_hub.list("").len();
+                                                    ok_phase.set(Phase::Vault(s));
+                                                }
+                                                rev.set(rev.get() + 1);
+                                            }
+                                            Err(e) => show_status.set(e),
+                                        }
+                                    })),
+                            )
+                    },
+                )),
         ),
     );
 
@@ -486,6 +563,168 @@ pub fn detail_page(
             selected.set(None);
         })
         .child(content)
+}
+
+/// 編輯模態（掛在根上的 `dialog()` 覆蓋層，navprobe 實測返回鍵不誤傷棧）：
+/// 名稱／帳號／密碼／網址四欄＋存/取消。編輯預填走 `Hub::reveal`（明文只活在
+/// 欄位訊號，關閉即清空）；送出去的是**對預填基線的差量**——沒動的欄位不進
+/// patch，欄位級存活由 `bw_vault::apply_merged` 保證。寫入走 `Hub` 本地交易
+/// （outbox），推送收斂由「重新同步」的 drain 負責（背景同步是下一批）。
+pub fn editor_modal(
+    hub: Arc<Hub>,
+    editor: Signal<Option<Editor>>,
+    phase: Signal<Phase>,
+    selected: Signal<Option<ItemId>>,
+    plain: Signal<Option<Revealed>>,
+    rev: Signal<u64>,
+) -> View {
+    let target = editor.get().unwrap_or(Editor::New);
+    let (title, pre) = match target {
+        Editor::New => ("新增項目", None),
+        Editor::Edit(id) => ("編輯項目", hub.reveal(id).ok()),
+    };
+    // 基線（比對差量用）與欄位訊號同源初始化；密碼副本在關閉時一併清掉。
+    let base_name = pre.as_ref().map(|r| r.name.clone()).unwrap_or_default();
+    let base_user = pre.as_ref().and_then(|r| r.username.clone());
+    let base_pass = pre
+        .as_ref()
+        .and_then(|r| r.password.as_ref().map(|p| p.to_string()));
+    let base_uri = pre.as_ref().and_then(|r| r.uris.first().cloned());
+
+    let name = signal(base_name.clone());
+    let user = signal(base_user.clone().unwrap_or_default());
+    let pass = signal(base_pass.clone().unwrap_or_default());
+    let uri = signal(base_uri.clone().unwrap_or_default());
+    let err = signal(String::new());
+
+    let close = {
+        let (c_name, c_user, c_pass, c_uri, c_editor) = (name, user, pass, uri, editor);
+        move || {
+            // 明文紀律：欄位殘留（含密碼）先歸零再收模態。
+            c_name.set(String::new());
+            c_user.set(String::new());
+            c_pass.set(String::new());
+            c_uri.set(String::new());
+            c_editor.set(None);
+        }
+    };
+
+    let save_close = close;
+    let save_hub = hub.clone();
+    let save = move || {
+        let n = name.get().trim().to_owned();
+        if n.is_empty() {
+            err.set("名稱為必填".to_owned());
+            return;
+        }
+        let user_v = nonblank(&user.get());
+        let pass_v = nonblank(&pass.get());
+        let uri_v = nonblank(&uri.get());
+        let out: Result<(), String> = match target {
+            Editor::New => save_hub
+                .create(&CipherDraft {
+                    kind: ItemKind::Login,
+                    name: n,
+                    username: user_v,
+                    password: pass_v,
+                    totp: None,
+                    uris: uri_v.map(|u| vec![u]).unwrap_or_default(),
+                    notes: None,
+                    favorite: false,
+                })
+                .map(|_| ()),
+            Editor::Edit(id) => {
+                let mut edits: Vec<FieldEdit> = Vec::new();
+                if n != base_name {
+                    edits.push(FieldEdit {
+                        path: "name".into(),
+                        value: Some(n),
+                    });
+                }
+                if user_v != base_user {
+                    edits.push(FieldEdit {
+                        path: "username".into(),
+                        value: user_v,
+                    });
+                }
+                if pass_v != base_pass {
+                    edits.push(FieldEdit {
+                        path: "password".into(),
+                        value: pass_v,
+                    });
+                }
+                if uri_v != base_uri {
+                    edits.push(FieldEdit {
+                        path: "uri.0".into(),
+                        value: uri_v,
+                    });
+                }
+                if edits.is_empty() {
+                    Ok(()) // 沒動任何欄：no-op 收工，不產生空 patch。
+                } else {
+                    save_hub.patch(id, &edits)
+                }
+            }
+        };
+        match out {
+            Ok(()) => {
+                let was_edit = matches!(target, Editor::Edit(_));
+                save_close();
+                if was_edit {
+                    // 編輯來自詳情頁：靜態欄位不會自我重繪，回列表看新態。
+                    plain.set(None);
+                    selected.set(None);
+                }
+                if let Phase::Vault(mut s) = phase.get() {
+                    s.items = save_hub.list("").len();
+                    phase.set(Phase::Vault(s));
+                }
+                rev.set(rev.get() + 1);
+            }
+            // 錯誤原文顯示（閘金鑰、服務器拒絕都不改寫）。
+            Err(msg) => err.set(msg),
+        }
+    };
+
+    view().flex_1().items_center().justify_center().child(
+        view()
+            .w_full()
+            .max_w(px(360.0))
+            .flex_col()
+            .gap_4()
+            .p_6()
+            .rounded(px(14.0))
+            .bg(move || theme().background)
+            .child(
+                text(title)
+                    .text_size(px(18.0))
+                    .font_weight(FontWeight::SEMIBOLD),
+            )
+            .child(form_field("名稱", "項目名稱（必填）", name, false))
+            .child(form_field("帳號", "帳號（可留空）", user, false))
+            .child(form_field("密碼", "密碼（可留空）", pass, true))
+            .child(form_field("網址", "網址（可留空）", uri, false))
+            .child(
+                text(move || err.get())
+                    .text_size(px(12.0))
+                    .line_height(px(17.0))
+                    .text_color(move || theme().destructive),
+            )
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(primary_button("儲存", save))
+                    .child(ghost_button("取消", close)),
+            ),
+    )
+}
+
+/// 欄位值 → `Option`：全空視同未填（None＝清空語意，patch 差量的基準）。
+fn nonblank(s: &str) -> Option<String> {
+    let t = s.trim();
+    (!t.is_empty()).then(|| t.to_owned())
 }
 
 fn meta_rows(hub: Arc<Hub>, id: ItemId) -> View {

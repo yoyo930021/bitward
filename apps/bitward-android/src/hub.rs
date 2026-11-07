@@ -16,11 +16,11 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use bw_proto::{ItemId, ItemMeta, Query};
-use bw_server::{Client, ClientOptions, PasswordLogin};
-use bw_store::Store;
+use bw_proto::{CipherDraft, FieldEdit, ItemId, ItemMeta, Query};
+use bw_server::{Client, ClientOptions, DeleteKind, PasswordLogin};
+use bw_store::{MutState, Mutation, MutationDraft, Store};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 /// 帳號落地資料（不含主密碼，也不含明文 user key）。
@@ -75,6 +75,8 @@ pub struct Hub {
     store: Store,
     unlocked: Mutex<Option<Unlocked>>,
     device: OnceLock<String>,
+    /// drain 單飛：同一時間只有一條 outbox 推送序列（租約之外再加一道保險）。
+    drain_lock: tokio::sync::Mutex<()>,
 }
 
 impl Hub {
@@ -86,6 +88,7 @@ impl Hub {
             store,
             unlocked: Mutex::new(None),
             device: OnceLock::new(),
+            drain_lock: tokio::sync::Mutex::new(()),
         });
         log::info!("bitward-android hub: dir={}", hub.dir.display());
         Ok(hub)
@@ -215,6 +218,18 @@ impl Hub {
     }
 
     async fn pull_and_index(&self, client: Arc<Client>) -> Result<usize, String> {
+        // 先推後拉（契約 §2.4）：outbox 還有未結算列時全量重建會把「待推送」
+        // 的本地鏡像列吞掉（伺服器還沒有它們），這時直接回本地計數。
+        self.drain().await;
+        let pending = self
+            .store
+            .depth()
+            .map(|d| d.queued + d.in_flight + d.awaiting)
+            .unwrap_or(u32::MAX);
+        if pending > 0 {
+            log::warn!("pull: outbox 尚有 {pending} 列未推送，跳過全量重建（離線態）");
+            return Ok(self.store.cipher_count().unwrap_or(0) as usize);
+        }
         let raw = client.sync().await.map_err(|e| format!("sync 失敗：{e}"))?;
         self.store
             .apply_sync(&raw)
@@ -227,12 +242,6 @@ impl Hub {
     /// `bw_vault::plain_index`）：解密只在拿得到 user key 時發生，單筆失敗
     /// 容忍跳過（欄位漂移防禦）。登入＝本批唯一的解鎖完成點，回填接在這裡。
     fn reindex_plain(&self) -> Result<(), String> {
-        let user_key = {
-            let g = self.unlocked.lock().expect("hub mutex poisoned");
-            let u = g.as_ref().ok_or("尚未解鎖")?;
-            u.user_key.clone()
-        };
-        let dec = |s: &str| bw_crypto::decrypt_bytes(&user_key, s).ok().and_then(|b| String::from_utf8(b).ok());
         let metas = self
             .store
             .query(&Query {
@@ -240,15 +249,33 @@ impl Hub {
                 ..Default::default()
             })
             .map_err(|e| e.to_string())?;
-        for m in metas {
-            let Some(row) = self.store.item(m.id).map_err(|e| e.to_string())? else {
+        self.reindex_ids(metas.iter().map(|m| m.id))
+    }
+
+    /// 單筆／複數 id 的明文索引回填（寫路徑 enqueue 後就地刷新，搜尋與列表
+    /// 立刻看到新值；與批量回填同一條 `bw_vault::plain_index`）。
+    fn reindex_ids(&self, ids: impl IntoIterator<Item = ItemId>) -> Result<(), String> {
+        let user_key = {
+            let g = self.unlocked.lock().expect("hub mutex poisoned");
+            let u = g.as_ref().ok_or("尚未解鎖")?;
+            u.user_key.clone()
+        };
+        let dec = |s: &str| {
+            bw_crypto::decrypt_bytes(&user_key, s)
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok())
+        };
+        for id in ids {
+            let Some(row) = self.store.item(id).map_err(|e| e.to_string())? else {
                 continue;
             };
             let idx = bw_vault::plain_index(&row.enc_cipher, &dec);
-            let _ = self.store.set_plain_meta(m.id, idx.name.as_deref(), &idx.uris);
             let _ = self
                 .store
-                .set_plain_secrets(m.id, idx.username.as_deref(), idx.password.as_deref());
+                .set_plain_meta(id, idx.name.as_deref(), &idx.uris);
+            let _ =
+                self.store
+                    .set_plain_secrets(id, idx.username.as_deref(), idx.password.as_deref());
         }
         Ok(())
     }
@@ -352,6 +379,385 @@ impl Hub {
     }
 }
 
+// —— vault 寫入路徑（新增／編輯／刪除）——
+//
+// 語意與 daemon 的 P2 寫路徑同源（契約 §2.4）：本地 transaction（mirror＋
+// outbox 同交易）先行，UI 立刻以既有 `pending` 標記顯示「待推送」；push 由
+// `drain` 執行，本批只在「重新同步」與登入後的 pull 前觸發（背景同步尚未接，
+// 見 README 已知的下一步）。同 item FIFO、租約認領、base_rev CAS＋欄位級三方
+// 合併全部沿用 `bw_store`／`bw_vault` 的原語，這裡只做編排，不另發一套流程。
+
+impl Hub {
+    fn unlocked_client(&self) -> Option<Arc<Client>> {
+        let g = self.unlocked.lock().expect("hub mutex poisoned");
+        g.as_ref().map(|u| u.client.clone())
+    }
+
+    fn unlocked_user_key(&self) -> Option<bw_crypto::UserKey> {
+        let g = self.unlocked.lock().expect("hub mutex poisoned");
+        g.as_ref().map(|u| u.user_key.clone())
+    }
+
+    /// 新增：本地鏡像＋outbox 同交易入列（離線也成功），回本地 id。
+    /// 推送收斂後本地 id 由 `remap_item` 換成伺服器 id（與 daemon A7 同路徑）。
+    pub fn create(&self, draft: &CipherDraft) -> Result<ItemId, String> {
+        let user_key = self.unlocked_user_key().ok_or("尚未解鎖")?;
+        let id = uuid::Uuid::new_v4();
+        let cipher = encrypt_login_draft(&user_key, draft, id);
+        self.store
+            .put_mirror(id, &cipher)
+            .map_err(|e| e.to_string())?;
+        let mut body = cipher.clone();
+        if let Some(o) = body.as_object_mut() {
+            o.remove("id");
+        }
+        self.store
+            .enqueue(&MutationDraft {
+                item: id,
+                payload: json!({"op": "create", "cipher": body}),
+                base_rev: None,
+                origin: Some("vault-ui"),
+                mirror: None,
+            })
+            .map_err(|e| e.to_string())?;
+        self.reindex_ids([id])?;
+        log::info!("hub: create {id}（待推送）");
+        Ok(id)
+    }
+
+    /// 編輯：欄位級 patch（path 文法＝`bw_proto::FieldEdit` 權威定義）。
+    /// 未列出的欄位原樣保留（鏡像無損往返，不变量 8）。
+    pub fn patch(&self, id: ItemId, edits: &[FieldEdit]) -> Result<(), String> {
+        let user_key = self.unlocked_user_key().ok_or("尚未解鎖")?;
+        let row = self
+            .store
+            .item(id)
+            .map_err(|e| e.to_string())?
+            .ok_or("找不到這筆項目")?;
+        // org 共享項目的寫側金鑰是 org 對稱鑰，本批沒有 akey 解封路徑：
+        // 直接拒絕，絕不以 user key 產生解不開的密文（daemon 同語意）。
+        if row
+            .enc_cipher
+            .get("organizationId")
+            .and_then(Value::as_str)
+            .is_some()
+        {
+            return Err("組織共享項目暫不支援編輯".to_owned());
+        }
+        let base = row.enc_cipher;
+        let map: bw_vault::FieldMap = edits
+            .iter()
+            .map(|e| (e.path.clone(), e.value.clone()))
+            .collect();
+        let ours = bw_vault::apply_merged(&base, &map, &|v| {
+            bw_crypto::encrypt_bytes_key(user_key.as_bytes(), v.as_bytes()).unwrap_or_default()
+        });
+        let touched: Vec<&str> = edits.iter().map(|e| e.path.as_str()).collect();
+        let raw = self.store.raw(id).map_err(|e| e.to_string())?;
+        let rev = row_rev_of(&raw);
+        self.store
+            .enqueue(&MutationDraft {
+                item: id,
+                payload: json!({"op": "patch", "base": base, "ours": ours, "touched": touched}),
+                base_rev: rev.as_deref(),
+                origin: Some("vault-ui"),
+                mirror: Some(&ours),
+            })
+            .map_err(|e| e.to_string())?;
+        self.reindex_ids([id])?;
+        log::info!("hub: patch {id}（待推送）");
+        Ok(())
+    }
+
+    /// 刪除：軟刪（tombstone）。鏡像立刻標 `deletedDate`＝列表即刻消失，
+    /// 伺服器端標記在 drain 送達；同步 pull 後收斂。
+    pub fn delete(&self, id: ItemId) -> Result<(), String> {
+        // 與 daemon 一致：刪除要求解鎖態（金鑰虽不參與 tombstone，但鎖定时
+        // 使用者無法驗證刪的是哪筆明文，誤刪成本不對稱）。
+        let _user_key = self.unlocked_user_key().ok_or("尚未解鎖")?;
+        let row = self
+            .store
+            .item(id)
+            .map_err(|e| e.to_string())?
+            .ok_or("找不到這筆項目")?;
+        let mut mirror = row.enc_cipher;
+        if let Some(o) = mirror.as_object_mut() {
+            o.insert("deletedDate".into(), json!(rfc3339_now()));
+        }
+        let raw = self.store.raw(id).map_err(|e| e.to_string())?;
+        let rev = row_rev_of(&raw);
+        self.store
+            .enqueue(&MutationDraft {
+                item: id,
+                payload: json!({"op": "delete"}),
+                base_rev: rev.as_deref(),
+                origin: Some("vault-ui"),
+                mirror: Some(&mirror),
+            })
+            .map_err(|e| e.to_string())?;
+        log::info!("hub: delete {id}（軟刪，待推送）");
+        Ok(())
+    }
+
+    /// outbox drain：認領→推送→結算，直到清空或遇到需稍後重試的列。
+    /// 回 `true`＝已全部結算；`false`＝有列回到 queued（離線／限流／token 待刷）。
+    pub async fn drain(&self) -> bool {
+        let _g = self.drain_lock.lock().await;
+        loop {
+            let (Some(client), Some(user_key)) = (self.unlocked_client(), self.unlocked_user_key())
+            else {
+                return false;
+            };
+            let due = match self.store.take_due(16) {
+                Ok(d) => d,
+                Err(e) => {
+                    log::error!("drain: take_due 失敗：{e}");
+                    return false;
+                }
+            };
+            if due.is_empty() {
+                return true;
+            }
+            for m in due {
+                if !self.push_one(&client, &user_key, &m).await {
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// 回 `false`＝同序列後續列也別再推（FIFO 頭未結算）。
+    async fn push_one(&self, client: &Client, user_key: &bw_crypto::UserKey, m: &Mutation) -> bool {
+        let op = m
+            .payload
+            .get("op")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        match op {
+            "create" => {
+                let body = m.payload.get("cipher").cloned().unwrap_or(json!({}));
+                match client.cipher_create(&body).await {
+                    Ok(created) => {
+                        if let Some(new_id) = cipher_id(&created) {
+                            if new_id != m.item {
+                                let _ = self.store.remap_item(m.item, new_id);
+                            }
+                            let _ = self.store.put_mirror(new_id, &created);
+                            let _ = self.reindex_ids([new_id]);
+                        }
+                        self.settle_applied(m.id)
+                    }
+                    Err(e) => self.settle_retry_or_dead(m.id, &e),
+                }
+            }
+            "patch" => self.push_patch(client, user_key, m).await,
+            "delete" => match client.cipher_delete(m.item, DeleteKind::Soft).await {
+                Ok(()) => self.settle_applied(m.id),
+                Err(e) => self.settle_retry_or_dead(m.id, &e),
+            },
+            "restore" => match client.cipher_restore(m.item).await {
+                Ok(()) => self.settle_applied(m.id),
+                Err(e) => self.settle_retry_or_dead(m.id, &e),
+            },
+            other => {
+                log::error!("drain: 未知 op「{other}」，結算為 dead");
+                let _ = self.store.settle(m.id, MutState::Dead);
+                true
+            }
+        }
+    }
+
+    /// patch 推送：base_rev CAS 命中直接推 ours；漂移走欄位級三方合併
+    /// （明文域比較，`bw_vault::three_way`）；伺服器已無此列→衝突收件匣。
+    async fn push_patch(
+        &self,
+        client: &Client,
+        user_key: &bw_crypto::UserKey,
+        m: &Mutation,
+    ) -> bool {
+        let theirs = match client.cipher_get(m.item).await {
+            Ok(t) => t,
+            Err(e) if e.status() == Some(404) => {
+                log::warn!("drain: patch {} 已被他端刪除，進衝突收件匣", m.item);
+                let _ = self.store.settle(m.id, MutState::Conflict);
+                return true;
+            }
+            Err(e) => return self.settle_retry_or_dead(m.id, &e),
+        };
+        let their_rev = theirs
+            .get("revisionDate")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let base_enc = m.payload.get("base").cloned().unwrap_or(json!({}));
+        let ours_enc = m
+            .payload
+            .get("ours")
+            .cloned()
+            .unwrap_or_else(|| base_enc.clone());
+        let enc = |v: &str| {
+            bw_crypto::encrypt_bytes_key(user_key.as_bytes(), v.as_bytes()).unwrap_or_default()
+        };
+        let body = if m.base_rev.is_some() && their_rev == m.base_rev {
+            ours_enc
+        } else {
+            let dec = |s: &str| {
+                bw_crypto::decrypt_bytes(user_key, s)
+                    .ok()
+                    .and_then(|b| String::from_utf8(b).ok())
+            };
+            let base = bw_vault::flatten(&base_enc, &dec);
+            let ours = bw_vault::flatten(&ours_enc, &dec);
+            let theirs_m = bw_vault::flatten(&theirs, &dec);
+            match bw_vault::three_way(&base, &ours, &theirs_m) {
+                bw_vault::Merge::Push(map) => {
+                    if map.is_empty() {
+                        // 我們的變更已被伺服器涵蓋：收斂鏡像即可，不用 PUT。
+                        let _ = self.store.put_mirror(m.item, &theirs);
+                        let _ = self.reindex_ids([m.item]);
+                        return self.settle_applied(m.id);
+                    }
+                    bw_vault::apply_merged(&theirs, &map, &enc)
+                }
+                bw_vault::Merge::Noop => {
+                    let _ = self.store.put_mirror(m.item, &theirs);
+                    let _ = self.reindex_ids([m.item]);
+                    return self.settle_applied(m.id);
+                }
+                bw_vault::Merge::Conflict { fields } => {
+                    log::warn!("drain: patch {} 欄位相撞 {fields:?}，進衝突收件匣", m.item);
+                    let _ = self.store.settle(m.id, MutState::Conflict);
+                    return true;
+                }
+            }
+        };
+        let mut body = body;
+        if let Some(o) = body.as_object_mut() {
+            o.insert("id".into(), json!(m.item.to_string()));
+        }
+        match client.cipher_put(m.item, &body).await {
+            Ok(resp) => {
+                if let Some(nid) = cipher_id(&resp) {
+                    let _ = self.store.put_mirror(nid, &resp);
+                    let _ = self.reindex_ids([nid]);
+                }
+                self.settle_applied(m.id)
+            }
+            Err(e) => self.settle_retry_or_dead(m.id, &e),
+        }
+    }
+
+    fn settle_applied(&self, id: bw_proto::MutationId) -> bool {
+        match self.store.settle(id, MutState::Applied) {
+            Ok(()) => true,
+            Err(e) => {
+                log::error!("drain: settle 失敗：{e}");
+                false
+            }
+        }
+    }
+
+    /// 離線／限流／401 → 回 queued 稍後重試（本批 in-process 沒有 token
+    /// 刷新路徑，下一次登入或同步自然重推）；其他 4xx/5xx → dead。
+    fn settle_retry_or_dead(&self, id: bw_proto::MutationId, e: &bw_server::ServerError) -> bool {
+        if e.is_rate_limited() || e.status().is_none() || e.is_auth_rejected() {
+            let _ = self.store.settle(id, MutState::Queued);
+            log::warn!("drain: 稍後重試（{e}）");
+            false
+        } else {
+            log::error!("drain: 永久失敗，結算 dead：{e}");
+            let _ = self.store.settle(id, MutState::Dead);
+            true
+        }
+    }
+}
+
+/// CipherDraft → 信封形態的 login cipher（與 daemon `encrypt_draft` 同形態：
+/// 機密欄走 `2.iv|ct|mac` 信封、uris 整陣列、favorite 明碼）。
+fn encrypt_login_draft(uk: &bw_crypto::UserKey, d: &CipherDraft, id: ItemId) -> Value {
+    let enc =
+        |s: &str| bw_crypto::encrypt_bytes_key(uk.as_bytes(), s.as_bytes()).unwrap_or_default();
+    let mut c = json!({
+        "type": match d.kind {
+            bw_proto::ItemKind::Login => 1,
+            bw_proto::ItemKind::SecureNote => 2,
+            bw_proto::ItemKind::Card => 3,
+            bw_proto::ItemKind::Identity => 4,
+        },
+        "name": enc(&d.name),
+        "favorite": d.favorite,
+        "id": id.to_string(),
+    });
+    if let Some(n) = &d.notes {
+        c["notes"] = json!(enc(n));
+    }
+    let mut login = serde_json::Map::new();
+    if let Some(u) = &d.username {
+        login.insert("username".into(), json!(enc(u)));
+    }
+    if let Some(p) = &d.password {
+        login.insert("password".into(), json!(enc(p)));
+    }
+    if let Some(t) = &d.totp {
+        login.insert("totp".into(), json!(enc(t)));
+    }
+    if !d.uris.is_empty() {
+        let uris: Vec<Value> = d
+            .uris
+            .iter()
+            .map(|u| json!({"uri": enc(u), "match": null}))
+            .collect();
+        login.insert("uris".into(), json!(uris));
+    }
+    if !login.is_empty() {
+        c["login"] = Value::Object(login);
+    }
+    c
+}
+
+fn cipher_id(c: &Value) -> Option<ItemId> {
+    c.get("id")
+        .and_then(Value::as_str)
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+}
+
+/// 鏡像 raw 列的伺服器版本號（CAS 基準；與 daemon `row_rev_of` 同寬容鏈）。
+fn row_rev_of(raw: &Value) -> Option<String> {
+    raw.get("rev")
+        .and_then(Value::as_str)
+        .or_else(|| raw.get("revisionDate").and_then(Value::as_str))
+        .or_else(|| raw.pointer("/cipher/revisionDate").and_then(Value::as_str))
+        .map(str::to_owned)
+}
+
+/// RFC3339 UTC 現在式（tombstone 的 `deletedDate` 用；零依賴日期算術，
+/// Howard Hinnant civil_from_days，同 daemon `chrono_now` 的出處）。
+fn rfc3339_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let secs = (ms / 1000) as i64;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let (y, m) = if m <= 2 { (y + 1, m) } else { (y, m) };
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
 /// prelogin 的 KDF 欄位 → `bw_crypto::KdfParams`（寬容：缺欄位退回 PBKDF2 600k）。
 fn kdf_from_prelogin(v: &Value) -> bw_crypto::KdfParams {
     let kind = v.get("kdf").and_then(Value::as_i64).unwrap_or(0);
@@ -443,5 +849,126 @@ mod tests {
         assert!(hub.list("").is_empty());
         assert!(hub.reveal(ItemId::new_v4()).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 解鎖態注入（不走網路）：client 只要構造得出來，drain 之外的路徑不碰它。
+    fn unlocked_hub(tag: &str) -> (std::sync::Arc<Hub>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "bitward-android-test-{tag}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let hub = Hub::open(dir.clone()).expect("hub opens");
+        let user_key = bw_crypto::UserKey::from_bytes(vec![7u8; 64]).unwrap();
+        let client = Client::with_options("http://127.0.0.1:1", Hub::options()).expect("client");
+        *hub.unlocked.lock().expect("mutex") = Some(Unlocked {
+            client: std::sync::Arc::new(client),
+            user_key,
+        });
+        (hub, dir)
+    }
+
+    fn draft(name: &str) -> CipherDraft {
+        CipherDraft {
+            kind: bw_proto::ItemKind::Login,
+            name: name.to_owned(),
+            username: Some("e2euser".to_owned()),
+            password: Some("e2epass".to_owned()),
+            totp: None,
+            uris: vec!["https://added.example.com".to_owned()],
+            notes: None,
+            favorite: false,
+        }
+    }
+
+    #[test]
+    fn create_requires_unlock() {
+        let dir =
+            std::env::temp_dir().join(format!("bitward-android-test-{}", uuid::Uuid::new_v4()));
+        let hub = Hub::open(dir.clone()).expect("hub opens");
+        assert_eq!(hub.create(&draft("x")).err(), Some("尚未解鎖".to_owned()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_enqueue_marks_pending_and_plain_index() {
+        let (hub, dir) = unlocked_hub("create");
+        let id = hub.create(&draft("e2e-added")).expect("create ok");
+        // 本地鏡像即刻可見＋「待推送」＋明文索引已回填（搜尋找得到新名字）。
+        let metas = hub.list("");
+        assert_eq!(metas.len(), 1);
+        assert!(metas[0].pending, "create 後應掛待推送");
+        assert_eq!(metas[0].name.as_deref(), Some("e2e-added"));
+        assert_eq!(hub.list("added").len(), 1);
+        assert_eq!(hub.store.depth().expect("depth").queued, 1);
+        // outbox payload 契約（§2.4）：create 列的 cipher 不带 id。
+        let due = hub.store.take_due(4).expect("take_due");
+        assert_eq!(due[0].payload["op"], "create");
+        assert!(due[0].payload["cipher"].get("id").is_none());
+        hub.store
+            .settle(due[0].id, MutState::Queued)
+            .expect("requeue");
+        let r = hub.reveal(id).expect("reveal");
+        assert_eq!(r.password.as_deref().map(|p| p.as_str()), Some("e2epass"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn patch_touches_only_named_fields() {
+        let (hub, dir) = unlocked_hub("patch");
+        let id = hub.create(&draft("e2e-added")).expect("create ok");
+        hub.patch(
+            id,
+            &[FieldEdit {
+                path: "password".to_owned(),
+                value: Some("e2epass2".to_owned()),
+            }],
+        )
+        .expect("patch ok");
+        // 欄位級存活：沒點名的帳號／網址不動，只有密碼換值。
+        let r = hub.reveal(id).expect("reveal");
+        assert_eq!(r.password.as_deref().map(|p| p.as_str()), Some("e2epass2"));
+        assert_eq!(r.username.as_deref(), Some("e2euser"));
+        assert_eq!(r.uris, vec!["https://added.example.com".to_owned()]);
+        // 同 item 兩筆未結算列（create→patch FIFO），pending 仍真。
+        assert_eq!(hub.store.depth().expect("depth").queued, 2);
+        assert!(hub.list("").first().expect("row").pending);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_is_soft_and_leaves_outbox_record() {
+        let (hub, dir) = unlocked_hub("delete");
+        let id = hub.create(&draft("e2e-added")).expect("create ok");
+        hub.delete(id).expect("delete ok");
+        // 軟刪：列表即刻消失（tombstone），outbox 同 item 兩列（create→delete FIFO）。
+        assert!(hub.list("").is_empty());
+        assert!(hub.store.item(id).expect("store").expect("row").deleted);
+        assert_eq!(hub.store.depth().expect("depth").queued, 2);
+        // 同 item 一次只認領最舊列：結算 create 後 delete 列才可出境。
+        let head = hub.store.take_due(8).expect("take_due");
+        assert_eq!(head.len(), 1);
+        assert_eq!(head[0].payload["op"], "create");
+        hub.store
+            .settle(head[0].id, MutState::Applied)
+            .expect("settle");
+        let next = hub.store.take_due(8).expect("take_due");
+        assert_eq!(next[0].payload["op"], "delete");
+        hub.store
+            .settle(next[0].id, MutState::Queued)
+            .expect("requeue");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rfc3339_now_is_parseable_utc() {
+        let s = rfc3339_now();
+        // 2026-11-08T12:34:56Z 形態；年、月、日、T、Z 位置全釘死。
+        let b = s.as_bytes();
+        assert_eq!(b.len(), 20, "{s}");
+        assert_eq!(&s[4..5], "-");
+        assert_eq!(&s[7..8], "-");
+        assert_eq!(&s[10..11], "T");
+        assert_eq!(&s[19..20], "Z");
+        assert!(s[..4].parse::<u32>().expect("year") >= 2025);
     }
 }
