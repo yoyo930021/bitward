@@ -379,8 +379,17 @@ final class ProviderViewController: ASCredentialProviderViewController {
         let client = try connect(budget: 5.0)
         let entries = try client.passkeys(rpID: rpID)
         guard !entries.isEmpty else { throw BTPError.noCredentials }
-        // allowedCredentials 有給就對齐（b64url 比對），否則取首筆。
-        let picked = allowed.flatMap { a in entries.first { $0.credentialId == a.b64url } } ?? entries[0]
+        // allowedCredentials 有給就嚴比（b64url）——清單 probe 同規則，兩處不可能分歧；
+        // 指定了 allowed 卻簽不了其中任何一把，退回 entries[0] 是違背 WebAuthn 語意的。
+        let picked: (credentialId: String, userHandle: String, userName: String, rpId: String)
+        if let a = allowed {
+            guard let hit = entries.first(where: { $0.credentialId == a.b64url }) else {
+                throw BTPError.noCredentials
+            }
+            picked = hit
+        } else {
+            picked = entries[0]
+        }
         guard let tag = Data(b64url: picked.credentialId) else { throw BTPError.protocolError("cid not b64url") }
         // SE 流：daemon 產 authData → SE 私鑰簽（userPresence 自動彈 Touch ID）→ daemon 驗簽提交 counter。
         let authData = try client.beginAssert(credentialId: picked.credentialId,
@@ -469,10 +478,49 @@ final class ProviderViewController: ASCredentialProviderViewController {
             extensionContext.cancelRequest(withError: ASExtensionError(.userInteractionRequired))
             return
         }
-        // 骨架流：直接給單筆確認面板（清單化多 passkey 屬後續）。
-        pendingAssertion = (requestParameters.relyingPartyIdentifier, requestParameters.clientDataHash)
-        pendingAllowed = requestParameters.allowedCredentials
-        showAssertionConfirm(rpID: requestParameters.relyingPartyIdentifier, user: "")
+        let rpID = requestParameters.relyingPartyIdentifier
+        let hash = requestParameters.clientDataHash
+        let allowed = requestParameters.allowedCredentials
+        // Safari 在密碼欄選 provider 時可能只送 assertion 清單請求（github.com 實測）。
+        // 直接彈確認面板會劫走流程：無 passkey 時用戶按「使用」→ noCredentials →
+        // 密碼清單永遠不出現。故先查庫：有 passkey 才面板，沒有就退回密碼清單。
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let keys: [(id: Data, user: String)]
+            do {
+                keys = try Self.passkeyCandidates(rpID: rpID, allowed: allowed)
+            } catch {
+                log.notice("passkey list probe failed \(String(describing: error), privacy: .public)")
+                keys = []
+            }
+            DispatchQueue.main.async {
+                if let first = keys.first {
+                    self.pendingAssertion = (rpID, hash)
+                    self.pendingAllowed = allowed
+                    self.showAssertionConfirm(rpID: rpID, user: first.user)
+                } else {
+                    log.notice("passkey list empty -> fall back to password list")
+                    self.prepareCredentialList(for: serviceIdentifiers)
+                }
+            }
+        }
+    }
+
+    /// 該 rp 可簽的 passkey：allowed 非空時以 b64url 比對（與 assertPasskey 同表示法），
+    /// 空則回該 rp 全部。查不到/連不上＝回空陣列，呼叫端退回密碼清單。
+    private static func passkeyCandidates(rpID: String, allowed: [Data]) throws -> [(id: Data, user: String)] {
+        let client = try connect(budget: 1.5)
+        let entries = try client.passkeys(rpID: rpID)
+        let picked: [(credentialId: String, userHandle: String, userName: String, rpId: String)]
+        if allowed.isEmpty {
+            picked = entries
+        } else {
+            let set = Set(allowed.map(\.b64url))
+            picked = entries.filter { set.contains($0.credentialId) }
+        }
+        return picked.compactMap { e in
+            Data(b64url: e.credentialId).map { (id: $0, user: e.userName) }
+        }
     }
 
     private var pendingAllowed: [Data] = []
