@@ -7,7 +7,7 @@
 	     實際執行檔由 BundleProgram 決定。歸因後 launchd 以 App 的 group 成員
 	     身分跑 daemon → 可 bind group container socket。 -->
 	<key>Label</key>
-	<string>io.bitward.daemon</string>
+	<string>io.bitward.dev.daemon</string>
 	<key>__CFBundleIdentifier</key>
 	<string>io.bitward.dev</string>
 	<key>BundleProgram</key>

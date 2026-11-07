@@ -59,7 +59,7 @@ targets:
           # SMAppService.agent(plistName:) 規定 plist 在 Contents/Library/LaunchAgents/
           LA="$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME/Contents/Library/LaunchAgents"
           mkdir -p "$LA"
-          cp -f "$SRCROOT/Bitward/Resources/io.bitward.daemon.plist" "$LA/io.bitward.daemon.plist"
+          cp -f "$SRCROOT/Bitward/Resources/io.bitward.dev.daemon.plist" "$LA/io.bitward.dev.daemon.plist"
         # 不宣告 outputFiles：xcodegen 版不支援 alwaysOutOfDate，改用「無輸出
         # 宣告」讓 Xcode 每回合都跑此腳本（殭屍二進位教訓，見 FINDINGS §7）。
     dependencies:

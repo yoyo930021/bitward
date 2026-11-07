@@ -12,7 +12,7 @@ private let uiLog = Logger(subsystem: "io.bitward.dev", category: "gui")
 /// 執行（`--service install`）：SMAppService.agent(plistName:) 對本機組建
 /// 回 EPERM（MAS 分發限定），非沙盒進程寫 LaunchAgents + launchctl 才是通的路。
 enum DaemonService {
-    private static let agent = SMAppService.agent(plistName: "io.bitward.daemon.plist")
+    private static let agent = SMAppService.agent(plistName: "io.bitward.dev.daemon.plist")
 
     static func status() -> String {
         switch agent.status {

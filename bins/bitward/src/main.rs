@@ -452,6 +452,12 @@ async fn open_session(
                 }
                 return Ok((rd, wr));
             }
+            Ok(ServerMsg::Error { message }) if attempt == 0 => {
+                // daemon 明確拒絕（重啟過/隨鎖撤銷）：刪檔重 Enroll 續跑，但必須留痕
+                // （readpath A6 的可觀察性）——靜默癒合會把「lock＝撤銷」洗成無感成功。
+                eprintln!("warning: session 失效（{message}）；已重入會（enroll）並續跑指令");
+                let _ = std::fs::remove_file(session_file(data_dir));
+            }
             Ok(ServerMsg::Error { message }) => return Err(message),
             Ok(other) => return Err(format!("expected Welcome, got {other:?}")),
             Err(e) if attempt == 0 => {

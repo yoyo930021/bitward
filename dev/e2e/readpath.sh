@@ -110,9 +110,11 @@ r = recv(s)
 assert "Error" in r, f"A6-1: 舊 token 竟被接受: {list(r)}"
 assert "撤銷" in r["Error"]["message"] or "revoked" in r["Error"]["message"], r
 PYEOF
-# A6-2：CLI 對撤銷 token 癒合重入會且留 stderr 痕
+# A6-2：CLI 對撤銷 token 癒合重入會、留 stderr 痕，且指令續跑成功（不只留痕）
 A6_ERR=$(B ls 2>&1 >/dev/null || true)
 echo "$A6_ERR" | grep -qiE '撤銷|revoked' || fail "A6-2 CLI 癒合未帶撤銷原因"
+A6_OUT=$(B ls 2>/dev/null || true)
+[[ -n "$A6_OUT" ]] || fail "A6-2 癒合後 ls 未成功續跑"
 pass "A6 unlock 冪等 + lock 級聯撤銷（raw 重放拒斥＋CLI 癒合留痕）"
 
 # A8：每個 Call 都落 audit 且 hash 鏈可驗證
