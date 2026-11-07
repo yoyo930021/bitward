@@ -17,8 +17,8 @@ use bw_keys::{
 };
 use bw_proto::{
     AccountInfo, AdminCall, AgentCall, AuditChainInfo, AuthCall, Call, FillCall, ItemId, ItemView,
-    OutboxCounts, PROTO_VERSION, PasskeyCall, Query, Response, StatusInfo, SyncCall, UseCall,
-    VaultCall, View, WtpError,
+    OutboxCounts, PROTO_VERSION, PasskeyCall, PushCall, Query, Response, StatusInfo, SyncCall,
+    UseCall, VaultCall, View, WtpError,
 };
 use bw_server::{Client, PasswordLogin, ServerError};
 use bw_store::{AuditFilter, AuditRecord, Store};
@@ -48,7 +48,8 @@ pub struct AccountRecord {
 
 pub struct Hub {
     pub data_dir: PathBuf,
-    pub store: Store,
+    /// Arc：publish_signal 的 APNs 副發 task 需要跨 spawn 持有 store。
+    pub store: Arc<Store>,
     pub machine: UnlockMachine,
     pub server: RwLock<Option<ServerHandle>>,
     account: RwLock<Option<AccountRecord>>,
@@ -74,6 +75,8 @@ pub struct Hub {
     pub pairings: Mutex<HashMap<String, crate::agent::PairingSpec>>,
     /// ntfy 信令 URL（None = 不發）；只傳不透明信令，明文永不上通道
     pub ntfy_url: Option<String>,
+    /// APNs 推播（None = 不發）；與 ntfy 同源時機副發同一條不透明信令
+    pub apns: Option<Arc<crate::apns::ApnsConfig>>,
     /// TLS listener 啟動後快取的 SPKI pin（pair start 顯示用）
     pub tls_pin: std::sync::OnceLock<String>,
 }
@@ -93,7 +96,11 @@ fn drift(detail: impl std::fmt::Display) -> WtpError {
 }
 
 impl Hub {
-    pub async fn open(data_dir: &Path, ntfy_url: Option<String>) -> Result<Arc<Hub>, String> {
+    pub async fn open(
+        data_dir: &Path,
+        ntfy_url: Option<String>,
+        apns: Option<Arc<crate::apns::ApnsConfig>>,
+    ) -> Result<Arc<Hub>, String> {
         std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
         #[cfg(unix)]
         {
@@ -129,7 +136,7 @@ impl Hub {
         let (drain_tx, drain_rx) = tokio::sync::mpsc::unbounded_channel();
         let hub = Arc::new(Hub {
             data_dir: data_dir.to_path_buf(),
-            store,
+            store: Arc::new(store),
             machine,
             server: RwLock::new(None),
             account: RwLock::new(account.clone()),
@@ -144,6 +151,7 @@ impl Hub {
             pending_asserts: Mutex::new(HashMap::new()),
             pairings: Mutex::new(HashMap::new()),
             ntfy_url,
+            apns,
             tls_pin: std::sync::OnceLock::new(),
         });
         if let Some(a) = account {
@@ -315,7 +323,14 @@ impl Hub {
                     return Err(denied("P1: biometric assertion 尚未接 KeychainKeystore"));
                 }
                 match self.machine.submit(UnlockMaterial::DeviceAssertion) {
-                    Ok(UnlockReceipt::Unlocked { .. } | UnlockReceipt::AlreadyUnlocked { .. }) => {
+                    Ok(UnlockReceipt::Unlocked { .. }) => {
+                        // 解鎖完成處回填明文索引（2026-11-07 macOS demo 實測：
+                        // 重啟後鎖定態 sync 把 meta_plain 蓋回信封形態，
+                        // unlock 不重解就整頁-envelope）。AlreadyUnlocked 不重跑。
+                        self.reindex_all()?;
+                        Ok(Response::Status(self.status_info().await))
+                    }
+                    Ok(UnlockReceipt::AlreadyUnlocked { .. }) => {
                         Ok(Response::Status(self.status_info().await))
                     }
                     Ok(UnlockReceipt::Pending { .. }) => Err(denied("unlock pending")),
@@ -435,6 +450,26 @@ impl Hub {
                 PasskeyCall::BeginRegister { .. } => self.passkey_begin_register(),
                 PasskeyCall::FinishRegister { .. } => {
                     self.passkey_finish_register(session, pc).await
+                }
+            },
+            Call::Push(pc) => match pc {
+                PushCall::RegisterPush { token, platform } => {
+                    self.store.push_token_put(token, platform).map_err(denied)?;
+                    Ok(Response::Ok)
+                }
+                PushCall::UnregisterPush { token } => {
+                    self.store.push_token_remove(token).map_err(denied)?;
+                    Ok(Response::Ok)
+                }
+                PushCall::ListPush => {
+                    let rows = self.store.push_token_list().map_err(denied)?;
+                    let list = rows
+                        .iter()
+                        .map(|(token, platform)| {
+                            json!({"token": mask_push_token(token), "platform": platform})
+                        })
+                        .collect::<Vec<_>>();
+                    Ok(Response::Json(Value::Array(list)))
                 }
             },
             Call::Fill(FillCall::AutoType { id, template }) => {
@@ -714,42 +749,16 @@ impl Hub {
             };
             let decrypted = self.machine.with_keys(|kb| {
                 let dec = cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
-                let name = row
-                    .enc_cipher
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .and_then(&dec);
-                let username = row
-                    .enc_cipher
-                    .pointer("/login/username")
-                    .and_then(Value::as_str)
-                    .and_then(&dec);
-                let password = row
-                    .enc_cipher
-                    .pointer("/login/password")
-                    .and_then(Value::as_str)
-                    .and_then(&dec);
-                let uris: Vec<String> = row
-                    .enc_cipher
-                    .pointer("/login/uris")
-                    .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|u| u.get("uri").and_then(Value::as_str))
-                            .filter_map(dec)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                (name, uris, username, password)
+                bw_vault::plain_index(&row.enc_cipher, &dec)
             });
-            let (name, uris, username, password) = match decrypted {
+            let idx = match decrypted {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            let _ = self.store.set_plain_meta(*id, name.as_deref(), &uris);
+            let _ = self.store.set_plain_meta(*id, idx.name.as_deref(), &idx.uris);
             let _ = self
                 .store
-                .set_plain_secrets(*id, username.as_deref(), password.as_deref());
+                .set_plain_secrets(*id, idx.username.as_deref(), idx.password.as_deref());
         }
         Ok(())
     }
@@ -961,6 +970,14 @@ fn sha256_hex(s: &str) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// ListPush 出口的 token 去敏：前 8 字元 + sha256 前 12 碼。
+/// 比照 keys_fingerprint 先例（指紋代原值）：清單讀取者能比對「是不是同一台」，
+/// 但拿不到完整 token，無法離線冒充裝置收推播。
+fn mask_push_token(t: &str) -> String {
+    let prefix: String = t.chars().take(8).collect();
+    format!("{prefix}…{}", &sha256_hex(t)[..12])
+}
+
 /// KDF 欄位的持久化/傳輸中介（bw-crypto 的 KdfParams 不實作 serde，邊界在這裡轉）。
 #[derive(Clone, Copy)]
 struct KdfWire {
@@ -1053,6 +1070,9 @@ fn action_tag(c: &Call) -> String {
         Call::Passkey(PasskeyCall::FinishAssert { .. }) => "Passkey.FinishAssert",
         Call::Passkey(PasskeyCall::BeginRegister { .. }) => "Passkey.BeginRegister",
         Call::Passkey(PasskeyCall::FinishRegister { .. }) => "Passkey.FinishRegister",
+        Call::Push(PushCall::RegisterPush { .. }) => "Push.RegisterPush",
+        Call::Push(PushCall::UnregisterPush { .. }) => "Push.UnregisterPush",
+        Call::Push(PushCall::ListPush) => "Push.ListPush",
         Call::Use(UseCall::TotpCode { .. }) => "Use.TotpCode",
         Call::Use(UseCall::GeneratePassword { .. }) => "Use.GeneratePassword",
         Call::Use(UseCall::ResolveRef { .. }) => "Use.ResolveRef",
@@ -1113,6 +1133,10 @@ fn sensitivity_of_call(c: &Call, resp: Option<&Response>) -> bw_proto::Sensitivi
         // 列表只投影 Metadata 級識別欄；Register/Assert 出口由私鑰簽出，比照 Use 級
         Call::Passkey(PasskeyCall::GetPasskeys { .. }) => Identity,
         Call::Passkey(_) => Secret,
+        // 推播：清單出口帶去敏 token 與 platform（Identity 級，同 Audit）；
+        // 註冊/退註出口為 Ok，token 本體是呼叫端自帶的不透明識別子
+        Call::Push(PushCall::ListPush) => Identity,
+        Call::Push(_) => Opaque,
         Call::Auth(_) | Call::Admin(_) | Call::Sync(_) | Call::Agent(_) | Call::Fill(_) => Opaque,
     }
 }
@@ -1158,5 +1182,74 @@ fn verify_org_private_key(
         Ok(())
     } else {
         Err(bw_crypto::CryptoError::Rsa)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::SessionKind;
+
+    async fn bare_hub() -> Arc<Hub> {
+        let dir = std::env::temp_dir().join(format!("bw-hub-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Hub::open(&dir, None, None).await.unwrap()
+    }
+
+    #[test]
+    fn mask_push_token_keeps_prefix_and_hash_only() {
+        let token = "0123456789ABCDEF0123456789ABCDEF";
+        let m = mask_push_token(token);
+        assert!(m.starts_with("01234567…"), "前 8 字元保留：{m}");
+        assert!(m.ends_with(&sha256_hex(token)[..12]), "尾段為 sha256 前 12 碼：{m}");
+        assert!(!m.contains(token), "完整 token 不得外洩進清單出口");
+    }
+
+    #[tokio::test]
+    async fn push_register_list_unregister_converge_through_dispatch() {
+        let hub = bare_hub().await;
+        let sess = hub.new_session(
+            "push-test".into(),
+            SessionKind::Interactive,
+            bw_agent::GrantSet::default_full(),
+            None,
+            json!({"kind": "local"}),
+        );
+        let reg = hub
+            .dispatch(
+                &sess,
+                &Call::Push(PushCall::RegisterPush {
+                    token: "AABBCCDDEEFF00112233".into(),
+                    platform: "ios".into(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(reg, Response::Ok));
+        let resp = hub
+            .dispatch(&sess, &Call::Push(PushCall::ListPush))
+            .await
+            .unwrap();
+        let Response::Json(v) = resp else {
+            panic!("ListPush 應回 Json，got {resp:?}");
+        };
+        assert_eq!(v.as_array().map(Vec::len), Some(1));
+        assert_eq!(v[0]["platform"], "ios");
+        let masked = v[0]["token"].as_str().unwrap();
+        assert!(masked.starts_with("AABBCCDD…") && !masked.contains("EEFF00112233"));
+        hub.dispatch(
+            &sess,
+            &Call::Push(PushCall::UnregisterPush {
+                token: "AABBCCDDEEFF00112233".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        let resp = hub
+            .dispatch(&sess, &Call::Push(PushCall::ListPush))
+            .await
+            .unwrap();
+        let Response::Json(v) = resp else { panic!("expect Json") };
+        assert_eq!(v.as_array().map(Vec::len), Some(0));
     }
 }

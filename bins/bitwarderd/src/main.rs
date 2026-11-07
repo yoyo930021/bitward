@@ -2,6 +2,7 @@
 //! main = 傳輸與 session 生命週期；業務分派在 hub.rs。
 
 mod agent;
+mod apns;
 mod arena;
 mod datamanage;
 mod hub;
@@ -38,6 +39,21 @@ struct Args {
     /// ntfy 信令 URL（核准/喚醒通知；只傳不透明信令）
     #[arg(long)]
     ntfy: Option<String>,
+    /// APNs .p8 私鑰路徑（推播；需與 key/team/bundle 四者齊備才啟用）
+    #[arg(long)]
+    apns_p8: Option<PathBuf>,
+    /// APNs Auth Key ID（.p8 對應的 Apple 金鑰 id）
+    #[arg(long)]
+    apns_key_id: Option<String>,
+    /// APNs Team ID（開發者團隊）
+    #[arg(long)]
+    apns_team_id: Option<String>,
+    /// APNs Bundle ID（apns-topic）
+    #[arg(long)]
+    apns_bundle_id: Option<String>,
+    /// 用 sandbox（api.sandbox.push.apple.com）端點
+    #[arg(long)]
+    apns_staging: bool,
     /// macOS：在 app group 容器內多綁一個 BTP socket（provider extension 用）
     #[arg(long)]
     push_app_group: Option<String>,
@@ -138,7 +154,34 @@ async fn main() -> Result<(), String> {
     let data_dir = args.data_dir.unwrap_or_else(default_data_dir);
     let sock = args.sock.unwrap_or_else(|| data_dir.join("daemon.sock"));
     std::fs::create_dir_all(data_dir.join("run")).map_err(|e| e.to_string())?;
-    let hub = Hub::open(&data_dir, args.ntfy.clone()).await?;
+    // APNs：四參齊備才啟用；給部分 → 警告降級 None（ntfy 通道不受影響）。
+    // BW_APNS_ENDPOINT 覆蓋 host（e2e mock 注入用，生產不設）。
+    let apns = match (
+        args.apns_p8,
+        args.apns_key_id,
+        args.apns_team_id,
+        args.apns_bundle_id,
+    ) {
+        (Some(p8), Some(key_id), Some(team_id), Some(bundle_id)) => {
+            let mut cfg =
+                apns::ApnsConfig::load(&p8, &key_id, &team_id, &bundle_id, args.apns_staging)
+                    .map_err(|e| format!("APNs: {e}"))?;
+            if let Ok(ep) = std::env::var("BW_APNS_ENDPOINT") {
+                cfg.endpoint = ep.trim_end_matches('/').to_owned();
+                tracing::info!(endpoint = %cfg.endpoint, "APNs endpoint 由環境變數覆蓋");
+            }
+            Some(Arc::new(cfg))
+        }
+        (None, None, None, None) => None,
+        _ => {
+            eprintln!(
+                "warning: APNs 參數不完整（--apns-p8 --apns-key-id --apns-team-id --apns-bundle-id \
+                 需齊備），推播停用"
+            );
+            None
+        }
+    };
+    let hub = Hub::open(&data_dir, args.ntfy.clone(), apns).await?;
     let held = bind_sock(&sock, &data_dir)?;
     let listener = held.listener;
     let _sock_guard = held._lock;

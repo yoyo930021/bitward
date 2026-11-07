@@ -797,7 +797,7 @@ pub(crate) mod tests {
             "keys_fingerprint": null,
         });
         std::fs::write(dir.join("account.json"), account.to_string()).unwrap();
-        let hub = Hub::open(&dir, None).await.unwrap();
+        let hub = Hub::open(&dir, None, None).await.unwrap();
         assert!(
             hub.machine
                 .submit(UnlockMaterial::MasterPassword(Zeroizing::new(pw)))
@@ -1523,7 +1523,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn locked_hub_rejects_passkey_calls() {
         let dir = tmp_dir("locked");
-        let hub = Hub::open(&dir, None).await.unwrap();
+        let hub = Hub::open(&dir, None, None).await.unwrap();
         assert!(matches!(hub.passkey_list(None), Err(WtpError::Locked)));
         assert!(matches!(
             hub.passkey_register("s", &register_call(None)).await,

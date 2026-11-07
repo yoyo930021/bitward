@@ -11,8 +11,8 @@ use bw_agent::{
     parse_grants, parse_ref,
 };
 use bw_proto::{
-    AgentCall, ApprovalId, AuthCall, Call, EventTopic, PasskeyCall, Response, RunPlan, SessionId,
-    SyncCall, UseCall, VaultCall, View, WtpError,
+    AgentCall, ApprovalId, AuthCall, Call, EventTopic, PasskeyCall, PushCall, Response, RunPlan,
+    SessionId, SyncCall, UseCall, VaultCall, View, WtpError,
 };
 use bw_store::{SessionRow, SessionState};
 
@@ -243,6 +243,13 @@ impl Hub {
             Call::Passkey(PasskeyCall::FinishRegister { item_id, .. }) => {
                 (Access::Use(UseKind::Passkey), *item_id)
             }
+            // 推播 token 是不透明識別子、非機密（只有持有 daemon 連線者能用它收信令），
+            // 註冊/退註取最松級 see:opaque：任何已配對 session 的 see grant 都涵蓋，
+            // 裝置不必為裝推播申請 vault 級授權。清單列全部裝置登記，比照 Audit 級。
+            Call::Push(PushCall::RegisterPush { .. } | PushCall::UnregisterPush { .. }) => {
+                (Access::See(bw_proto::Sensitivity::Opaque), None)
+            }
+            Call::Push(PushCall::ListPush) => (Access::See(bw_proto::Sensitivity::Identity), None),
             Call::Use(UseCall::TotpCode { id }) => (Access::Use(UseKind::TotpCode), Some(*id)),
             Call::Use(UseCall::ResolveRef { .. }) => {
                 (Access::Reveal(bw_proto::Sensitivity::Secret), None)
@@ -527,28 +534,49 @@ impl Hub {
         Some(spec)
     }
 
-    /// ntfy 信令（§1.2 推播路徑的自架形態）：只傳不透明信令。
+    /// 信令副發（§1.2 推播路徑）：ntfy（自架形態）與 APNs（正式分發形態）同源同時機，
+    /// 只傳不透明信令，明文永不上通道。fire-and-forget：推播是加速器不是正確性依賴
+    /// （ntfy/輪詢仍在），失敗僅記日誌。
     pub fn publish_signal(&self, text: &str) {
-        let Some(url) = self.ntfy_url.clone() else {
-            return;
-        };
-        let body = text.to_string();
-        tokio::spawn(async move {
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
-                .build()
-                .unwrap_or_default();
-            if let Err(e) = client
-                .post(&url)
-                .header("Title", "bitward approval")
-                .header("Priority", "high")
-                .body(body)
-                .send()
-                .await
-            {
-                tracing::warn!(err = %e, "ntfy signal publish failed");
-            }
-        });
+        if let Some(url) = self.ntfy_url.clone() {
+            let body = text.to_string();
+            tokio::spawn(async move {
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build()
+                    .unwrap_or_default();
+                if let Err(e) = client
+                    .post(&url)
+                    .header("Title", "bitward approval")
+                    .header("Priority", "high")
+                    .body(body)
+                    .send()
+                    .await
+                {
+                    tracing::warn!(err = %e, "ntfy signal publish failed");
+                }
+            });
+        }
+        if let Some(apns) = self.apns.clone() {
+            let text = text.to_string();
+            let store = self.store.clone();
+            tokio::spawn(async move {
+                let Ok(tokens) = store.push_token_list() else {
+                    tracing::warn!("apns fan-out skipped: push_token_list failed");
+                    return;
+                };
+                for (token, _platform) in tokens {
+                    match apns.send(&token, &text).await {
+                        // 410 = 裝置已卸載：立即移除，不再對死 token 發推（收斂語意見 apns::send）
+                        Ok(true) => {
+                            let _ = store.push_token_remove(&token);
+                        }
+                        Ok(false) => {}
+                        Err(e) => tracing::warn!(err = %e, "apns signal push failed"),
+                    }
+                }
+            });
+        }
     }
 
     /// `use:env` 逐 item 檢查後取明文值；回傳 (注入環境變數, 已知明文集合)。
@@ -716,7 +744,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        Hub::open(&dir, None).await.unwrap()
+        Hub::open(&dir, None, None).await.unwrap()
     }
 
     /// (requester, human)：requester 帶 `approve` 標記的 grant，任何命中都排隊。
