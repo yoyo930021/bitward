@@ -117,6 +117,46 @@ pub fn flatten(cipher: &serde_json::Value, dec: &dyn Fn(&str) -> Option<String>)
     m
 }
 
+/// 明文索引回填的四欄（`apply_sync` 落盤後經 `Store::set_plain_meta`／
+/// `set_plain_secrets` 寫回）。欄位路徑與 [`flatten`] 同一個座標系。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlainIndex {
+    pub name: Option<String>,
+    pub uris: Vec<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+/// 鏡像密文 → 明文索引欄。`dec` 形態同 [`flatten`]（信封字串 → 明文；
+/// None＝讀不到，容忍跳過）。daemon `Hub::reindex_many` 與 Android
+/// `Hub::reindex_plain` 共用這裡，欄位路徑只寫一份。
+pub fn plain_index(
+    cipher: &serde_json::Value,
+    dec: &dyn Fn(&str) -> Option<String>,
+) -> PlainIndex {
+    let field = |v: Option<&serde_json::Value>| {
+        v.and_then(serde_json::Value::as_str)
+            .and_then(dec)
+    };
+    let login = cipher.get("login");
+    let uris = login
+        .and_then(|l| l.get("uris"))
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|u| u.get("uri").and_then(serde_json::Value::as_str))
+                .filter_map(dec)
+                .collect()
+        })
+        .unwrap_or_default();
+    PlainIndex {
+        name: field(cipher.get("name")),
+        uris,
+        username: field(login.and_then(|l| l.get("username"))),
+        password: field(login.and_then(|l| l.get("password"))),
+    }
+}
+
 /// 把合併結果寫回 theirs 的副本：`enc_of` 把明文值加密成信封字串（同樣在
 /// `with_keys` 閉包內由 daemon 提供）。None 值＝清除該欄。回傳新 cipher 主體。
 pub fn apply_merged(
@@ -219,6 +259,37 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.map(str::to_string)))
             .collect()
+    }
+
+    #[test]
+    fn plain_index_extracts_four_fields_and_tolerates_drift() {
+        // dec 形態：`E.` 前綴＝解得開的信封、其他＝解不開（欄位漂移）。
+        let dec = |s: &str| s.strip_prefix("E.").map(str::to_owned);
+        let cipher = serde_json::json!({
+            "name": "E.GitHub",
+            "login": {
+                "username": "E.alice",
+                "password": "bad-mac",
+                "totp": "E.seed",
+                "uris": [
+                    {"uri": "E.https://github.com"},
+                    {"uri": "bad-mac"},
+                    {"match": null}
+                ]
+            }
+        });
+        let idx = plain_index(&cipher, &dec);
+        assert_eq!(idx.name.as_deref(), Some("GitHub"));
+        assert_eq!(idx.username.as_deref(), Some("alice"));
+        assert_eq!(idx.password, None);
+        assert_eq!(idx.uris, vec!["https://github.com".to_string()]);
+    }
+
+    #[test]
+    fn plain_index_without_login_is_empty() {
+        let dec = |s: &str| Some(s.to_owned());
+        let idx = plain_index(&serde_json::json!({"type": 2}), &dec);
+        assert_eq!(idx, PlainIndex::default());
     }
 
     #[test]
