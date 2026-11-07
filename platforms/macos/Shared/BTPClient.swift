@@ -331,6 +331,13 @@ final class BTPClient {
         return response
     }
 
+    /// APNs device token 註冊（§1.2 推播路徑 thin 端）：token 為 hex 字串，
+    /// 對 daemon 是不透明識別子。rid=9 避開清單/斷言流的 1..4/7。
+    @discardableResult
+    func registerPush(token: String, platform: String = "macos") throws -> [String: Any] {
+        try invoke(rid: 9, call: ["Push": ["RegisterPush": ["token": token, "platform": platform]]])
+    }
+
     /// 凍結流：Hello(Enroll) → List(Metadata by uri) → 取首筆 → Get(Reveal)。
     func autofill(uri: String) throws -> BTPCandidate {
         let items = try list(uri: uri, limit: 5)

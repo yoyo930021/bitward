@@ -3,6 +3,7 @@ import Foundation
 import OSLog
 import ServiceManagement
 import SwiftUI
+import UserNotifications
 
 private let uiLog = Logger(subsystem: "io.bitward.dev", category: "gui")
 
@@ -35,6 +36,8 @@ enum DaemonService {
 
 @main
 struct BitwardApp: App {
+    @NSApplicationDelegateAdaptor(PushAppDelegate.self) private var pushDelegate
+
     var body: some Scene {
         // macOS 27 實測：WindowGroup 從背景 session 啟動不自動建窗（savedState 還原
         // 是唯一出現過視窗的路徑）。單例 Window + presented 啟動行為才有可靠首窗。
@@ -42,6 +45,50 @@ struct BitwardApp: App {
             RootView()
         }
         .defaultLaunchBehavior(.presented)
+    }
+}
+
+/// APNs thin 端：拿 device token 經 BTP 註冊進 daemon（§1.2 推播路徑）。
+/// 本機 ad-hoc/Mac Developer 無 push entitlement 時 didFail 屬預期——留日誌、
+/// 不中斷 App（ntfy 信令仍是可用通道）。
+final class PushAppDelegate: NSObject, NSApplicationDelegate {
+    private let log = Logger(subsystem: "io.bitward.dev", category: "gui")
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { [log] granted, error in
+            log.notice("push auth granted=\(granted) err=\(String(describing: error), privacy: .public)")
+        }
+        center.delegate = self
+        NSApp.registerForRemoteNotifications()
+    }
+
+    func application(_ application: NSApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        let token = deviceToken.map { String(format: "%02x", $0) }.joined()
+        log.notice("apns token registered, forwarding to daemon")
+        DispatchQueue.global(qos: .utility).async { [log] in
+            do {
+                guard let path = BitwardGroup.daemonSocketPath else { throw BTPError.daemonAbsent }
+                let client = try BTPClient.connect(path: path, budget: 5.0)
+                _ = try client.registerPush(token: token)
+                log.notice("daemon push_token stored")
+            } catch {
+                log.notice("push token 上報 daemon 失敗（稍後随重啟重試）: \(String(describing: error), privacy: .public)")
+            }
+        }
+    }
+
+    func application(_ application: NSApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        log.notice("apns unavailable: \(error.localizedDescription, privacy: .public)")
+    }
+}
+
+extension PushAppDelegate: UNUserNotificationCenterDelegate {
+    /// 前台也顯示橫幅（核准提醒的可用性優先）。
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
     }
 }
 
