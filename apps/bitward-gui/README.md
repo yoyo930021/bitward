@@ -33,15 +33,30 @@ cd apps/bitward-gui
 BITWARD_GUI_SOCK=<repo>/dev/e2e/demo/s NSH_GUI_SHOTS=$PWD nsh run --target macos
 ```
 
-依指令序列跑完整驗收流並寫 `shot-1..23-*.png` 後退出：列表全量 40 筆（緊湊密度證據，
-右欄空態為「選取一個項目」佔位）→ 搜尋 "GitHub" → 詳情遮罩 → 詳情 revealed → 新增表單模態 → 真送新增（Create+AddTag）
+依指令序列跑完整驗收流並寫 `shot-1..23-*.png` 後退出：列表全量（三欄骨架、
+型別磚、未同步膠囊，右欄空態為「選取一個項目」佔位）→ 搜尋 "GitHub" →
+詳情遮罩 → 詳情 revealed → 新增表單模態 → 真送新增（Create+AddTag）
 → TOTP 拒絕路徑（無 seed → 錯誤橫條）→ 排序下拉 → 標籤 chips 選取 →
 編輯改名（Patch）→ 刪除確認框 → 取消不刪斷言 → 刪除後空列表 →
 鎖態頁（已鎖定+解鎖鈕）→ 解鎖 → 匯出確認框（未加密提醒）→ 匯出完成提示列 →
-選取態（清搜尋、開詳情；選中列提亮＋左 3px accent 條）→
+選取態（清搜尋、開詳情；選中列淡藍底＋左 3px 藍條）→
 垃圾桶（軟刪條目＋刪除時間）→ 垃圾桶詳情（還原／永久刪除動作）→ 還原後回列表 →
 產生器面板展開（真送 Use:GeneratePassword 取草稿）→
 TOTP 倒數三段（真取碼後偽造時間源示 30/10/5 秒比例，5 秒段轉 warning 色）。
+
+### 徽章無感收斂證據（`NSH_GUI_SHOTS_DRAIN`）
+
+另跑一條獨立時間軸，證明 `OutboxDrained` 事件讓「未同步」徽章在 VW
+恢復後自動消失（不點任何鈕）。指令由 `dev/e2e/autodrain.sh` 的停啟模式
+驅動：VW 停機下建項目 → `shot-24-badge-pending.png`（徽章在列）→
+背景重啟 VW → 事件幫浦收 `OutboxDrained` 自動重抓 →
+`shot-25-badge-cleared.png`（徽章歸零）。90 秒未收斂即斷言失敗。
+
+```sh
+cd apps/bitward-gui
+BITWARD_GUI_SOCK=<drain-daemon.sock> NSH_GUI_SHOTS=$PWD NSH_GUI_SHOTS_DRAIN=1 \
+  nsh run --target macos
+```
 
 注意：垃圾桶需要 daemon 支援 `Query.deleted` 三態與 `ItemMeta.deleted_at`
 （批次 2a 資料面，DataModel 交付）；產生器的 `Use:GeneratePassword` 為既有呼叫面。
@@ -56,17 +71,17 @@ TOTP 倒數三段（真取碼後偽造時間源示 30/10/5 秒比例，5 秒段�
 
 | 檔 | 職責 |
 |---|---|
-| `btp.rs` | BTP 精簡同步 client：u32 LE 長度前綴 + JSON 幀、`Hello{Enroll pair_code:null}`→`Welcome`→`Invoke`/`Reply`；鎖撤銷（A6）自動重連重 Enroll 一次 |
-| `state.rs` | 應用狀態機：`AppCore`（訊號集）+ `Cmd` 命令佇列 + 唯一 `reduce`；UI handler 只投遞命令，worker 執行緒只回傳命令，訊號全在引擎執行緒寫入 |
-| `lib.rs` | 根元件 `App`：命令幫浦（`set_interval` 50ms + `batch`）、大標題列（N 筆項目副行/匯出/改密/新增）、錯誤橫條、Phase×Route 主從式版面與鎖態頁 |
-| `list.rs` | 全寬圓角搜尋框（Query.text 交 daemon FTS）、標籤 chips 行（行尾垃圾桶切換，Query.deleted 三態）、排序選單、38px 緊湊列（monogram 派生色、選中列 accent 指示條）、pending 徽章、`virtual_list` |
-| `detail.rs` | 右欄詳情面板：identity 卡（44 monogram＋連結色 url；垃圾桶條目動作改還原／永久刪除）＋分節欄位（帳密／TOTP），欄位列同行 label＋value（列高 34）；每欄複製鈕 20px（剪貼簿＋success 回饋 1 秒）；密碼遮罩 →「顯示密碼」發 Get(Reveal)，明文只存 `revealed` 訊號、離開詳情即清；TOTP 按鈕發 Use:TotpCode＋倒數細进度條（≤5 秒轉 warning） |
+| `btp.rs` | BTP 精簡同步 client：u32 LE 長度前綴 + JSON 幀、`Hello{Enroll pair_code:null}`→`Welcome`→`Invoke`/`Reply`；鎖撤銷（A6）自動重連重 Enroll 一次；`listen` 事件監聽連線（wants 訂閱，OutboxDrained/VaultChanged 交 state 幫浦） |
+| `state.rs` | 應用狀態機：`AppCore`（訊號集）+ `Cmd` 命令佇列 + 唯一 `reduce`；UI handler 只投遞命令，worker 執行緒只回傳命令，訊號全在引擎執行緒寫入；`watch_events` 事件幫浦（斷線 1s 重連） |
+| `lib.rs` | 根元件 `App`：命令幫浦（`set_interval` 50ms + `batch`）、TOTP 心跳（1s 引擎計時器）、頂部列（置中搜尋＋新增項目）、左側欄（我的密碼庫/已共享佔位/垃圾桶/同步列/匯出/改密）、錯誤橫條、Phase×Route 三欄版面與鎖態頁 |
+| `list.rs` | 置中搜尋框（Query.text 交 daemon FTS；掛頂部列）、標籤 chips 行＋排序/重新整理（中欄工具列）、排序選單、44px 列（型別磚單色字形、選中列淡藍底＋藍指示條）、未同步膠囊、垃圾桶條目顯示刪除時間、`virtual_list` |
+| `detail.rs` | 右欄詳情面板：官方表單感——大名稱＋型別磚，分節與官方同序（帳密／驗證碼／備註／自訂欄位／資訊），欄位為淺灰圓角值塊（label 12 粗灰在上、值 14 塊內、複製鈕塊右側）；垃圾桶條目動作改還原／永久刪除；密碼遮罩 →「顯示密碼」發 Get(Reveal)，明文只存 `revealed` 訊號、離開詳情即清；TOTP 按鈕發 Use:TotpCode＋倒數細进度條（≤5 秒轉 warning） |
 | `form.rs` | 新增/編輯模態（elevated 卡＋背板點擊取消；name/username/password/uri/tags）；密碼欄附產生器面板（長度滑桿、字元集開關、草稿套用） |
 | `passgen.rs` | 產生器純狀態機：長度夾取（8–64、預設 20）、字元集開關、policy JSON（`Use:GeneratePassword` 欄名契約）；隨機數在 daemon |
 | `export.rs` | 未加密 JSON 匯出：逐筆 Get(Reveal) → `~/Downloads/bitward-export-<UTC>.json`（0600） |
-| `theme.rs` | 設計 tokens：三層暗色背景、accent 漸變、語意色、文字三級、密度常量（列高/monogram/輸入框/字級/留白）、monogram 8 色盤（名字 FNV hash 穩定派生）；視圖層唯一顏色與尺寸真相源，禁散落 hex／魔數 |
-| `ui.rs` | 共用小元件：按鈕（primary 漸變/ghost/destructive）、monogram、徽章、表單欄、下拉列、模態殼（absolute 鋪滿 + 置中 elevated 卡）、確認/改密模態、複製鈕 |
-| `shots.rs` | `NSH_GUI_SHOTS` 自我截圖器（AppKit `cacheDisplayInRect` 路徑，不需 TCC；objc2 經 `nsh_platform_macos` 再匯取） |
+| `theme.rs` | 設計 tokens：官方淺色皮（白底、#175DDC 藍、6px 小圓角）、語意色、文字三級、密度常量（三欄寬/列高/字級/留白）、dark 色板保留（`dark` 子模組，下批切換）；視圖層唯一顏色與尺寸真相源，禁散落 hex／魔數 |
+| `ui.rs` | 共用小元件：按鈕（primary 藍實色/ghost/destructive）、型別磚（單色字形，monogram 退役）、徽章、表單欄、下拉列、模態殼（absolute 鋪滿 + 置中白卡）、確認/改密模態、複製鈕 |
+| `shots.rs` | `NSH_GUI_SHOTS` 自我截圖器（AppKit `cacheDisplayInRect` 路徑，不需 TCC；objc2 經 `nsh_platform_macos` 再匯取）；`NSH_GUI_SHOTS_DRAIN` 徽章收斂時間軸 |
 
 導航是 `Route` 狀態機 + `when` 區塊——不用 `nav_stack`（spike FINDINGS
 卡點 4：macOS dev host 不渲染）。

@@ -1073,6 +1073,11 @@ pub fn can_unlock(st: &Option<UnlockStateView>) -> bool {
 /// 「變更主密碼」只在解鎖態開放（daemon 改密需舊 user key 驗金鑰鏈，
 /// 鎖定態送出必被閘下；前端直接把鈕藏掉比讓它报错誠實）。
 pub fn can_change_password(st: &Option<UnlockStateView>) -> bool {
+    is_unlocked(st)
+}
+
+/// 解鎖態判定（頂部列搜尋/新增鈕的顯示閘：鎖定態官方不給庫操作入口）。
+pub fn is_unlocked(st: &Option<UnlockStateView>) -> bool {
     matches!(st, Some(UnlockStateView::Unlocked { .. }))
 }
 

@@ -1,4 +1,4 @@
-//! 共用小元件：按鈕、徽章、monogram、欄位列、下拉面板、模態殼。
+//! 共用小元件：按鈕（藍實色）、徽章、型別磚、值塊欄位、下拉面板、模態殼。
 //! 樣式 setter 只在建立時求值（spike FINDINGS 卡點 1），所以反應式樣式
 //! 一律在閉包內讀 theme()/訊號；固定外觀直接給值。顏色全部出自
 //! `crate::theme` tokens，本檔不寫 hex。
@@ -328,13 +328,14 @@ pub fn change_password_modal(core: AppCore) -> View {
 }
 
 /// 型別字形：官方用單色 icon；nsh 無 icon 系統，以 Unicode 字形＋
-/// U+FE0E（text presentation）強制單色、跟文字色走。
+/// U+FE0E（text presentation）強制單色、跟文字色走。Card 的 💳 在
+/// macOS 仍可能落到彩色 emoji（無單色 dingbat 對等字），屬已知取捨。
 pub fn type_glyph(kind: ItemKind) -> &'static str {
     match kind {
         ItemKind::Login => "🌐\u{fe0e}",
         ItemKind::Card => "💳\u{fe0e}",
-        ItemKind::Identity => "🔑\u{fe0e}",
-        ItemKind::SecureNote => "📝\u{fe0e}",
+        ItemKind::Identity => "⚷\u{fe0e}",
+        ItemKind::SecureNote => "✎\u{fe0e}",
     }
 }
 

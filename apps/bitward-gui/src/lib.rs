@@ -4,9 +4,9 @@
 //! 投遞 `Cmd`，`set_interval` 幫浦在引擎執行緒上 `reduce`；需要 daemon 的
 //! 動作派到 worker 執行緒（`btp::Session` 同步 UDS client），worker 只準
 //! 回傳 `Cmd`、不碰訊號。分級、過濾、排序語意全在 daemon（零業務邏輯在
-//! GUI）；導航是 `Route` 狀態機＋主從式版面（列表常駐左欄、詳情走右欄、
+//! GUI）；導航是 `Route` 狀態機＋官方三欄骨架（左側欄｜中列表欄｜右詳情欄，
 //! 新增/編輯與確認走模態；nav_stack 在 macOS dev host 不渲染，spike
-//! FINDINGS 卡點 4）。外觀代幣全在 `theme`。
+//! FINDINGS 卡點 4）。外觀代幣全在 `theme`（本批發官方淺色皮）。
 
 mod btp;
 mod detail;
@@ -121,7 +121,11 @@ pub fn App() -> impl IntoElement {
         }
     });
     if let Some(dir) = std::env::var_os("NSH_GUI_SHOTS").map(PathBuf::from) {
-        shots::script(dir, core.clone());
+        if std::env::var_os("NSH_GUI_SHOTS_DRAIN").is_some() {
+            shots::script_drain(dir, core.clone());
+        } else {
+            shots::script(dir, core.clone());
+        }
     }
 
     let conn_cond = core.clone();
@@ -181,6 +185,9 @@ fn topbar(core: AppCore) -> View {
     let notice_cond = core.clone();
     let notice_build = core.clone();
     let new_core = core.clone();
+    let add_cond = core.clone();
+    let search_cond = core.clone();
+    let search_build = core.clone();
     view()
         .flex_row()
         .items_center()
@@ -234,7 +241,10 @@ fn topbar(core: AppCore) -> View {
                         )),
                 ),
         )
-        .child(list::search(core.clone()))
+        .child(when(
+            move || state::is_unlocked(&search_cond.vault.get()),
+            move || list::search(search_build.clone()),
+        ))
         .child(
             view()
                 .flex_1()
@@ -255,9 +265,15 @@ fn topbar(core: AppCore) -> View {
                         )
                     },
                 ))
-                .child(ui::button("＋ 新增項目", ui::Btn::PrimaryWide, move || {
-                    new_core.send(Cmd::OpenCreate)
-                })),
+                .child(when(
+                    move || state::is_unlocked(&add_cond.vault.get()),
+                    move || {
+                        let n = new_core.clone();
+                        ui::button("＋ 新增項目", ui::Btn::PrimaryWide, move || {
+                            n.send(Cmd::OpenCreate)
+                        })
+                    },
+                )),
         )
 }
 

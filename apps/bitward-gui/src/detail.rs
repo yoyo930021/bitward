@@ -74,7 +74,11 @@ pub fn placeholder() -> View {
                 .flex_row()
                 .items_center()
                 .justify_center()
-                .child(text("🔑\u{fe0e}").text_size(px(theme::GLYPH_KEY)).text_color(theme::TEXT_SECONDARY)),
+                .child(
+                    text("⚷\u{fe0e}")
+                        .text_size(px(theme::GLYPH_KEY))
+                        .text_color(theme::TEXT_SECONDARY),
+                ),
         )
         .child(
             text("選取一個項目")

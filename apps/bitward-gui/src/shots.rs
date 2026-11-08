@@ -145,6 +145,80 @@ fn at(ms: u64, f: impl FnOnce() + 'static) {
     set_timeout(Duration::from_millis(ms), f);
 }
 
+/// 收尾：AppKit main thread 上結束行程（非 macOS 直接 exit）。
+fn quit() {
+    on_main(|| {
+        #[cfg(target_os = "macos")]
+        {
+            use nsh_platform_macos::objc2::MainThreadMarker;
+            use nsh_platform_macos::objc2_app_kit::NSApplication;
+            if let Some(mtm) = MainThreadMarker::new() {
+                NSApplication::sharedApplication(mtm).terminate(None);
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        std::process::exit(0);
+    });
+}
+
+/// 徽章收斂證據流（`NSH_GUI_SHOTS_DRAIN`）：VW 停機下建項目（徽章掛上＝
+/// shot-24）→ 外部腳本重啟 VW → 背景推送收斂發 `OutboxDrained` → 事件幫浦
+/// 自動重抓列表（零按鈕）→ 徽章消失＝shot-25。90 秒未收斂即斷言失敗。
+pub fn script_drain(dir: PathBuf, core: AppCore) {
+    let c = core.clone();
+    at(2600, move || c.send(Cmd::OpenCreate));
+    let c = core.clone();
+    at(3000, move || {
+        c.form.name.set("Drain 徽章驗證".into());
+        // 帶密碼欄：純名稱 Login 的 cipher 不帶 login 物件，VW 回 400
+        // "Data missing"（daemon encrypt_draft 缺 `"login":{}`，已報 Main）。
+        c.form.password.set("drain-secret-1".into());
+        c.send(Cmd::SubmitForm);
+    });
+    let c = core.clone();
+    at(4200, move || {
+        c.query.set("Drain 徽章驗證".into());
+        c.send(Cmd::RefetchList);
+    });
+    let d = dir.clone();
+    let c = core.clone();
+    at(5400, move || {
+        let row = find_view(&c, "Drain 徽章驗證");
+        assert!(
+            row.is_some_and(|v| v.meta.pending),
+            "shot-24 前提：新建項目應掛未同步徽章（確認 VW 已停）"
+        );
+        capture(&d, "shot-24-badge-pending.png");
+    });
+    poll_drained(dir, core, 7000);
+}
+
+fn poll_drained(dir: PathBuf, core: AppCore, ms: u64) {
+    let d = dir.clone();
+    let c = core.clone();
+    at(ms, move || {
+        let cleared = find_view(&c, "Drain 徽章驗證").is_some_and(|v| !v.meta.pending);
+        if cleared {
+            capture(&d, "shot-25-badge-cleared.png");
+            println!("bitward-gui: badge auto-cleared at {ms}ms (event-driven)");
+            at(ms + 800, quit);
+        } else if ms < 95000 {
+            poll_drained(dir, core, ms + 2000);
+        } else {
+            panic!("90 秒內未同步徽章未收斂：OutboxDrained 事件路徑失效？");
+        }
+    });
+}
+
+/// 由目前列表訊號找名字完全相符的項目視圖。
+fn find_view(core: &AppCore, name: &str) -> Option<bw_proto::ItemView> {
+    core.items
+        .get()
+        .iter()
+        .find(|v| v.meta.name.as_deref() == Some(name))
+        .cloned()
+}
+
 /// 開窗後依序跑完整驗收流：列表全量（密度證據）→ 搜尋 → 詳情遮罩 → revealed → 新增表單
 /// 模態 → 提交新增 → 編輯改名 → 刪除確認（先取消斷言、再確認）→
 /// 匯出確認 → 鎖態頁/解鎖 → 選取態 → 垃圾桶（列表/還原動作/還原後列表）→
@@ -379,20 +453,7 @@ pub fn script(dir: PathBuf, core: AppCore) {
     });
     let d = dir.clone();
     at(38000, move || capture(&d, "shot-23-totp-5s.png"));
-    at(38600, move || {
-        on_main(|| {
-            #[cfg(target_os = "macos")]
-            {
-                use nsh_platform_macos::objc2::MainThreadMarker;
-                use nsh_platform_macos::objc2_app_kit::NSApplication;
-                if let Some(mtm) = MainThreadMarker::new() {
-                    NSApplication::sharedApplication(mtm).terminate(None);
-                }
-            }
-            #[cfg(not(target_os = "macos"))]
-            std::process::exit(0);
-        });
-    });
+    at(38600, quit);
 }
 
 /// 由目前列表訊號找名字完全相符的項目 id。
