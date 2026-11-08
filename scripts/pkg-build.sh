@@ -246,7 +246,7 @@ pkgutil --pkg-info "$PKG_ID" | sed 's/^/    /'
 fi
 
 if [ "$EXPERIMENT" = 1 ]; then
-  echo "==> BTM 判定實驗：open -a Bitward → AX 按「啟用」"
+  echo "==> BTM 判定實驗：open -a Bitward → 選單喚起狀態頁 → AX 按「啟用」"
   # group sock 若被 terminal demo daemon 佔用，helper 起不來屬預期；
   # 判定看 BTM record 與 job 載入，不看 daemon 能否連 Vaultwarden。
   BTM_SNAP=$REPO/dist/btm-before.txt
@@ -285,6 +285,12 @@ end textOf
 
 tell application "System Events"
 	set frontmost of process "Bitward" to true
+	delay 1
+	-- 殼轉 LSUIElement：無首窗（TabView 已拆）→ 選單「Bitward → 狀態⋯」喚起。
+	tell process "Bitward"
+		click menu bar item "Bitward" of menu bar 1
+		click menu item "狀態⋯" of menu 1 of menu bar item "Bitward" of menu bar 1
+	end tell
 	repeat 30 times
 		if (count of windows of process "Bitward") > 0 then exit repeat
 		delay 1
@@ -292,17 +298,6 @@ tell application "System Events"
 end tell
 set allE to my settleTree()
 if allE is {} then return "NO AX TREE（視窗沒出來？）"
--- SwiftUI 控制項 name 全 missing value；tab 標籤在 description
-tell application "System Events"
-	repeat with e in allE
-		try
-			if (role of e as string) is "AXRadioButton" and (description of e as string) is "狀態" then
-				perform action "AXPress" of e
-				exit repeat
-			end if
-		end try
-	end repeat
-end tell
 set txt to ""
 set bEn to missing value
 set bDis to missing value

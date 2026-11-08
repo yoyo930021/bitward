@@ -34,17 +34,78 @@ enum DaemonService {
     }
 }
 
+/// 巢狀密碼庫（NSH GUI）轉發：本殼 LSUIElement 化後，vault 瀏覽面是
+/// Bitward.app/Contents/Applications/BitwardGUI.app，Dock 只剩它一個入口。
+enum VaultGUI {
+    static var bundleURL: URL? {
+        let url = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Applications/BitwardGUI.app")
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// 傳給 GUI 的 `--sock`：預設 group container 路徑（與本殼同解析鏈）；
+    /// `defaults write io.bitward.dev DaemonSockPath <path>` 覆寫（dev 指 demo sock 用）。
+    static var sockPath: String {
+        if let over = UserDefaults.standard.string(forKey: "DaemonSockPath"), !over.isEmpty {
+            return over
+        }
+        return BitwardGroup.daemonSocketPath ?? BitwardGroup.tmpSock
+    }
+
+    /// NSWorkspace.open 巢狀 bundle（已在跑＝同 bundle id 單例，直接帶到前景）。
+    static func open() {
+        guard let url = bundleURL else {
+            uiLog.notice("巢狀 BitwardGUI.app 不存在（dev 建置請直接 cargo run／nsh run 密碼庫）")
+            return
+        }
+        let cfg = NSWorkspace.OpenConfiguration()
+        cfg.activates = true
+        cfg.arguments = ["--sock", sockPath]
+        NSWorkspace.shared.openApplication(at: url, configuration: cfg) { _, error in
+            if let error {
+                uiLog.notice("開啟密碼庫失敗：\(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+}
+
 @main
 struct BitwardApp: App {
     @NSApplicationDelegateAdaptor(PushAppDelegate.self) private var pushDelegate
 
     var body: some Scene {
-        // macOS 27 實測：WindowGroup 從背景 session 啟動不自動建窗（savedState 還原
-        // 是唯一出現過視窗的路徑）。單例 Window + presented 啟動行為才有可靠首窗。
-        Window("Bitward", id: "main") {
-            RootView()
+        // 殼轉背景（LSUIElement）：批准中心與狀態頁不再自動開窗，選單喚起；
+        // 首窗職責交給轉發的 BitwardGUI.app（見 VaultGUI）。
+        Window("批准中心", id: "approvals") {
+            ApprovalCenterView()
         }
-        .defaultLaunchBehavior(.presented)
+        .defaultLaunchBehavior(.suppressed)
+        Window("狀態", id: "status") {
+            StatusView()
+        }
+        .defaultLaunchBehavior(.suppressed)
+        .commands {
+            BitwardMenu()
+        }
+    }
+}
+
+private struct BitwardMenu: Commands {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            Button("批准中心⋯") {
+                openWindow(id: "approvals")
+                NSApp.activate()
+            }
+            Button("狀態⋯") {
+                openWindow(id: "status")
+                NSApp.activate()
+            }
+            Divider()
+            Button("開啟密碼庫⋯") { VaultGUI.open() }
+        }
     }
 }
 
@@ -55,6 +116,9 @@ final class PushAppDelegate: NSObject, NSApplicationDelegate {
     private let log = Logger(subsystem: "io.bitward.dev", category: "gui")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 背景殼三件事：拉起密碼庫首窗、批准輪詢＋identity store 同步常駐、push 註冊。
+        VaultGUI.open()
+        ApprovalModel.shared.start()
         let center = UNUserNotificationCenter.current()
         center.requestAuthorization(options: [.alert, .sound]) { [log] granted, error in
             log.notice("push auth granted=\(granted) err=\(String(describing: error), privacy: .public)")
@@ -81,6 +145,12 @@ final class PushAppDelegate: NSObject, NSApplicationDelegate {
     func application(_ application: NSApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
         log.notice("apns unavailable: \(error.localizedDescription, privacy: .public)")
     }
+
+    /// `open -a Bitward`（已跑）＝把密碼庫帶回前景：Dock 單一入口的 reopen 語意。
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        VaultGUI.open()
+        return false
+    }
 }
 
 extension PushAppDelegate: UNUserNotificationCenterDelegate {
@@ -92,22 +162,10 @@ extension PushAppDelegate: UNUserNotificationCenterDelegate {
     }
 }
 
-private struct RootView: View {
-    var body: some View {
-        TabView {
-            ApprovalCenterView()
-                .tabItem { Label("批准", systemImage: "checkmark.seal") }
-            StatusView()
-                .tabItem { Label("狀態", systemImage: "info.circle") }
-        }
-        .frame(minWidth: 560, minHeight: 340)
-    }
-}
-
 /// 批准中心：遠端 device 的受控請求（requires_approval grant）在 daemon 排隊，
 /// 這裡輪詢 ListPending 並由人批准或拒絕（Deny 立即釋放請求端）。
 private struct ApprovalCenterView: View {
-    @StateObject private var model = ApprovalModel()
+    @ObservedObject private var model = ApprovalModel.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -134,13 +192,16 @@ private struct ApprovalCenterView: View {
             }
         }
         .padding()
-        .onAppear { model.start() }
-        .onDisappear { model.stop() }
+        .frame(minWidth: 560, minHeight: 340)
     }
 }
 
 @MainActor
 private final class ApprovalModel: ObservableObject {
+    /// 殼轉背景常駐：輪詢＋identity store 同步不再綁視窗生命週期
+    /// （改前視窗永遠開著＝效果相同；改後視窗選單才喚起，綁生命週期會靜默停擺）。
+    static let shared = ApprovalModel()
+
     struct PendingItem: Identifiable, Equatable { let id: String; let summary: String }
 
     @Published var pending: [PendingItem] = []
@@ -148,14 +209,14 @@ private final class ApprovalModel: ObservableObject {
     fileprivate var busyIds: Set<String> = []
     private var timer: Timer?
 
+    private init() {}
+
     func start() {
         timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
         tick()
     }
-
-    func stop() { timer?.invalidate(); timer = nil }
 
     private var counter = 0
     private func tick() {
@@ -251,7 +312,7 @@ private struct StatusView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Bitward").font(.largeTitle.bold())
-            Text("批准中心已上工；vault 瀏覽與 NSH 整合屬後續主項")
+            Text("背景常駐殼：密碼庫視窗由本殼轉發開啟（Contents/Applications/BitwardGUI.app）；批准中心與本頁從選單「Bitward」喚起")
                 .foregroundStyle(.secondary)
             Divider()
             HStack {
@@ -273,6 +334,7 @@ private struct StatusView: View {
             Group {
                 Text("app group: \(BitwardGroup.id)")
                 Text("daemon socket: \(BitwardGroup.daemonSocketPath ?? "(container 尚未建立)")")
+                Text("密碼庫轉發 sock: \(VaultGUI.sockPath)")
                 Text("pairing id: \(BitwardGroup.pairingUUID())")
             }
             .font(.system(.caption, design: .monospaced))
