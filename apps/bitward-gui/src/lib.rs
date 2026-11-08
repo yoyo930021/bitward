@@ -4,8 +4,9 @@
 //! 投遞 `Cmd`，`set_interval` 幫浦在引擎執行緒上 `reduce`；需要 daemon 的
 //! 動作派到 worker 執行緒（`btp::Session` 同步 UDS client），worker 只準
 //! 回傳 `Cmd`、不碰訊號。分級、過濾、排序語意全在 daemon（零業務邏輯在
-//! GUI）；導航是 `Route` 狀態機 + `when` 區塊（nav_stack 在 macOS dev
-//! host 不渲染，spike FINDINGS 卡點 4）。
+//! GUI）；導航是 `Route` 狀態機＋主從式版面（列表常駐左欄、詳情走右欄、
+//! 新增/編輯與確認走模態；nav_stack 在 macOS dev host 不渲染，spike
+//! FINDINGS 卡點 4）。外觀代幣全在 `theme`。
 
 mod btp;
 mod detail;
@@ -14,6 +15,7 @@ mod form;
 mod list;
 mod shots;
 mod state;
+mod theme;
 mod ui;
 
 use std::cell::RefCell;
@@ -22,9 +24,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nsh_base::theme;
 use nsh_core::prelude::*;
 
+use bw_proto::UnlockStateView;
 use state::{AppCore, Cmd, Phase, Route};
 
 /// 連線參數解析順序：`--sock <path>` > `BITWARD_GUI_SOCK` >
@@ -74,7 +76,7 @@ fn native(registry: &mut Registry) {
     registry.register::<App>();
 }
 
-/// 根元件：建立 AppCore、掛命令幫浦、分派三個畫面與確認模態。
+/// 根元件：建立 AppCore、掛命令幫浦、分派主從式畫面與模態。
 #[component]
 pub fn App() -> impl IntoElement {
     let (core, rx) = AppCore::boot(Arc::new(btp::Session::new(sock_path())));
@@ -115,12 +117,14 @@ pub fn App() -> impl IntoElement {
     let modal_build = core.clone();
     let pw_modal_cond = core.clone();
     let pw_modal_build = core.clone();
+    let form_cond = core.clone();
+    let form_build = core.clone();
     view()
         .flex_col()
         .flex_1()
         .relative()
-        .bg(move || theme().background)
-        .child(title_bar(core.clone()))
+        .bg(theme::BASE)
+        .child(header(core.clone()))
         .child(banner(core.clone()))
         .child(when(
             move || conn_cond.phase.get() == Phase::Connecting,
@@ -135,6 +139,10 @@ pub fn App() -> impl IntoElement {
             move || router(ready_build.clone()),
         ))
         .child(when(
+            move || matches!(form_cond.route.get(), Route::Create | Route::Edit(_)),
+            move || form::overlay(form_build.clone()),
+        ))
+        .child(when(
             move || modal_cond.confirm.get().is_some(),
             move || match modal_build.confirm.get() {
                 Some(c) => ui::confirm_modal(modal_build.clone(), &c),
@@ -147,12 +155,12 @@ pub fn App() -> impl IntoElement {
         ))
 }
 
-/// 標題列：產品名、鎖態指示、解鎖鈕、忙碌指示、匯出提示、匯出/新增。
-fn title_bar(core: AppCore) -> View {
-    let state_core = core.clone();
-    let unlock_cond = core.clone();
-    let unlock_build = core.clone();
-    let busy_core = core.clone();
+/// 大標題列：產品名＋「N 筆項目 · 狀態」副行＋右側動作群。
+/// 舊標題列的鎖態指示、匯出提示收進這裡（副行跟 vault_label 走）。
+fn header(core: AppCore) -> View {
+    let sub_core = core.clone();
+    let busy_cond = core.clone();
+    let busy_build = core.clone();
     let notice_cond = core.clone();
     let notice_build = core.clone();
     let export_core = core.clone();
@@ -162,47 +170,53 @@ fn title_bar(core: AppCore) -> View {
     view()
         .flex_row()
         .items_center()
-        .gap_3()
-        .h_12()
-        .px_4()
-        .border_b(px(1.0))
-        .border_color(move || theme().border)
+        .gap_4()
+        .px_6()
+        .pt_5()
+        .pb_4()
         .child(
-            text("Bitward 密碼庫")
-                .text_size(px(15.0))
-                .font_weight(FontWeight::SEMIBOLD),
-        )
-        .child(
-            text(move || {
-                state_core
-                    .vault
-                    .get()
-                    .map(|s| state::vault_label(&s).to_owned())
-                    .unwrap_or_else(|| "連線中".to_owned())
-            })
-            .text_size(px(12.0))
-            .text_color(move || theme().muted_foreground),
-        )
-        .child(when(
-            move || state::can_unlock(&unlock_cond.vault.get()),
-            move || {
-                let c = unlock_build.clone();
-                ui::button("解鎖", ui::Btn::Primary, move || {
-                    c.send(Cmd::RequestUnlock)
-                })
-            },
-        ))
-        .child(
-            text(move || {
-                if busy_core.busy.get() > 0 {
-                    "處理中…"
-                } else {
-                    ""
-                }
-                .to_owned()
-            })
-            .text_size(px(12.0))
-            .text_color(move || theme().muted_foreground),
+            view()
+                .flex_col()
+                .gap_0p5()
+                .child(
+                    text("密碼庫")
+                        .text_size(px(28.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .letter_spacing(px(0.5))
+                        .text_color(theme::TEXT_PRIMARY),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            text(move || {
+                                let n = sub_core.items.get().len();
+                                match sub_core.vault.get() {
+                                    Some(UnlockStateView::Unlocked { .. }) => {
+                                        format!("{n} 筆項目 · 已同步")
+                                    }
+                                    Some(s) => {
+                                        format!("{n} 筆項目 · {}", state::vault_label(&s))
+                                    }
+                                    None => format!("{n} 筆項目 · 連線中"),
+                                }
+                            })
+                            .text_size(px(13.0))
+                            .text_color(theme::TEXT_SECONDARY),
+                        )
+                        .child(when(
+                            move || busy_build.busy.get() > 0,
+                            move || {
+                                let _ = busy_cond.clone();
+                                text("處理中…")
+                                    .text_size(px(12.0))
+                                    .text_color(theme::TEXT_MUTED)
+                                    .animate_pulse()
+                            },
+                        )),
+                ),
         )
         .child(view().flex_1())
         .child(when(
@@ -212,26 +226,142 @@ fn title_bar(core: AppCore) -> View {
                 view().max_w(px(360.0)).child(
                     text(move || c.notice.get().unwrap_or_default())
                         .text_size(px(11.5))
-                        .number_of_lines(1)
-                        .text_color(move || theme().muted_foreground),
+                        .line_height(px(16.0))
+                        .number_of_lines(2)
+                        .text_color(theme::SUCCESS),
                 )
             },
         ))
-        .child(ui::button("匯出", ui::Btn::Muted, move || {
+        .child(ui::button("匯出", ui::Btn::Ghost, move || {
             export_core.send(Cmd::AskExport)
         }))
         .child(when(
             move || state::can_change_password(&pw_cond.vault.get()),
             move || {
                 let c = pw_build.clone();
-                ui::button("變更主密碼", ui::Btn::Muted, move || {
+                ui::button("變更主密碼", ui::Btn::Ghost, move || {
                     c.send(Cmd::OpenChangePassword)
                 })
             },
         ))
-        .child(ui::button("新增", ui::Btn::Primary, move || {
+        .child(ui::button("＋ 新增", ui::Btn::PrimaryCapsule, move || {
             new_core.send(Cmd::OpenCreate)
         }))
+}
+
+/// Ready 後的內容區：鎖態整頁取代主從式版面（Route 仍是導航真相）。
+fn router(core: AppCore) -> impl IntoElement {
+    let lock_cond = core.clone();
+    let lock_build = core.clone();
+    let split_build = core.clone();
+    when(
+        move || !matches!(lock_cond.vault.get(), Some(UnlockStateView::Unlocked { .. })),
+        move || lock_page(lock_build.clone()),
+    )
+    .otherwise(move || split(split_build.clone()))
+}
+
+/// 主從式版面：全寬工具列＋（左列表欄｜右詳情欄）。
+fn split(core: AppCore) -> View {
+    let detail_cond = core.clone();
+    let detail_build = core.clone();
+    let loading_cond = core.clone();
+    view()
+        .flex_col()
+        .flex_1()
+        .overflow_hidden()
+        .child(list::toolbar(core.clone()))
+        .child(
+            view()
+                .flex_row()
+                .flex_1()
+                .overflow_hidden()
+                .child(
+                    view()
+                        .w(px(400.0))
+                        .flex_col()
+                        .border_r(px(1.0))
+                        .border_color(theme::HAIRLINE)
+                        .pt_3()
+                        .child(list::panel(core.clone())),
+                )
+                .child(
+                    view()
+                        .flex_1()
+                        .child(when(
+                            move || detail_cond.detail.get().is_some(),
+                            move || detail::pane(detail_build.clone()),
+                        ).otherwise(move || {
+                            if matches!(loading_cond.route.get(), Route::Detail(_)) {
+                                detail::loading()
+                            } else {
+                                view().flex_1()
+                            }
+                        })),
+                ),
+        )
+}
+
+/// 鎖態頁：置中 lock glyph＋狀態字＋accent 解鎖卡（協定走金鑰鏈，
+/// 無密碼輸入框：`Auth:Unlock{biometric:false}` 不帶參數）。
+fn lock_page(core: AppCore) -> View {
+    let label_core = core.clone();
+    let unlock_cond = core.clone();
+    let unlock_build = core.clone();
+    view()
+        .flex_1()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .child(
+            view()
+                .w(px(360.0))
+                .flex_col()
+                .items_center()
+                .gap_3()
+                .p_8()
+                .rounded_2xl()
+                .border(px(1.0))
+                .border_color(theme::HAIRLINE)
+                .bg(theme::ELEVATED)
+                .shadow(vec![BoxShadow {
+                    offset_x: px(0.0),
+                    offset_y: px(18.0),
+                    blur: px(48.0),
+                    spread: px(-10.0),
+                    color: black().opacity(0.55).into(),
+                    inset: false,
+                }])
+                .child(
+                    text("🔒")
+                        .text_size(px(36.0))
+                        .line_height(px(44.0)),
+                )
+                .child(
+                    text(move || {
+                        label_core
+                            .vault
+                            .get()
+                            .map(|s| state::vault_label(&s).to_owned())
+                            .unwrap_or_else(|| "連線中".to_owned())
+                    })
+                    .text_size(px(17.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme::TEXT_PRIMARY),
+                )
+                .child(when(
+                    move || state::can_unlock(&unlock_cond.vault.get()),
+                    move || {
+                        let c = unlock_build.clone();
+                        view().w_full().pt_1().child(
+                            ui::button("解鎖", ui::Btn::PrimaryCapsule, move || {
+                                c.send(Cmd::RequestUnlock)
+                            })
+                            .w_full(),
+                        )
+                    },
+                )),
+        )
 }
 
 /// 錯誤橫條：協定/傳輸錯誤與匯出失敗；點擊 ✕ 收合。
@@ -247,14 +377,14 @@ fn banner(core: AppCore) -> impl IntoElement {
                 .flex_row()
                 .items_center()
                 .gap_3()
-                .px_4()
+                .px_6()
                 .py_2()
-                .bg(move || theme().destructive.opacity(0.14))
+                .bg(theme::DESTRUCTIVE.opacity(0.12))
                 .child(
                     text(move || c.error_text.get().unwrap_or_default())
                         .text_size(px(12.5))
                         .line_height(px(18.0))
-                        .text_color(move || theme().destructive)
+                        .text_color(theme::DESTRUCTIVE)
                         .flex_1(),
                 )
                 .child(
@@ -264,7 +394,7 @@ fn banner(core: AppCore) -> impl IntoElement {
                         .child(
                             text("✕")
                                 .text_size(px(12.0))
-                                .text_color(move || theme().muted_foreground),
+                                .text_color(theme::TEXT_MUTED),
                         ),
                 )
         },
@@ -281,7 +411,8 @@ fn centered_hint(core: AppCore, label: &'static str) -> View {
         .child(
             text(label)
                 .text_size(px(13.0))
-                .text_color(move || theme().muted_foreground),
+                .text_color(theme::TEXT_MUTED)
+                .animate_pulse(),
         )
 }
 
@@ -294,52 +425,46 @@ fn failed_card(core: AppCore) -> View {
         .flex_col()
         .items_center()
         .justify_center()
-        .gap_3()
         .child(
-            text("無法連線 daemon")
-                .text_size(px(17.0))
-                .font_weight(FontWeight::SEMIBOLD),
+            view()
+                .w(px(460.0))
+                .flex_col()
+                .items_center()
+                .gap_3()
+                .p_6()
+                .rounded_2xl()
+                .border(px(1.0))
+                .border_color(theme::HAIRLINE)
+                .bg(theme::ELEVATED)
+                .shadow(vec![BoxShadow {
+                    offset_x: px(0.0),
+                    offset_y: px(18.0),
+                    blur: px(48.0),
+                    spread: px(-10.0),
+                    color: black().opacity(0.55).into(),
+                    inset: false,
+                }])
+                .child(
+                    text("無法連線 daemon")
+                        .text_size(px(17.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::TEXT_PRIMARY),
+                )
+                .child(
+                    text(format!("路徑：{path}"))
+                        .text_size(px(12.5))
+                        .font_family(ui::mono_font())
+                        .text_color(theme::TEXT_MUTED),
+                )
+                .child(
+                    text("先啟動 bitwarderd（--data-dir … --sock …），或以 --sock <path>／BITWARD_GUI_SOCK 指向正確位置。")
+                        .text_size(px(12.5))
+                        .line_height(px(19.0))
+                        .text_center()
+                        .text_color(theme::TEXT_SECONDARY),
+                )
+                .child(ui::button("重新連線", ui::Btn::PrimaryCapsule, move || {
+                    retry.send(Cmd::Boot)
+                })),
         )
-        .child(
-            text(format!("路徑：{path}"))
-                .text_size(px(12.5))
-                .text_color(move || theme().muted_foreground),
-        )
-        .child(
-            text("先啟動 bitwarderd（--data-dir … --sock …），或以 --sock <path>／BITWARD_GUI_SOCK 指向正確位置。")
-                .text_size(px(12.5))
-                .line_height(px(19.0))
-                .text_color(move || theme().muted_foreground),
-        )
-        .child(ui::button("重新連線", ui::Btn::Primary, move || {
-            retry.send(Cmd::Boot)
-        }))
-}
-
-/// Ready 後的頁面路由（`Route` 狀態機 + when 區塊）。
-fn router(core: AppCore) -> View {
-    let list_cond = core.clone();
-    let list_build = core.clone();
-    let detail_cond = core.clone();
-    let detail_build = core.clone();
-    let form_cond = core.clone();
-    let form_build = core.clone();
-    view()
-        .flex_col()
-        .flex_1()
-        .child(when(
-            move || list_cond.route.get() == Route::List,
-            move || list::page(list_build.clone()),
-        ))
-        .child(when(
-            move || matches!(detail_cond.route.get(), Route::Detail(_)),
-            move || match detail_build.route.get() {
-                Route::Detail(id) => detail::page(detail_build.clone(), id),
-                _ => view().flex_1(),
-            },
-        ))
-        .child(when(
-            move || matches!(form_cond.route.get(), Route::Create | Route::Edit(_)),
-            move || form::page(form_build.clone()),
-        ))
 }

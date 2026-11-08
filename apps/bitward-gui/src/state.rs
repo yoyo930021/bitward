@@ -70,7 +70,6 @@ pub enum Cmd {
     RefetchList,
     ChooseTag(Option<String>),
     ChooseSort(SortKey),
-    ToggleTagMenu,
     ToggleSortMenu,
     OpenList,
     OpenDetail(ItemId),
@@ -209,7 +208,6 @@ pub struct AppCore {
     pub query: Signal<String>,
     pub tag: Signal<Option<String>>,
     pub sort: Signal<SortKey>,
-    pub tag_menu: Signal<bool>,
     pub sort_menu: Signal<bool>,
     pub list_gen: Signal<u64>,
     pub busy: Signal<usize>,
@@ -239,7 +237,6 @@ impl AppCore {
             query: signal(String::new()),
             tag: signal(None),
             sort: signal(SortKey::Name),
-            tag_menu: signal(false),
             sort_menu: signal(false),
             list_gen: signal(0),
             busy: signal(0),
@@ -332,7 +329,6 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         Cmd::RefetchList => fetch_list(core),
         Cmd::ChooseTag(tag) => {
             core.tag.set(tag);
-            core.tag_menu.set(false);
             fetch_list(core);
         }
         Cmd::ChooseSort(sort) => {
@@ -340,15 +336,9 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.sort_menu.set(false);
             fetch_list(core);
         }
-        Cmd::ToggleTagMenu => {
-            let next = !core.tag_menu.get();
-            core.tag_menu.set(next);
-            core.sort_menu.set(false);
-        }
         Cmd::ToggleSortMenu => {
             let next = !core.sort_menu.get();
             core.sort_menu.set(next);
-            core.tag_menu.set(false);
         }
         Cmd::ListLoaded { seq, rows } => {
             core.settle();
@@ -359,7 +349,6 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         }
         Cmd::OpenList => {
             core.leave_detail();
-            core.tag_menu.set(false);
             core.sort_menu.set(false);
             core.route.set(Route::List);
         }
