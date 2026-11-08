@@ -210,6 +210,10 @@ else
 fi
 
 echo "==> installer -pkg -target /"
+# BundleOverwriteAction=update 只覆蓋 BOM 內檔案：dev-install 塞過的
+# embedded.provisionprofile 等殭屍檔不在新 BOM→裝後殘留→deep seal 紅
+# （2026-11-08 實測）。裝前整包移除，安裝即乾淨替換。
+sudo -n rm -rf /Applications/Bitward.app 2>/dev/null || rm -rf /Applications/Bitward.app 2>/dev/null || true
 pgrep -x Bitward >/dev/null && kill -9 "$(pgrep -x Bitward)" 2>/dev/null || true
 # 舊密碼庫實例若活著，殼轉發只會起它（同 bundle id 單例）——先清再測才收新產物。
 pgrep -x BitwardGUI >/dev/null && kill -9 "$(pgrep -x BitwardGUI)" 2>/dev/null || true
