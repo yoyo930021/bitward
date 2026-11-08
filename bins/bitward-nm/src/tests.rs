@@ -41,6 +41,7 @@ fn item(id: &str, name: &str, uris: &[&str]) -> ItemView {
         tags: vec![],
         updated_at: None,
         pending: false,
+        deleted_at: None,
     })
 }
 
@@ -153,14 +154,14 @@ fn reply(call: &Call) -> Result<Response, WtpError> {
         }
         Call::Vault(VaultCall::Get { id, view }) => {
             assert_eq!(*view, View::Reveal, "credential.reveal 必須 Reveal");
-            Ok(Response::Item(Some(
+            Ok(Response::Item(Some(Box::new(
                 item(
                     &id.as_simple().to_string(),
                     "GitHub",
                     &["https://github.com"],
                 )
                 .revealed(Some("hunter2".into())),
-            )))
+            ))))
         }
         other => Err(WtpError::Unsupported {
             feature: format!("fake: {other:?}"),

@@ -117,7 +117,7 @@ pub fn flatten(cipher: &serde_json::Value, dec: &dyn Fn(&str) -> Option<String>)
     m
 }
 
-/// 明文索引回填的四欄（`apply_sync` 落盤後經 `Store::set_plain_meta`／
+/// 明文索引回填的欄位組（`apply_sync` 落盤後經 `Store::set_plain_meta`／
 /// `set_plain_secrets` 寫回）。欄位路徑與 [`flatten`] 同一個座標系。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PlainIndex {
@@ -125,6 +125,9 @@ pub struct PlainIndex {
     pub uris: Vec<String>,
     pub username: Option<String>,
     pub password: Option<String>,
+    /// 自訂欄**欄名**（v5 三件套）。欄值是 Secret（§2.1 分級表
+    /// `FieldValue`），hidden 欄值更不得落明文檔——這裡只收 name。
+    pub field_names: Vec<String>,
 }
 
 /// 鏡像密文 → 明文索引欄。`dec` 形態同 [`flatten`]（信封字串 → 明文；
@@ -149,11 +152,23 @@ pub fn plain_index(
                 .collect()
         })
         .unwrap_or_default();
+    // 自訂欄：只收欄名（FieldName=Identity）；欄值是 Secret，不入明文索引。
+    let field_names = cipher
+        .get("fields")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|f| f.get("name").and_then(serde_json::Value::as_str))
+                .filter_map(dec)
+                .collect()
+        })
+        .unwrap_or_default();
     PlainIndex {
         name: field(cipher.get("name")),
         uris,
         username: field(login.and_then(|l| l.get("username"))),
         password: field(login.and_then(|l| l.get("password"))),
+        field_names,
     }
 }
 
@@ -290,6 +305,21 @@ mod tests {
         let dec = |s: &str| Some(s.to_owned());
         let idx = plain_index(&serde_json::json!({"type": 2}), &dec);
         assert_eq!(idx, PlainIndex::default());
+    }
+
+    #[test]
+    fn plain_index_collects_field_names_only() {
+        let dec = |s: &str| s.strip_prefix("E.").map(str::to_owned);
+        let cipher = serde_json::json!({
+            "name": "E.GitHub",
+            "fields": [
+                {"name": "E.PIN", "value": "E.1234", "type": 1},
+                {"name": "E.會員", "value": null, "type": 0},
+                {"name": "bad-mac", "value": "E.v", "type": 0}
+            ]
+        });
+        let idx = plain_index(&cipher, &dec);
+        assert_eq!(idx.field_names, vec!["PIN".to_string(), "會員".to_string()]);
     }
 
     #[test]

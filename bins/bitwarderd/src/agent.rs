@@ -223,6 +223,19 @@ impl Hub {
             Call::Vault(VaultCall::MoveToOrg { item, .. }) => {
                 (Access::Mutate(MutateOp::Move), Some(*item))
             }
+            // 資料夾與硬刪比照 cipher 的 create/delete 級（無獨立 MutateOp：
+            // Target 判定走 item/folder 歸屬，folder 級 grant 對 CreateFolder
+            // （item None）只由 Target::All 命中——新建資料夾無歸屬可判定）。
+            Call::Vault(VaultCall::CreateFolder { .. }) => {
+                (Access::Mutate(MutateOp::Create), None)
+            }
+            Call::Vault(VaultCall::ListFolders) => (
+                Access::See(bw_proto::Sensitivity::Identity),
+                None,
+            ),
+            Call::Vault(VaultCall::DeleteFolder { .. }) | Call::Vault(VaultCall::Purge { .. }) => {
+                (Access::Mutate(MutateOp::Delete), None)
+            }
             // passkey 分級（契約 §4）：列表＝Metadata（Identity floor）；
             // Register/Assert 取用私鑰＝Use(UseKind::Passkey)（用而不讀，同 totp 級）
             Call::Passkey(PasskeyCall::GetPasskeys { .. }) => {

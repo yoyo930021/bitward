@@ -12,18 +12,23 @@ impl Store {
         let mut sql = String::from(
             "SELECT m.id, m.name, m.uris, m.kind, m.folder, m.org, m.favorite,
                     m.updated_at, m.pending, COALESCE(o.tags, '[]'),
-                    COALESCE(cc.cols, '[]')
+                    COALESCE(cc.cols, '[]'), m.deleted_at
              FROM meta_plain m
              JOIN ciphers c ON c.id = m.id
              LEFT JOIN overlay o ON o.id = m.id
              LEFT JOIN (SELECT cipher, json_group_array(collection) AS cols
                         FROM cipher_collections GROUP BY cipher) cc ON cc.cipher = m.id
-             WHERE c.deleted = 0",
+             WHERE 1=1",
         );
         let mut args: Vec<String> = Vec::new();
         let mut like_fallback: Option<String> = None;
         let mut uri_host: Option<String> = None;
 
+        // 垃圾桶三態（語意見 bw_proto::Query::deleted）：預設只列未刪。
+        match q.deleted {
+            Some(true) => sql.push_str(" AND c.deleted = 1"),
+            Some(false) | None => sql.push_str(" AND c.deleted = 0"),
+        }
         if let Some(text) = q.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
             match fts_match(text) {
                 Some(m) => {
@@ -40,7 +45,10 @@ impl Store {
             }
         }
         if let Some(esc) = &like_fallback {
-            sql.push_str(" AND (m.name LIKE ?1 ESCAPE '\\' OR m.uris LIKE ?1 ESCAPE '\\')");
+            sql.push_str(
+                " AND (m.name LIKE ?1 ESCAPE '\\' OR m.uris LIKE ?1 ESCAPE '\\'
+                       OR m.fields_plain LIKE ?1 ESCAPE '\\')",
+            );
             args.push(format!("%{esc}%"));
         }
         if let Some(tag) = q.tag.as_deref().filter(|t| !t.is_empty()) {
@@ -74,6 +82,16 @@ impl Store {
                                       WHERE cx.cipher = m.id AND cx.collection = ?)",
             );
             args.push(col.to_string());
+        }
+        if let Some(folder) = q.folder.as_deref() {
+            // 三態（語意見 bw_proto::Query::folder）：空字串＝未歸屬。
+            // 鏡像 `folderId` 由 write_cipher 直存原字串，比對不走 UUID 解析。
+            if folder.is_empty() {
+                sql.push_str(" AND m.folder IS NULL");
+            } else {
+                sql.push_str(" AND m.folder = ?");
+                args.push(folder.to_string());
+            }
         }
         sql.push_str(" ORDER BY ");
         sql.push_str(match q.sort {
@@ -115,7 +133,8 @@ pub(crate) fn meta_by_id(conn: &Connection, id: bw_proto::ItemId) -> StoreResult
         "SELECT m.id, m.name, m.uris, m.kind, m.folder, m.org, m.favorite,
                 m.updated_at, m.pending, COALESCE(o.tags, '[]'),
                 COALESCE((SELECT json_group_array(cx.collection)
-                          FROM cipher_collections cx WHERE cx.cipher = m.id), '[]')
+                          FROM cipher_collections cx WHERE cx.cipher = m.id), '[]'),
+                m.deleted_at
          FROM meta_plain m LEFT JOIN overlay o ON o.id = m.id WHERE m.id = ?1",
     )?;
     stmt.query_row([id.to_string()], row_to_meta)
@@ -152,6 +171,7 @@ fn row_to_meta(row: &Row<'_>) -> Result<ItemMeta, rusqlite::Error> {
         tags,
         updated_at: row.get::<_, Option<String>>(7)?,
         pending: row.get::<_, i64>(8)? != 0,
+        deleted_at: row.get::<_, Option<String>>(11)?,
     })
 }
 
@@ -245,6 +265,7 @@ mod tests {
             "updated_at",
             "pending",
             "tags",
+            "deleted_at",
         ];
         for c in cols {
             assert!(

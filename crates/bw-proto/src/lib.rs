@@ -91,6 +91,10 @@ pub struct ItemMeta {
     pub updated_at: Option<String>,
     /// outbox 中有未推的變更
     pub pending: bool,
+    /// 垃圾桶條目的軟刪時刻（鏡像 `deletedDate`，ISO 字串）；未刪恆 None。
+    /// 投影自 raw 鏡像（協定欄位原樣），不是本地時鐘。
+    #[serde(default)]
+    pub deleted_at: Option<String>,
 }
 
 /// 依 `View` 構造的回傳型別：Metadata 下機密欄位在型別上不存在（契約 §2.1）。
@@ -107,6 +111,14 @@ pub struct ItemView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
     pub totp_available: bool,
+    /// 筆記明文（SecureNote 本體欄；Notes 為 Secret 級，Metadata 下鍵不存在）。
+    /// Masked/Reveal 均帶全文（官方詳情頁語意：解鎖即可讀筆記）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    /// 自訂欄位（順序同線格式 `fields[]`）。Metadata 下恆為空（欄名是密文，
+    /// 鎖定態解不了）；Masked 帶 text 欄值、hidden 欄值為 None；Reveal 全帶。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<CipherField>,
 }
 
 impl ItemView {
@@ -117,7 +129,16 @@ impl ItemView {
             password_masked: None,
             password: None,
             totp_available: false,
+            notes: None,
+            fields: Vec::new(),
         }
+    }
+
+    /// 附掛 Secret 級詳情（筆記＋自訂欄）；呼叫端已按 `View` 決定值可見性。
+    pub fn with_details(mut self, notes: Option<String>, fields: Vec<CipherField>) -> Self {
+        self.notes = notes;
+        self.fields = fields;
+        self
     }
     pub fn masked(
         mut self,
@@ -235,6 +256,14 @@ pub struct Query {
     /// 只列該 collection 的項目（P4b org 共享語意；`serde(default)` 保舊形相容）
     #[serde(default)]
     pub collection: Option<CollectionId>,
+    /// 資料夾過濾（官方型別語意三態）：None＝全部；
+    /// `Some("")`＝個人未歸屬（鏡像 `folderId IS NULL`）；`Some(id)`＝該資料夾。
+    #[serde(default)]
+    pub folder: Option<String>,
+    /// 垃圾桶三態（布林旗關不得取代）：None／Some(false)＝只列未刪（現行預設）；
+    /// Some(true)＝垃圾桶。軟刪項目的 `deleted_at` 見 `ItemMeta`。
+    #[serde(default)]
+    pub deleted: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,6 +312,27 @@ pub enum VaultCall {
         item: ItemId,
         org: Option<String>,
         collections: Vec<String>,
+    },
+    /// 置尾紀律（postcard 變體索引追加）：資料夾三操作（官方 `/folders` 語意）。
+    /// 建立＝同步 `POST /folders`（名稱 daemon 端以 user key 加密）；
+    /// 離線時回錯不入列（資料夾非 outbox 載體，批次 2 GUI 再評估佇列化）。
+    CreateFolder {
+        name: String,
+    },
+    /// 資料夾清單；回應 `Response::Json`（[{"id","name"}]，鎖定態 name 為 null——
+    /// 名稱是信封字串，金鑰不在時不猜）。
+    ListFolders,
+    /// 刪除資料夾：先將夾內項目 `folderId` 清 NULL（逐筆入 outbox patch），
+    /// 再 `DELETE /folders/{id}`，最後摘除鏡像列（官方客戶端同序語意）。
+    DeleteFolder {
+        id: FolderId,
+    },
+    /// 硬刪（置尾紀律）：本機鏡像永久移除。VW 端既有 DELETE 路徑若已軟刪
+    /// （`deletedDate` 有值＝垃圾桶條目），Purge 只做本地——鏡像行＋關聯＋
+    /// 該 item 的 outbox 未推列一併清除，不發伺服器請求。
+    /// 未軟刪的項目直接 Purge＝拒絕（`Denied`），避免本地消失但伺服器仍在。
+    Purge {
+        id: ItemId,
     },
 }
 
@@ -418,8 +468,22 @@ pub enum OverlayOpWire {
     Touch,
 }
 
+/// 自訂欄位（官方 `login.fields[]`：type 0=text、1=hidden）。
+/// boolean（type 2）本批不做：官方以 value "true"/"false" 承載，
+/// 需 UI 開關語意，留批次 2（GUI 功能包）一併處理。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CipherField {
+    pub name: String,
+    /// None ＝ 空值（官方允許 fields[].value 為 null）
+    #[serde(default)]
+    pub value: Option<String>,
+    /// true ＝ hidden 欄：線格式 type 1；Masked 視窗不帶值（A3 結構保證）
+    #[serde(default)]
+    pub hidden: bool,
+}
+
 /// CLI 邊界的明文草稿；加密只發生在 daemon 的 `with_keys` 閉包。
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CipherDraft {
     pub kind: ItemKind,
     pub name: String,
@@ -429,10 +493,20 @@ pub struct CipherDraft {
     pub uris: Vec<String>,
     pub notes: Option<String>,
     pub favorite: bool,
+    /// 建立時即歸屬的資料夾 id（UUID 字串；None＝不歸屬）。
+    /// 非 UUID 字串由 daemon 拒收（鏡像 `folderId` 存原字串，查詢比對用）。
+    #[serde(default)]
+    pub folder_id: Option<String>,
+    /// 自訂欄位（順序即線格式 `fields[]` 順序）
+    #[serde(default)]
+    pub fields: Vec<CipherField>,
 }
 
 /// 欄位編輯。path 文法三處共用（bw-vault flatten、bw-sync build_put_body、daemon）：
-/// `name`、`notes`、`username`、`password`、`totp`、`uri.<n>`、`favorite`。
+/// `name`、`notes`、`username`、`password`、`totp`、`uri.<n>`、`favorite`、
+/// `folderId`（明文 UUID 字串；None＝移出資料夾）、
+/// `field.<n>.name`／`field.<n>.value`（`<n>` 為 0 起 `fields[]` 索引；
+/// 增刪欄位是整陣列替換，不在本路徑，同 `uri.<n>` 紀律）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FieldEdit {
     pub path: String,
@@ -585,7 +659,9 @@ pub enum UnlockStateView {
 pub enum Response {
     Status(StatusInfo),
     Items(Vec<ItemView>),
-    Item(Option<ItemView>),
+    /// 鏡像 `ItemView` 體積大（meta＋詳情欄）：boxing 收斂 enum 變體尺寸差
+    /// （clippy::large_enum_variant）；serde/postcard 對 Box 透明，線格式不變。
+    Item(Option<Box<ItemView>>),
     TotpCode {
         code: String,
         valid_for_secs: u32,
@@ -802,6 +878,7 @@ mod tests {
             tags: vec!["dev".into()],
             updated_at: None,
             pending: false,
+            deleted_at: None,
         }
     }
 
@@ -1026,6 +1103,8 @@ mod tests {
         // P4b 前形態的旧形訊息：collection/collections 欄位缺失 → serde default
         let q: Query = serde_json::from_str(r#"{"text":null,"sort":"Name","limit":10}"#).unwrap();
         assert_eq!(q.collection, None);
+        assert_eq!(q.folder, None);
+        assert_eq!(q.deleted, None);
         let m: ItemMeta = serde_json::from_str(
             r#"{"id":"0f0d0000-0000-4000-8000-0000000000c1","kind":"Login","name":null,
                "uris":[],"folder_id":null,"organization_id":null,"favorite":false,
@@ -1033,5 +1112,120 @@ mod tests {
         )
         .unwrap();
         assert!(m.collections.is_empty());
+        assert_eq!(m.deleted_at, None);
+        // 三件套前形態的草稿：folder/fields 欄位缺失 → serde default
+        let d: CipherDraft = serde_json::from_str(
+            r#"{"kind":"SecureNote","name":"n","username":null,"password":null,
+               "totp":null,"uris":[],"notes":"body","favorite":false}"#,
+        )
+        .unwrap();
+        assert!(d.folder_id.is_none() && d.fields.is_empty());
+        // ItemView 舊形：notes/fields 鍵不存在時可解析；Metadata 輸出無 Secret 鍵
+        let v: ItemView = serde_json::from_str(
+            r#"{"meta":{"id":"0f0d0000-0000-4000-8000-0000000000c1","kind":"Login",
+               "name":null,"uris":[],"folder_id":null,"organization_id":null,
+               "favorite":false,"tags":[],"updated_at":null,"pending":false},
+               "totp_available":false}"#,
+        )
+        .unwrap();
+        assert!(v.notes.is_none() && v.fields.is_empty());
+    }
+
+    #[test]
+    fn folder_calls_and_draft_roundtrip() {
+        let folder = Uuid::new_v4();
+        for call in [
+            VaultCall::CreateFolder {
+                name: "工作".into(),
+            },
+            VaultCall::ListFolders,
+            VaultCall::DeleteFolder { id: folder },
+            VaultCall::Purge { id: folder },
+        ] {
+            let msg = ClientMsg::Invoke {
+                rid: 13,
+                call: Call::Vault(call),
+            };
+            let j = serde_json::to_vec(&msg).unwrap();
+            assert_eq!(serde_json::from_slice::<ClientMsg>(&j).unwrap().rid(), 13);
+            let b = postcard::to_allocvec(&msg).unwrap();
+            assert_eq!(postcard::from_bytes::<ClientMsg>(&b).unwrap().rid(), 13);
+        }
+        // 置尾紀律：MoveToOrg（三件套前的末位）索引不動，資料夾變體在其後
+        let idx = |c: &VaultCall| postcard::to_allocvec(c).unwrap()[0];
+        let move_org = VaultCall::MoveToOrg {
+            item: Uuid::new_v4(),
+            org: None,
+            collections: vec![],
+        };
+        assert!(
+            idx(&VaultCall::ListFolders) > idx(&move_org),
+            "資料夾變體必須置尾，不推擠既有索引"
+        );
+
+        let draft_in = CipherDraft {
+            kind: ItemKind::SecureNote,
+            name: "安全筆記".into(),
+            notes: Some("內文".into()),
+            folder_id: Some(folder.to_string()),
+            fields: vec![
+                CipherField {
+                    name: "PIN".into(),
+                    value: Some("1234".into()),
+                    hidden: true,
+                },
+                CipherField {
+                    name: "會員".into(),
+                    value: None,
+                    hidden: false,
+                },
+            ],
+            ..Default::default()
+        };
+        let msg = ClientMsg::Invoke {
+            rid: 14,
+            call: Call::Vault(VaultCall::Create {
+                draft: draft_in.clone(),
+            }),
+        };
+        let b = postcard::to_allocvec(&msg).unwrap();
+        match postcard::from_bytes::<ClientMsg>(&b).unwrap().call() {
+            Call::Vault(VaultCall::Create { draft }) => assert_eq!(draft, &draft_in),
+            other => panic!("expect Create, got {other:?}"),
+        }
+        let q = Query {
+            folder: Some(folder.to_string()),
+            ..Default::default()
+        };
+        let j = serde_json::to_string(&q).unwrap();
+        assert_eq!(serde_json::from_str::<Query>(&j).unwrap().folder, q.folder);
+
+        // ItemView 詳情附掛：notes/hidden 值的 skip-if-none 結構保證（A3 同款）
+        let v = ItemView::metadata(meta())
+            .masked(Some("u".into()), Some("••••12".into()), false)
+            .with_details(
+                Some("筆記".into()),
+                vec![CipherField {
+                    name: "PIN".into(),
+                    value: None,
+                    hidden: true,
+                }],
+            );
+        let j = serde_json::to_string(&v).unwrap();
+        assert!(j.contains("\"notes\":\"筆記\""));
+        assert!(j.contains("\"hidden\":true"));
+        assert!(!j.contains("\"password\":"));
+        assert!(!j.contains("1234"));
+        let back: ItemView = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.fields[0].name, "PIN");
+    }
+
+    impl ClientMsg {
+        fn call(&self) -> &Call {
+            match self {
+                ClientMsg::Invoke { call, .. } => call,
+                _ => panic!("not an invoke"),
+            }
+        }
     }
 }

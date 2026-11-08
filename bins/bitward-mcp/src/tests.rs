@@ -52,6 +52,7 @@ fn sample_item() -> ItemView {
         tags: vec![],
         updated_at: None,
         pending: false,
+        deleted_at: None,
     })
 }
 

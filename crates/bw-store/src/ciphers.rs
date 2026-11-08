@@ -63,7 +63,8 @@ impl Store {
         let preserved = snapshot_org_key_state(&tx)?;
         tx.execute_batch(
             "DELETE FROM meta_plain; DELETE FROM ciphers;
-             DELETE FROM orgs; DELETE FROM collections; DELETE FROM cipher_collections;",
+             DELETE FROM orgs; DELETE FROM collections; DELETE FROM cipher_collections;
+             DELETE FROM folders;",
         )?;
         for c in ciphers {
             let id_s = c
@@ -99,6 +100,16 @@ impl Store {
                 .map_err(|e| StoreError::Invalid(format!("collection id {id_s}: {e}")))?;
             write_collection(&tx, id, c)?;
         }
+        // v5（三件套）：folders[] 全量替換（同 collections 語意）。
+        for f in sync_array(sync, &["folders", "objects.folders"]) {
+            let id_s = f
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| StoreError::Invalid("folder missing `id`".to_string()))?;
+            let id = Uuid::parse_str(id_s)
+                .map_err(|e| StoreError::Invalid(format!("folder id {id_s}: {e}")))?;
+            write_folder(&tx, id, f)?;
+        }
         if let Some(sd) = sync.get("serverDate").and_then(Value::as_str) {
             tx.execute(
                 "INSERT INTO meta(key, value) VALUES('server_date', ?1)
@@ -120,17 +131,24 @@ impl Store {
     }
 
     /// 解鎖路徑專用的明文索引回填：呼叫端（daemon）在 `with_keys` 內解密
-    /// name/uris 後送進來；bw-store 不碰金鑰。
+    /// name/uris/自訂欄欄名後送進來；bw-store 不碰金鑰。
+    /// `fields` 只含欄**名**（hidden 欄值是 Secret，不入明文索引，§2.1）。
     pub fn set_plain_meta(
         &self,
         id: ItemId,
         name: Option<&str>,
         uris: &[String],
+        fields: &[String],
     ) -> StoreResult<()> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let n = conn.execute(
-            "UPDATE meta_plain SET name = ?2, uris = ?3 WHERE id = ?1",
-            rusqlite::params![id.to_string(), name, serde_json::to_string(uris)?],
+            "UPDATE meta_plain SET name = ?2, uris = ?3, fields_plain = ?4 WHERE id = ?1",
+            rusqlite::params![
+                id.to_string(),
+                name,
+                serde_json::to_string(uris)?,
+                serde_json::to_string(fields)?
+            ],
         )?;
         if n == 0 {
             return Err(StoreError::NotFound);
@@ -272,6 +290,76 @@ impl Store {
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
+
+    // —— 資料夾鏡像（v5 三件套）——
+
+    /// 全量鏡像清單（name 為信封字串，解密是 daemon 的事）。
+    pub fn folder_list(&self) -> StoreResult<Vec<FolderRow>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT id, name, rev FROM folders ORDER BY id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(FolderRow {
+                id: Uuid::parse_str(&r.get::<_, String>(0)?).unwrap_or_default(),
+                name: r.get::<_, Option<String>>(1)?,
+                rev: r.get::<_, Option<String>>(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// 即時落地（`POST /folders` 回包或本地補寫）：單列 upsert，不動全量語意。
+    pub fn folder_put(&self, id: ItemId, folder: &Value) -> StoreResult<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        write_folder(&conn, id, folder)?;
+        Ok(())
+    }
+
+    /// 刪除收斂（server `DELETE /folders/{id}` 成功後摘鏡像列）。
+    pub fn folder_remove(&self, id: ItemId) -> StoreResult<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("DELETE FROM folders WHERE id = ?1", [id.to_string()])?;
+        Ok(())
+    }
+
+    /// 硬刪收斂（`VaultCall::Purge` 的儲存端）：**本機鏡像永久移除**——
+    /// cipher 列、明文索引、collection 歸屬、該 item 的全部 outbox 未推列、
+    /// overlay 殭屍列一併清除；不發伺服器請求（调用端已判定伺服器端現態）。
+    /// 回傳 actual-removed 的鏡像列數（0＝本地本來就沒有）。
+    pub fn purge(&self, id: ItemId) -> StoreResult<u64> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.unchecked_transaction()?;
+        let n = tx.execute("DELETE FROM ciphers WHERE id = ?1", [id.to_string()])?;
+        tx.execute("DELETE FROM meta_plain WHERE id = ?1", [id.to_string()])?;
+        tx.execute(
+            "DELETE FROM cipher_collections WHERE cipher = ?1",
+            [id.to_string()],
+        )?;
+        tx.execute("DELETE FROM outbox WHERE item = ?1", [id.to_string()])?;
+        tx.execute("DELETE FROM overlay WHERE id = ?1", [id.to_string()])?;
+        tx.commit()?;
+        Ok(n as u64)
+    }
+}
+
+/// `folders` 表的一列（v5）：名稱是伺服器原樣信封，本層不做金鑰語意。
+#[derive(Clone, Debug)]
+pub struct FolderRow {
+    pub id: ItemId,
+    pub name: Option<String>,
+    pub rev: Option<String>,
+}
+
+fn write_folder(conn: &rusqlite::Connection, id: ItemId, f: &Value) -> StoreResult<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO folders(id, name, rev, raw) VALUES(?1,?2,?3,?4)",
+        rusqlite::params![
+            id.to_string(),
+            f.get("name").and_then(Value::as_str),
+            f.get("revisionDate").and_then(Value::as_str),
+            serde_json::to_vec(f)?,
+        ],
+    )?;
+    Ok(())
 }
 
 const ORG_SELECT: &str = "SELECT id, raw, name, key, public_key, enc_private_key,
@@ -293,7 +381,8 @@ fn org_row_from(r: &rusqlite::Row<'_>) -> Result<OrgRow, rusqlite::Error> {
 }
 
 pub(crate) fn write_cipher(conn: &rusqlite::Connection, id: ItemId, c: &Value) -> StoreResult<()> {
-    let deleted = c.get("deletedDate").and_then(Value::as_str).is_some();
+    let deleted_at = c.get("deletedDate").and_then(Value::as_str);
+    let deleted = deleted_at.is_some();
     let rev = c.get("revisionDate").and_then(Value::as_str);
     let raw = serde_json::to_vec(c)?;
     let mut enc = c.clone();
@@ -307,24 +396,23 @@ pub(crate) fn write_cipher(conn: &rusqlite::Connection, id: ItemId, c: &Value) -
         rusqlite::params![id.to_string(), enc_blob, raw, rev, deleted as i64],
     )?;
     write_cipher_collections(conn, id, c)?;
-    if deleted {
-        conn.execute("DELETE FROM meta_plain WHERE id = ?1", [id.to_string()])?;
-    } else {
-        conn.execute(
-            "INSERT OR REPLACE INTO meta_plain(id, name, uris, kind, folder, org, favorite, updated_at, pending)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0)",
-            rusqlite::params![
-                id.to_string(),
-                c.get("name").and_then(Value::as_str),
-                uris_json(c),
-                cipher_kind(c),
-                c.get("folderId").and_then(Value::as_str),
-                c.get("organizationId").and_then(Value::as_str),
-                c.get("favorite").and_then(Value::as_bool).unwrap_or(false) as i64,
-                rev,
-            ],
-        )?;
-    }
+    // v5（垃圾桶三態）：軟刪列保留在 meta_plain（帶 deleted_at），由 query 的
+    // `deleted` 過濾——垃圾桶列表要讀得到；硬刪走 `Store::purge` 摘列。
+    conn.execute(
+        "INSERT OR REPLACE INTO meta_plain(id, name, uris, kind, folder, org, favorite, updated_at, pending, deleted_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0,?9)",
+        rusqlite::params![
+            id.to_string(),
+            c.get("name").and_then(Value::as_str),
+            uris_json(c),
+            cipher_kind(c),
+            c.get("folderId").and_then(Value::as_str),
+            c.get("organizationId").and_then(Value::as_str),
+            c.get("favorite").and_then(Value::as_bool).unwrap_or(false) as i64,
+            rev,
+            deleted_at,
+        ],
+    )?;
     Ok(())
 }
 

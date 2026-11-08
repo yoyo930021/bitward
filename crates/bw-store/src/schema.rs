@@ -1,17 +1,47 @@
 /// schema 版本；每次加表/改表就 +1 並在本檔補一段遷移 SQL。
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// v1→v2：值搜尋明文索引欄。舊庫 ALTER；新庫 V1 已含，Duplicate column 容忍。
 pub const V2: &str = "ALTER TABLE meta_plain ADD COLUMN username_plain TEXT;
 ALTER TABLE meta_plain ADD COLUMN password_plain TEXT;";
 
-/// v2→v3（P4b org 共享語意讀側）：org/collection 鏡像表與歸屬關聯。
-/// V1 每次開庫都跑（CREATE IF NOT EXISTS 冪等），舊庫補表即經 V1 生效；
-/// 版本號提升只為 schema_version_guard 的可見性，無額外 SQL。
+/// v2→v3（P4b org 共享語意）：org/collection 鏡像表在 V1，遷移形態見 V4 註解。
 pub const V3: &str = "";
 
 /// v3→v4（APNs 推播）：push_tokens 表在 V1，遷移形態同 V3。
 pub const V4: &str = "";
+
+/// v4→v5（三件套：SecureNote／資料夾／自訂欄位）：
+/// - `folders` 鏡像表在 V1（CREATE IF NOT EXISTS 冪等）。
+/// - `meta_plain.fields_plain`：自訂欄**欄名**明文索引（hidden 欄值不入，§2.1
+///   分級表 FieldValue=Secret）；逐條 ALTER 容忍 Duplicate column（同 V2 紀律）。
+pub const V5: &str = "ALTER TABLE meta_plain ADD COLUMN fields_plain TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE meta_plain ADD COLUMN deleted_at TEXT;";
+
+/// v5 第二段（必成，不容錯）：FTS5 不支援加欄，`meta_fts` 整組重建
+/// （連帶 DROP 舊 trigger——`DROP TABLE` 不會移走掛在 content 表上的 trigger，
+/// 留著它們會在下次寫入時撞上新表欄位數）。新建庫 V1 已是三欄形態，
+/// 這裡 drop+recreate 收斂同一結果（冪等）。
+pub const V5_FTS: &str = "DROP TRIGGER IF EXISTS meta_plain_ai;
+DROP TRIGGER IF EXISTS meta_plain_ad;
+DROP TRIGGER IF EXISTS meta_plain_au;
+DROP TABLE IF EXISTS meta_fts;
+CREATE VIRTUAL TABLE meta_fts USING fts5(
+  name, uris, fields_plain,
+  content='meta_plain', content_rowid='rowid',
+  tokenize='unicode61'
+);
+INSERT INTO meta_fts(meta_fts) VALUES('rebuild');
+CREATE TRIGGER meta_plain_ai AFTER INSERT ON meta_plain BEGIN
+  INSERT INTO meta_fts(rowid, name, uris, fields_plain) VALUES (new.rowid, new.name, new.uris, new.fields_plain);
+END;
+CREATE TRIGGER meta_plain_ad AFTER DELETE ON meta_plain BEGIN
+  INSERT INTO meta_fts(meta_fts, rowid, name, uris, fields_plain) VALUES('delete', old.rowid, old.name, old.uris, old.fields_plain);
+END;
+CREATE TRIGGER meta_plain_au AFTER UPDATE ON meta_plain BEGIN
+  INSERT INTO meta_fts(meta_fts, rowid, name, uris, fields_plain) VALUES('delete', old.rowid, old.name, old.uris, old.fields_plain);
+  INSERT INTO meta_fts(rowid, name, uris, fields_plain) VALUES (new.rowid, new.name, new.uris, new.fields_plain);
+END;";
 
 /// v1：鏡像（密文原樣）+ 明文 metadata 索引（FTS5）+ overlay + outbox +
 /// audit（append-only hash 鏈）+ sessions + blobs 登記 + meta。
@@ -36,7 +66,9 @@ CREATE TABLE IF NOT EXISTS meta_plain(
   updated_at TEXT,
   pending    INTEGER NOT NULL DEFAULT 0,
   username_plain TEXT,        -- v2：值搜尋索引（FR 11941），明文僅存於 0600 檔（§2.7 R3）
-  password_plain TEXT         -- 同上
+  password_plain TEXT,        -- 同上
+  fields_plain TEXT NOT NULL DEFAULT '[]',  -- v5：自訂欄欄名明文（JSON array；值不入）
+  deleted_at TEXT             -- v5：垃圾桶條目的伺服器 deletedDate；未刪 NULL
 );
 
 -- v3（P4b org 共享語意讀側）：/sync 的 organizations[] / collections[] 鏡像。
@@ -60,6 +92,15 @@ CREATE TABLE IF NOT EXISTS collections(
   raw  BLOB NOT NULL
 );
 
+-- v5（三件套）：/sync 的 folders[] 鏡像。名稱是用戶 key 加密的信封字串
+-- （官方語意：資料夾屬個人 vault，不走 org key）；全量替換見 apply_sync。
+CREATE TABLE IF NOT EXISTS folders(
+  id   TEXT PRIMARY KEY,
+  name TEXT,                  -- 信封字串（未解鎖不解開）
+  rev  TEXT,                  -- revisionDate
+  raw  BLOB NOT NULL          -- 伺服器 folder JSON 原樣
+);
+
 CREATE TABLE IF NOT EXISTS cipher_collections(
   cipher     TEXT NOT NULL,
   collection TEXT NOT NULL,
@@ -68,20 +109,20 @@ CREATE TABLE IF NOT EXISTS cipher_collections(
 CREATE INDEX IF NOT EXISTS cipher_collections_col ON cipher_collections(collection);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS meta_fts USING fts5(
-  name, uris,
+  name, uris, fields_plain,
   content='meta_plain', content_rowid='rowid',
   tokenize='unicode61'
 );
 
 CREATE TRIGGER IF NOT EXISTS meta_plain_ai AFTER INSERT ON meta_plain BEGIN
-  INSERT INTO meta_fts(rowid, name, uris) VALUES (new.rowid, new.name, new.uris);
+  INSERT INTO meta_fts(rowid, name, uris, fields_plain) VALUES (new.rowid, new.name, new.uris, new.fields_plain);
 END;
 CREATE TRIGGER IF NOT EXISTS meta_plain_ad AFTER DELETE ON meta_plain BEGIN
-  INSERT INTO meta_fts(meta_fts, rowid, name, uris) VALUES('delete', old.rowid, old.name, old.uris);
+  INSERT INTO meta_fts(meta_fts, rowid, name, uris, fields_plain) VALUES('delete', old.rowid, old.name, old.uris, old.fields_plain);
 END;
 CREATE TRIGGER IF NOT EXISTS meta_plain_au AFTER UPDATE ON meta_plain BEGIN
-  INSERT INTO meta_fts(meta_fts, rowid, name, uris) VALUES('delete', old.rowid, old.name, old.uris);
-  INSERT INTO meta_fts(rowid, name, uris) VALUES (new.rowid, new.name, new.uris);
+  INSERT INTO meta_fts(meta_fts, rowid, name, uris, fields_plain) VALUES('delete', old.rowid, old.name, old.uris, old.fields_plain);
+  INSERT INTO meta_fts(rowid, name, uris, fields_plain) VALUES (new.rowid, new.name, new.uris, new.fields_plain);
 END;
 
 CREATE TABLE IF NOT EXISTS overlay(

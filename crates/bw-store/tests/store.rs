@@ -150,10 +150,10 @@ fn fts_search_after_plain_index() {
         .unwrap();
     // 未回填明文前，加密態名稱不可搜（只搜得到鏡像欄位 token）
     store
-        .set_plain_meta(gh, Some("GitHub"), &["https://github.com/login".into()])
+        .set_plain_meta(gh, Some("GitHub"), &["https://github.com/login".into()], &[])
         .unwrap();
     store
-        .set_plain_meta(gl, Some("GitLab"), &["https://gitlab.com".into()])
+        .set_plain_meta(gl, Some("GitLab"), &["https://gitlab.com".into()], &[])
         .unwrap();
 
     let hits = store
@@ -197,10 +197,10 @@ fn query_filters_tags_uri_and_sort() {
         }))
         .unwrap();
     store
-        .set_plain_meta(a, Some("AAA"), &["https://a.example.com".into()])
+        .set_plain_meta(a, Some("AAA"), &["https://a.example.com".into()], &[])
         .unwrap();
     store
-        .set_plain_meta(b, Some("bbb"), &["https://b.example.org".into()])
+        .set_plain_meta(b, Some("bbb"), &["https://b.example.org".into()], &[])
         .unwrap();
     store
         .overlay(
@@ -618,13 +618,13 @@ fn query_uri_host_anchoring() {
         }))
         .unwrap();
     store
-        .set_plain_meta(gh, Some("GitHub"), &["https://github.com/login".into()])
+        .set_plain_meta(gh, Some("GitHub"), &["https://github.com/login".into()], &[])
         .unwrap();
     store
-        .set_plain_meta(sub, Some("Gist"), &["https://gist.github.com/x".into()])
+        .set_plain_meta(sub, Some("Gist"), &["https://gist.github.com/x".into()], &[])
         .unwrap();
     store
-        .set_plain_meta(evil, Some("Evil"), &["https://notgithub.com".into()])
+        .set_plain_meta(evil, Some("Evil"), &["https://notgithub.com".into()], &[])
         .unwrap();
 
     // 整頁 URL 查詢：精確 host ＋ 子網域都命中，notgithub.com 不得誤入
@@ -913,4 +913,198 @@ fn apply_sync_replays_recorded_org_sync() {
         );
         assert_eq!(hits[0].collections, vec![Uuid::parse_str(col_id).unwrap()]);
     }
+}
+
+// —— v5 三件套：資料夾鏡像／欄名索引／垃圾桶三態與硬刪 ——
+
+#[test]
+fn apply_sync_lands_folders_and_folder_filter() {
+    let (_d, path) = tmp_vault("folders");
+    let store = Store::open(&path).unwrap();
+    let folder = Uuid::new_v4().to_string();
+    let in_folder = Uuid::new_v4().to_string();
+    let unfiled = Uuid::new_v4().to_string();
+    let mut c1 = cipher(&in_folder, "2.n|n|n", "2026-11-01T00:00:00.000Z", false);
+    c1["folderId"] = json!(&folder);
+    let c2 = cipher(&unfiled, "2.n2|n2|n2", "2026-11-01T00:00:00.000Z", false);
+    store
+        .apply_sync(&json!({
+            "ciphers": [c1, c2],
+            "folders": [{
+                "id": folder,
+                "name": "2.f|f|f",
+                "revisionDate": "2026-11-01T00:00:00.000Z"
+            }],
+        }))
+        .unwrap();
+    let folders = store.folder_list().unwrap();
+    assert_eq!(folders.len(), 1);
+    assert_eq!(folders[0].id.to_string(), folder);
+    assert_eq!(folders[0].name.as_deref(), Some("2.f|f|f"), "名稱鏡像存信封原樣");
+
+    let hits = store
+        .query(&Query {
+            folder: Some(folder.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id.to_string(), in_folder);
+    assert_eq!(
+        hits[0].folder_id,
+        Some(Uuid::parse_str(&folder).unwrap()),
+        "ItemMeta.folder_id 投影自鏡像 folderId"
+    );
+    let unfiled_hits = store
+        .query(&Query {
+            folder: Some(String::new()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(unfiled_hits.len(), 1);
+    assert_eq!(unfiled_hits[0].id.to_string(), unfiled);
+    let all = store
+        .query(&Query {
+            folder: None,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(all.len(), 2);
+
+    // 全量替換語意：第二批沒帶 folders → 鏡像清空
+    store.apply_sync(&json!({ "ciphers": [] })).unwrap();
+    assert!(store.folder_list().unwrap().is_empty());
+
+    // 即時 upsert／摘列（create/delete 收斂路徑用）
+    store
+        .folder_put(
+            Uuid::parse_str(&folder).unwrap(),
+            &json!({"id": folder, "name": "2.f|f|f", "revisionDate": "r1"}),
+        )
+        .unwrap();
+    assert_eq!(store.folder_list().unwrap().len(), 1);
+    store
+        .folder_remove(Uuid::parse_str(&folder).unwrap())
+        .unwrap();
+    assert!(store.folder_list().unwrap().is_empty());
+    store.folder_remove(Uuid::new_v4()).unwrap(); // 不存在的列：冪等 no-op
+}
+
+#[test]
+fn fields_plain_indexes_names_not_values() {
+    let (_d, path) = tmp_vault("fields_plain");
+    let store = Store::open(&path).unwrap();
+    let id = Uuid::new_v4();
+    store
+        .apply_sync(&json!({ "ciphers": [cipher(&id.to_string(), "2.n|n|n", "rev", false)] }))
+        .unwrap();
+    store
+        .set_plain_meta(
+            id,
+            Some("GitHub"),
+            &[],
+            &["PIN".to_string(), "會員".to_string()],
+        )
+        .unwrap();
+    // 欄名進 FTS：搜 "PIN" 命中
+    let hits = store
+        .query(&Query {
+            text: Some("PIN".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    // hidden 欄值不入索引：值搜（q.value 走 username/password 明文欄）不經
+    // fields_plain；欄名欄只由 set_plain_meta 寫入（PlainIndex.field_names
+    // 端不收值，見 bw-vault 測試）。
+    let by_value = store
+        .query(&Query {
+            value: Some("PIN".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(by_value.is_empty());
+}
+
+#[test]
+fn trash_tristate_and_purge() {
+    let (_d, path) = tmp_vault("trash");
+    let store = Store::open(&path).unwrap();
+    let live = Uuid::new_v4().to_string();
+    let gone = Uuid::new_v4().to_string();
+    store
+        .apply_sync(&json!({
+            "ciphers": [
+                cipher(&live, "live", "2026-11-01T00:00:00.000Z", false),
+                cipher(&gone, "gone", "2026-11-01T00:00:00.000Z", true),
+            ]
+        }))
+        .unwrap();
+    // None 與 Some(false)：只列未刪（現行預設不回歸）
+    for deleted in [None, Some(false)] {
+        let hits = store
+            .query(&Query {
+                deleted,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(hits.len(), 1, "deleted={deleted:?}");
+        assert_eq!(hits[0].id.to_string(), live);
+        assert_eq!(hits[0].deleted_at, None);
+    }
+    // Some(true)：垃圾桶，帶伺服器軟刪時刻
+    let trash = store
+        .query(&Query {
+            deleted: Some(true),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(trash.len(), 1);
+    assert_eq!(trash[0].id.to_string(), gone);
+    assert_eq!(
+        trash[0].deleted_at.as_deref(),
+        Some("2025-01-01T00:00:00.000Z")
+    );
+    // 軟刪列的 meta 單讀也還在（Get 垃圾桶條目要能看到 deleted_at）
+    let m = store.meta(Uuid::parse_str(&gone).unwrap()).unwrap();
+    assert!(m.is_some() && m.unwrap().deleted_at.is_some());
+
+    // 硬刪：鏡像＋明文索引＋outbox＋overlay 全清
+    store
+        .enqueue(&MutationDraft {
+            item: Uuid::parse_str(&gone).unwrap(),
+            payload: json!({"op": "delete"}),
+            base_rev: None,
+            origin: None,
+            mirror: None,
+        })
+        .unwrap();
+    store
+        .overlay(
+            Uuid::parse_str(&gone).unwrap(),
+            bw_store::OverlayOp::SetTags(vec!["x".into()]),
+        )
+        .unwrap();
+    let n = store.purge(Uuid::parse_str(&gone).unwrap()).unwrap();
+    assert_eq!(n, 1);
+    assert!(store.item(Uuid::parse_str(&gone).unwrap()).unwrap().is_none());
+    assert!(store.meta(Uuid::parse_str(&gone).unwrap()).unwrap().is_none());
+    assert_eq!(
+        store
+            .query(&Query {
+                deleted: Some(true),
+                ..Default::default()
+            })
+            .unwrap()
+            .len(),
+        0
+    );
+    // outbox 未推列與 overlay 殭屍列一併清除
+    assert_eq!(store.depth().unwrap().queued, 0);
+    assert!(matches!(
+        store.overlay_get(Uuid::parse_str(&gone).unwrap()),
+        Err(StoreError::NotFound)
+    ));
+    // 冪等：再 purge 不存在列回 0、不报错
+    assert_eq!(store.purge(Uuid::parse_str(&gone).unwrap()).unwrap(), 0);
 }

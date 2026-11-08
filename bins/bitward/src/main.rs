@@ -794,6 +794,8 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                 },
                 limit: *limit,
                 collection: collection.as_deref().map(parse_id).transpose()?,
+                folder: None,
+                deleted: None,
             },
             view: View::Metadata,
         }),
@@ -930,6 +932,8 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                     uris: uri.clone().into_iter().collect(),
                     notes: notes.clone(),
                     favorite: false,
+                    folder_id: None,
+                    fields: Vec::new(),
                 },
             })
         }

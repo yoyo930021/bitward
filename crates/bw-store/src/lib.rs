@@ -19,7 +19,7 @@ use thiserror::Error;
 
 pub use audit::{AuditFilter, AuditRecord};
 pub use blobs::BlobRef;
-pub use ciphers::{CipherRow, CollectionRow, OrgRow};
+pub use ciphers::{CipherRow, CollectionRow, FolderRow, OrgRow};
 pub use outbox::{ConflictRecord, LEASE_MS, MutState, Mutation, MutationDraft, OutboxDepth};
 pub use overlay::{Overlay, OverlayOp};
 pub use sessions::{SessionRow, SessionState};
@@ -139,6 +139,14 @@ impl Store {
         if version < 4 {
             // v4（push_tokens）同 v3 形態：表在 V1，此處留掛鉤
             conn.execute_batch(schema::V4)?;
+        }
+        if version < 5 {
+            // v5（三件套）：fields_plain 逐條 ALTER 容忍 Duplicate column（同 V2 紀律）；
+            // meta_fts 加欄走整組重建（FTS5 無 ALTER，見 schema::V5_FTS 註解）。
+            for stmt in schema::V5.split(';').filter(|s| !s.trim().is_empty()) {
+                let _ = conn.execute_batch(&format!("{stmt};"));
+            }
+            conn.execute_batch(schema::V5_FTS)?;
         }
         if version < schema::SCHEMA_VERSION {
             conn.execute_batch(&format!(

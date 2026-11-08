@@ -402,7 +402,7 @@ impl Hub {
                     self.audit_reveal(*id, "Reveal.Get")?;
                 }
                 let v = self.project_one(*id, *view)?;
-                Ok(Response::Item(v))
+                Ok(Response::Item(v.map(Box::new)))
             }
             Call::Vault(VaultCall::Create { draft }) => self.write_create(session, draft).await,
             Call::Vault(VaultCall::Patch { id, edits }) => {
@@ -423,6 +423,13 @@ impl Hub {
                 self.write_move(session, *item, org.clone(), collections.clone())
                     .await
             }
+            // 三件套（批次 3 接實作）：資料夾與硬刪的業務在 datamanage.rs。
+            Call::Vault(VaultCall::CreateFolder { .. })
+            | Call::Vault(VaultCall::ListFolders)
+            | Call::Vault(VaultCall::DeleteFolder { .. })
+            | Call::Vault(VaultCall::Purge { .. }) => Err(WtpError::Unsupported {
+                feature: "資料夾／硬刪在 daemon 批次接線".into(),
+            }),
             Call::Use(UseCall::TotpCode { id }) => self.totp(*id),
             Call::Use(UseCall::GeneratePassword { policy }) => {
                 let opts = bw_crypto::PasswordOptions {
@@ -896,16 +903,30 @@ impl Hub {
         }
     }
 
-    /// 明文索引回填（全鏡像）。
+    /// 明文索引回填（全鏡像，含垃圾桶——官方回收桶列表要顯示解密名稱）。
     fn reindex_all(&self) -> Result<(), WtpError> {
-        let metas = self
+        let mut ids: Vec<ItemId> = self
             .store
             .query(&Query {
                 limit: u32::MAX,
                 ..Default::default()
             })
-            .map_err(denied)?;
-        self.reindex_many(&metas.iter().map(|m| m.id).collect::<Vec<_>>())
+            .map_err(denied)?
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        ids.extend(
+            self.store
+                .query(&Query {
+                    limit: u32::MAX,
+                    deleted: Some(true),
+                    ..Default::default()
+                })
+                .map_err(denied)?
+                .into_iter()
+                .map(|m| m.id),
+        );
+        self.reindex_many(&ids)
     }
 
     /// 鏡像落盤後的明文索引回填：解密只發生在 `with_keys` 閉包內。
@@ -925,7 +946,9 @@ impl Hub {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            let _ = self.store.set_plain_meta(*id, idx.name.as_deref(), &idx.uris);
+            let _ = self
+                .store
+                .set_plain_meta(*id, idx.name.as_deref(), &idx.uris, &idx.field_names);
             let _ = self
                 .store
                 .set_plain_secrets(*id, idx.username.as_deref(), idx.password.as_deref());
@@ -1234,6 +1257,10 @@ fn action_tag(c: &Call) -> String {
         Call::Vault(VaultCall::FindDuplicates) => "Vault.FindDuplicates",
         Call::Vault(VaultCall::Merge { .. }) => "Vault.Merge",
         Call::Vault(VaultCall::MoveToOrg { .. }) => "Vault.MoveToOrg",
+        Call::Vault(VaultCall::CreateFolder { .. }) => "Vault.CreateFolder",
+        Call::Vault(VaultCall::ListFolders) => "Vault.ListFolders",
+        Call::Vault(VaultCall::DeleteFolder { .. }) => "Vault.DeleteFolder",
+        Call::Vault(VaultCall::Purge { .. }) => "Vault.Purge",
         Call::Passkey(PasskeyCall::GetPasskeys { .. }) => "Passkey.GetPasskeys",
         Call::Passkey(PasskeyCall::RegisterPasskey { .. }) => "Passkey.RegisterPasskey",
         Call::Passkey(PasskeyCall::AssertPasskey { .. }) => "Passkey.AssertPasskey",
@@ -1273,14 +1300,16 @@ fn action_tag(c: &Call) -> String {
 fn sensitivity_of_call(c: &Call, resp: Option<&Response>) -> bw_proto::Sensitivity {
     use bw_proto::Sensitivity::*;
     // 回應帶明文（Secret/Reveal 出口）一律 Secret 級，優先於呼叫形態
-    if matches!(
-        resp,
-        Some(Response::Secret(_))
-            | Some(Response::Item(Some(bw_proto::ItemView {
-                password: Some(_),
-                ..
-            })))
-    ) {
+    let secret_out = match resp {
+        Some(Response::Secret(_)) => true,
+        Some(Response::Item(Some(v))) => {
+            v.password.is_some()
+                || v.notes.is_some()
+                || v.fields.iter().any(|f| f.value.is_some())
+        }
+        _ => false,
+    };
+    if secret_out {
         return Secret;
     }
     match c {
@@ -1296,7 +1325,11 @@ fn sensitivity_of_call(c: &Call, resp: Option<&Response>) -> bw_proto::Sensitivi
         | Call::Vault(VaultCall::Overlay { .. })
         | Call::Vault(VaultCall::FindDuplicates)
         | Call::Vault(VaultCall::Merge { .. })
-        | Call::Vault(VaultCall::MoveToOrg { .. }) => Identity,
+        | Call::Vault(VaultCall::MoveToOrg { .. })
+        | Call::Vault(VaultCall::CreateFolder { .. })
+        | Call::Vault(VaultCall::ListFolders)
+        | Call::Vault(VaultCall::DeleteFolder { .. })
+        | Call::Vault(VaultCall::Purge { .. }) => Identity,
         Call::Use(UseCall::TotpCode { .. })
         | Call::Use(UseCall::Run { .. })
         | Call::Use(UseCall::ResolveRef { .. })
