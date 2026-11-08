@@ -295,7 +295,12 @@ impl Hub {
                         .collect();
                     c["fields"] = Value::Array(fields);
                 }
-                // SecureNote（type 2）官方線格式不帶 login 物件：整塊跳過。
+                // SecureNote（type 2）官方線格式不帶 login 物件：整塊跳過，
+                // 改掛 secureNote 子物件（jslib 同形；VW 缺它回 400 "Data missing"，
+                // 2026-11-08 實錄：curl POST /api/ciphers 三態 probe）。
+                if draft.kind == bw_proto::ItemKind::SecureNote {
+                    c["secureNote"] = json!({"type": 0});
+                }
                 let mut login = serde_json::Map::new();
                 if draft.kind != bw_proto::ItemKind::SecureNote {
                     if let Some(u) = &draft.username {
@@ -456,6 +461,11 @@ impl Hub {
         };
         match result {
             Ok(()) => {
+                // create/patch/move 的 push_* 已自行結算（冪等重設 Applied）；
+                // delete/restore 無內部結算點——不在這裡補 settle，列會永留
+                // in_flight，租約到期反覆重推（writepath 未斷言收斂計數、
+                // vaulttypes.sh 實測抓出）。
+                let _ = self.store.settle(m.id, MutState::Applied);
                 if op != "create" && op != "patch" {
                     self.emit(
                         EventTopic::VaultChanged,
@@ -1219,6 +1229,7 @@ mod tests {
         let cipher = hub.encrypt_draft(&draft, None).unwrap();
         assert_eq!(cipher["type"], json!(2));
         assert!(cipher.get("login").is_none(), "type 2 官方線格式不帶 login");
+        assert_eq!(cipher["secureNote"]["type"], json!(0), "VW 必要子物件");
         assert_eq!(cipher["folderId"], json!(&folder));
         let f0 = &cipher["fields"][0];
         assert_eq!(f0["type"], json!(1), "hidden→type 1");
