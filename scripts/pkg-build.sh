@@ -3,11 +3,23 @@
 # → receipt/簽章斷言 →（--experiment）BTM 判定實驗（啟用 SMAppService agent＋抓證據）。
 # 冪等：可重複執行；staging 每回合重建（殭屍二進位保險沿用 dev-install.sh 的教訓：
 # ditto 後強制重拷 helper＋重簽＋功能探測，並重封 App 外層）。
+# 簽章參數（預設＝開發防呆：Mac Developer、沙盒形態、未簽 pkg 降級）：
+#   BW_SIGN_ID       重簽 bundle 全家（executable/appex/helper/daemon/外層）的身分
+#                    （SHA 或名稱）。Developer ID Application → 自動加
+#                    -o runtime --timestamp（公證必要）並重簽 appex。
+#   BW_INSTALLER_ID  productsign 用的 Developer ID Installer 身分；設了就必簽
+#                    （失敗即 FATAL），沒設維持「試 $BW_SIGN_ID、不支就降未簽」。
+#   BW_FORM          sandbox（預設，現行主線）| direct（Developer ID 直裝分叉：
+#                    App 去 app-sandbox、BundleProgram 指回裸二進位、剝 dev profile）。
+#   BW_NOTARIZE=1    notarytool 真公證＋staple＋spctl 斷言（需 BW_APPLE_API_KEY /
+#                    BW_APPLE_API_ISSUER；p8 找 ~/private_keys、~/.asc/keys）。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO=$PWD
 BUNDLE=~/Library/Developer/Xcode/DerivedData/Bitward-essisnxmmachgpfgzkzjfqzduucb/Build/Products/Release/Bitward.app
-IDENTITY=BFA4593FB215C51771B6988EBFADE08E7A3F8DE0   # Mac Developer: Created via API (team 8V5224A99M)
+IDENTITY=${BW_SIGN_ID:-BFA4593FB215C51771B6988EBFADE08E7A3F8DE0}   # 預設 Mac Developer: Created via API (team 8V5224A99M)
+INSTALLER_ID=${BW_INSTALLER_ID:-}
+FORM=${BW_FORM:-sandbox}
 GROUP=group.8V5224A99M.io.bitward.dev
 PKG_ID=io.bitward.dev.pkg
 LABEL=io.bitward.dev.daemon
@@ -18,6 +30,23 @@ case "${1:-}" in
   --experiment) EXPERIMENT=1 ;;
   --experiment-only) EXPERIMENT=1; EXPERIMENT_ONLY=1 ;;
 esac
+
+# 身分形態：Developer ID Application → 公證三要件（-o runtime＋--timestamp＋同身分重簽
+# 全部嵌套 code，含 appex；Xcode 只吃 Apple Development，dev profile 對直裝無意義→剝）。
+ID_NAME=$(security find-identity -v -p codesigning 2>/dev/null \
+  | awk -F'"' -v s="$IDENTITY" 'index($0, s){print $2; exit}')
+IS_DEVID=0
+case "$ID_NAME" in Developer\ ID\ Application*) IS_DEVID=1 ;; esac
+CS_RUNTIME=''
+[ "$IS_DEVID" = 1 ] && CS_RUNTIME='-o runtime --timestamp'
+case "$FORM" in
+  sandbox) APP_ENT=platforms/macos/Bitward/Bitward.entitlements
+           LA_PLIST=platforms/macos/Bitward/Resources/io.bitward.dev.daemon.plist ;;
+  direct)  APP_ENT=platforms/macos/Bitward/Bitward.direct.entitlements
+           LA_PLIST=platforms/macos/Bitward/Resources/io.bitward.dev.daemon.direct.plist ;;
+  *) echo "FATAL: BW_FORM=$FORM 不存在（sandbox|direct）"; exit 1 ;;
+esac
+echo "==> 簽章形態：${ID_NAME:-$IDENTITY}／form=$FORM"
 
 # --experiment-only：跳過建置/安裝（／Applications 已是同產物時免再要授權），
 # 直接斷言＋BTM 實驗。
@@ -45,7 +74,7 @@ cmp -s target/release/bitwarderd "$STAGE/root/Bitward.app/Contents/Helpers/bitwa
 # 從 terminal 直接跑會卡在 secinit（容器歸屬），其真運行環境是 launchd。
 target/release/bitwarderd --service status >/dev/null 2>&1 \
   || { echo "FATAL: bitwarderd 不支援 --service（舊殭屍二進位？）"; exit 1; }
-codesign -f -s "$IDENTITY" --entitlements bins/bitwarderd/helper.entitlements \
+codesign -f -s "$IDENTITY" $CS_RUNTIME --entitlements bins/bitwarderd/helper.entitlements \
   "$STAGE/root/Bitward.app/Contents/Helpers/bitwarderd"
 # 沙盒 daemon（SMAppService 目標）：重組嵌套 BitwardDaemon.app（同殭屍保險）
 DA_STAGED="$STAGE/root/Bitward.app/Contents/Helpers/BitwardDaemon.app"
@@ -54,20 +83,35 @@ cp -f target/release/bitwarderd "$DA_STAGED/Contents/MacOS/bitwarderd"
 cmp -s target/release/bitwarderd "$DA_STAGED/Contents/MacOS/bitwarderd" \
   || { echo "FATAL: staged daemon app 二進位不符"; exit 1; }
 cp -f platforms/macos/Bitward/Resources/BitwardDaemon-Info.plist "$DA_STAGED/Contents/Info.plist"
-codesign -f -s "$IDENTITY" -i io.bitward.dev.daemon --entitlements bins/bitwarderd/daemon.entitlements \
+codesign -f -s "$IDENTITY" $CS_RUNTIME -i io.bitward.dev.daemon --entitlements bins/bitwarderd/daemon.entitlements \
   "$DA_STAGED/Contents/MacOS/bitwarderd"
-codesign -f -s "$IDENTITY" -i io.bitward.dev.daemon --entitlements bins/bitwarderd/daemon.entitlements \
+codesign -f -s "$IDENTITY" $CS_RUNTIME -i io.bitward.dev.daemon --entitlements bins/bitwarderd/daemon.entitlements \
   "$DA_STAGED"
+# Developer ID 批次：appex 也要同身分重簽（公證要求全部嵌套 code 皆 Developer ID＋
+# 時間戳＋hardened runtime；Xcode 留 Apple Development 會被 notarytool 打回），
+# 並剝掉對直裝無意義的 Apple Development profile（殭屍 profile 保險）。
+APPEX="$STAGE/root/Bitward.app/Contents/PlugIns/BitwardProvider.appex"
+if [ "$IS_DEVID" = 1 ]; then
+  rm -f "$STAGE/root/Bitward.app/embedded.provisionprofile" \
+        "$APPEX/embedded.provisionprofile"
+  codesign -f -s "$IDENTITY" $CS_RUNTIME \
+    --entitlements platforms/macos/BitwardProvider/BitwardProvider.entitlements \
+    "$APPEX/Contents/MacOS/BitwardProvider"
+  codesign -f -s "$IDENTITY" $CS_RUNTIME \
+    --entitlements platforms/macos/BitwardProvider/BitwardProvider.entitlements \
+    "$APPEX"
+fi
 # 殭屍 plist 保險：增量建置可能殘留舊 LaunchAgents（不合規 Label 的兄弟檔會讓
 # SMAppService register 拋 EINVAL，2026-11-07 實測）→ 以源檔為唯一事實重建目錄。
 LA_STAGED="$STAGE/root/Bitward.app/Contents/Library/LaunchAgents"
 rm -rf "$LA_STAGED"; mkdir -p "$LA_STAGED"
-cp -f platforms/macos/Bitward/Resources/io.bitward.dev.daemon.plist "$LA_STAGED/"
+cp -f "$LA_PLIST" "$LA_STAGED/io.bitward.dev.daemon.plist"
 # 剝掉 AppleDouble 側錄（._*，xattr 隨 cp 落地）——pkg payload 髒檔
 find "$STAGE/root" -name '._*' -delete
-# helper/plist 改變 bytes → 外層 CodeResources 需重封（entitlements 用專案源檔，
-# 與 project.yml CODE_SIGN_ENTITLEMENTS 一致；原簽章 flags=none，不加 -o runtime）
-codesign -f -s "$IDENTITY" --entitlements platforms/macos/Bitward/Bitward.entitlements \
+# helper/plist 改變 bytes → 外層 CodeResources 需重封（entitlements 依 $FORM 選檔，
+# 沙盒形態與專案源檔 CODE_SIGN_ENTITLEMENTS 一致；Mac Developer 維持 flags=none，
+# Developer ID 由 $CS_RUNTIME 補 hardened runtime＋時間戳）
+codesign -f -s "$IDENTITY" $CS_RUNTIME --entitlements "$APP_ENT" \
   "$STAGE/root/Bitward.app"
 codesign --verify --deep --strict "$STAGE/root/Bitward.app"
 echo "    staged helper fresh + bundle seal OK"
@@ -107,11 +151,15 @@ productbuild --synthesize --package "$STAGE/bitward-component.pkg" \
   "$STAGE/distribution.plist"
 productbuild --distribution "$STAGE/distribution.plist" --package-path "$STAGE" \
   --identifier "$PKG_ID" --version "$VERSION" "$UNSIGNED"
-# productsign 只吃 Installer Signing 憑證（EKU 1.3.6.1.4.1.311.10.3.8）。本機六張
-# 憑證全是 Code Signing EKU——實測 Mac Developer 與 Apple Distribution 都被拒：
-# "An installer signing identity (not an application signing identity) is required"。
-# 無 Developer ID Installer 前降為未簽名 pkg（本機 installer 不吃 pkg 簽章）。
-if productsign --sign "$IDENTITY" "$UNSIGNED" "$PKG" 2>/tmp/productsign.err; then
+# productsign 只吃 Installer Signing EKU（1.3.6.1.4.1.311.10.3.8）：實測 Mac Developer
+# 與 Apple Distribution 都被拒（「An installer signing identity (not an application
+# signing identity) is required」）。BW_INSTALLER_ID（Developer ID Installer）設了就
+# 必簽、失敗即 FATAL；沒設維持試 $IDENTITY、不支就降未簽 pkg（本機 installer 不吃 pkg 簽章）。
+if [ -n "$INSTALLER_ID" ]; then
+  productsign --sign "$INSTALLER_ID" "$UNSIGNED" "$PKG" 2>/tmp/productsign.err \
+    || { echo "FATAL: productsign（$INSTALLER_ID）失敗：$(tail -1 /tmp/productsign.err)"; exit 1; }
+  echo "    productsign OK（Installer 身分）"
+elif productsign --sign "$IDENTITY" "$UNSIGNED" "$PKG" 2>/tmp/productsign.err; then
   echo "    productsign OK"
 else
   echo "    productsign skipped：$(tail -1 /tmp/productsign.err)"
@@ -121,15 +169,21 @@ echo "    $PKG"
 
 echo "==> notarize（BW_NOTARIZE=${BW_NOTARIZE:-0}）"
 if [ "${BW_NOTARIZE:-0}" = 1 ]; then
-  P8=${BW_APPLE_API_KEY_P8:-$(ls "$HOME"/private_keys/*.p8 2>/dev/null | head -1)}
-  [ -n "$P8" ] || { echo "FATAL: BW_NOTARIZE=1 但找不到 .p8（~/private_keys 或 BW_APPLE_API_KEY_P8）"; exit 1; }
   : "${BW_APPLE_API_KEY:?BW_NOTARIZE=1 需 BW_APPLE_API_KEY（ASC API key id）}"
   : "${BW_APPLE_API_ISSUER:?BW_NOTARIZE=1 需 BW_APPLE_API_ISSUER}"
+  # p8 依 key id 配對優先（private_keys → .asc/keys），再降任何 private_keys/*.p8（舊慣例）
+  P8=${BW_APPLE_API_KEY_P8:-$(ls "$HOME"/private_keys/AuthKey_${BW_APPLE_API_KEY}.p8 \
+    "$HOME"/.asc/keys/AuthKey_${BW_APPLE_API_KEY}.p8 \
+    "$HOME"/private_keys/*.p8 2>/dev/null | head -1)}
+  [ -n "$P8" ] || { echo "FATAL: BW_NOTARIZE=1 但找不到 AuthKey_${BW_APPLE_API_KEY}.p8（BW_APPLE_API_KEY_P8 可指定）"; exit 1; }
   xcrun notarytool submit "$PKG" --key "$P8" --key-id "$BW_APPLE_API_KEY" \
     --issuer "$BW_APPLE_API_ISSUER" --wait
   xcrun stapler staple "$PKG"
+  # 公證結果入檔：ticket 在 pkg 上＋Gatekeeper 願收（-t install）
+  xcrun stapler validate "$PKG"
+  spctl -a -t install -vvv "$PKG"
 else
-  echo "    skipped：無 Developer ID 身分與 ASC API key；本機 installer 路徑不吃 Gatekeeper 公證"
+  echo "    skipped：BW_NOTARIZE!=1；本機 installer 路徑不吃 Gatekeeper 公證"
 fi
 
 echo "==> installer -pkg -target /"

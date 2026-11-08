@@ -21,3 +21,4 @@ apps/**/.gradle/
 apps/**/android-shell/build/
 apps/**/android-shell/app/build/
 apps/**/android-shell/local.properties
+AuthKey_*.p8

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Developer ID 直裝分叉（pkg-build.sh BW_FORM=direct）專用：與沙盒形態同
+	     Label/args，唯獨 BundleProgram 指回裸二進位 Contents/Helpers/bitwarderd
+	     （非沙盒 App 送件 smd 不要求目標沙盒；巢狀 BitwardDaemon.app 僅為
+	     MAS/沙盒形態服務，直裝路不用它）。落地檔名維持 io.bitward.dev.daemon.plist
+	     （BTM record 以 Label＋path 歸因，兩分叉同名才能互清殭屍 record）。 -->
+	<key>Label</key>
+	<string>io.bitward.dev.daemon</string>
+	<key>__CFBundleIdentifier</key>
+	<string>io.bitward.dev</string>
+	<key>BundleProgram</key>
+	<string>Contents/Helpers/bitwarderd</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>bitwarderd</string>
+		<string>--sock</string>
+		<string>/private/tmp/io.bitward.dev/daemon.sock</string>
+		<string>--push-app-group</string>
+		<string>group.8V5224A99M.io.bitward.dev</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>1</integer>
+</dict>
+</plist>

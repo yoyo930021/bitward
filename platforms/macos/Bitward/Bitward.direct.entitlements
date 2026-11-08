@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Developer ID 直裝分叉（pkg-build.sh BW_FORM=direct）：與 Bitward.entitlements
+	     同鍵、唯獨去 app-sandbox。存在理由（FINDINGS §10）：容器 App 沙盒化時 smd
+	     要求 SMAppService 目標也沙盒（連鎖）；直裝路撤沙盒後 helper 免沙盒、
+	     裸二進位即可常駐，App Groups 對非沙盒 App 屬右側 entitlement、無需 profile
+	     綁定（本批判定的就是此假說）。 -->
+	<key>com.apple.developer.authentication-services.autofill-credential-provider</key>
+	<true/>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.8V5224A99M.io.bitward.dev</string>
+	</array>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>8V5224A99M.io.bitward.dev</string>
+	</array>
+</dict>
+</plist>
