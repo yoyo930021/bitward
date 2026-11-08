@@ -54,36 +54,36 @@ pub fn loading() -> View {
         )
 }
 
-/// 右欄未選取時的佔位：淡 monogram 圖示＋置中大字＋次要說明。
+/// 右欄未選取時的佔位：淡 monogram 圖示＋置中大字＋次要說明（等比縮小）。
 pub fn placeholder() -> View {
     view()
         .flex_1()
         .flex_col()
         .items_center()
         .justify_center()
-        .gap_3()
+        .gap_2()
         .child(
             view()
-                .w(px(64.0))
-                .h(px(64.0))
-                .rounded(px(16.0))
+                .w(px(theme::MONOGRAM_ID))
+                .h(px(theme::MONOGRAM_ID))
+                .rounded(px(theme::MONOGRAM_ID_RADIUS))
                 .border(px(1.0))
                 .border_color(theme::HAIRLINE)
                 .bg(theme::SURFACE)
                 .flex_row()
                 .items_center()
                 .justify_center()
-                .child(text("🔑").text_size(px(28.0))),
+                .child(text("🔑").text_size(px(theme::GLYPH_KEY))),
         )
         .child(
             text("選取一個項目")
-                .text_size(px(20.0))
+                .text_size(px(theme::TEXT_IDENTITY))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme::TEXT_MUTED),
         )
         .child(
             text("或按＋新增建立新項目")
-                .text_size(px(13.0))
+                .text_size(px(theme::TEXT_PAGE_SUB))
                 .text_color(theme::TEXT_MUTED),
         )
 }

@@ -315,11 +315,11 @@ fn lock_page(core: AppCore) -> View {
         .justify_center()
         .child(
             view()
-                .w(px(360.0))
+                .w(px(320.0))
                 .flex_col()
                 .items_center()
-                .gap_3()
-                .p_8()
+                .gap_2()
+                .p_6()
                 .rounded_2xl()
                 .border(px(1.0))
                 .border_color(theme::HAIRLINE)
@@ -334,8 +334,8 @@ fn lock_page(core: AppCore) -> View {
                 }])
                 .child(
                     text("🔒")
-                        .text_size(px(36.0))
-                        .line_height(px(44.0)),
+                        .text_size(px(theme::GLYPH_LOCK))
+                        .line_height(px(34.0)),
                 )
                 .child(
                     text(move || {
@@ -345,7 +345,7 @@ fn lock_page(core: AppCore) -> View {
                             .map(|s| state::vault_label(&s).to_owned())
                             .unwrap_or_else(|| "連線中".to_owned())
                     })
-                    .text_size(px(17.0))
+                    .text_size(px(theme::TEXT_CARD_TITLE))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme::TEXT_PRIMARY),
                 )
@@ -427,10 +427,10 @@ fn failed_card(core: AppCore) -> View {
         .justify_center()
         .child(
             view()
-                .w(px(460.0))
+                .w(px(420.0))
                 .flex_col()
                 .items_center()
-                .gap_3()
+                .gap_2()
                 .p_6()
                 .rounded_2xl()
                 .border(px(1.0))
@@ -446,7 +446,7 @@ fn failed_card(core: AppCore) -> View {
                 }])
                 .child(
                     text("無法連線 daemon")
-                        .text_size(px(17.0))
+                        .text_size(px(theme::TEXT_CARD_TITLE))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme::TEXT_PRIMARY),
                 )

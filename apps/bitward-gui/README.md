@@ -33,8 +33,8 @@ cd apps/bitward-gui
 BITWARD_GUI_SOCK=<repo>/dev/e2e/demo/s NSH_GUI_SHOTS=$PWD nsh run --target macos
 ```
 
-依指令序列跑完整驗收流並寫 `shot-1..16-*.png` 後退出：列表（搜尋
-"GitHub"，右欄空態為「選取一個項目」佔位）→ 詳情遮罩 → 詳情 revealed → 新增表單模態 → 真送新增（Create+AddTag）
+依指令序列跑完整驗收流並寫 `shot-1..16-*.png` 後退出：列表全量 40 筆（緊湊密度證據，
+右欄空態為「選取一個項目」佔位）→ 搜尋 "GitHub" → 詳情遮罩 → 詳情 revealed → 新增表單模態 → 真送新增（Create+AddTag）
 → TOTP 拒絕路徑（無 seed → 錯誤橫條）→ 排序下拉 → 標籤 chips 選取 →
 編輯改名（Patch）→ 刪除確認框 → 取消不刪斷言 → 刪除後空列表 →
 鎖態頁（已鎖定+解鎖鈕）→ 解鎖 → 匯出確認框（未加密提醒）→ 匯出完成提示列 →
@@ -52,11 +52,11 @@ BITWARD_GUI_SOCK=<repo>/dev/e2e/demo/s NSH_GUI_SHOTS=$PWD nsh run --target macos
 | `btp.rs` | BTP 精簡同步 client：u32 LE 長度前綴 + JSON 幀、`Hello{Enroll pair_code:null}`→`Welcome`→`Invoke`/`Reply`；鎖撤銷（A6）自動重連重 Enroll 一次 |
 | `state.rs` | 應用狀態機：`AppCore`（訊號集）+ `Cmd` 命令佇列 + 唯一 `reduce`；UI handler 只投遞命令，worker 執行緒只回傳命令，訊號全在引擎執行緒寫入 |
 | `lib.rs` | 根元件 `App`：命令幫浦（`set_interval` 50ms + `batch`）、大標題列（N 筆項目副行/匯出/改密/新增）、錯誤橫條、Phase×Route 主從式版面與鎖態頁 |
-| `list.rs` | 全寬圓角搜尋框（Query.text 交 daemon FTS）、標籤 chips 行（選項取自本地載入清單、比對交 daemon）、排序選單、56px 列（monogram 派生色、選中列 accent 指示條）、pending 徽章、`virtual_list` |
-| `detail.rs` | 右欄詳情面板：identity 卡（大 monogram＋連結色 url）＋分節欄位（帳密／TOTP）；每欄複製鈕（剪貼簿＋success 回饋 1 秒）；密碼遮罩 →「顯示密碼」發 Get(Reveal)，明文只存 `revealed` 訊號、離開詳情即清；TOTP 按鈕發 Use:TotpCode |
+| `list.rs` | 全寬圓角搜尋框（Query.text 交 daemon FTS）、標籤 chips 行（選項取自本地載入清單、比對交 daemon）、排序選單、38px 緊湊列（monogram 派生色、選中列 accent 指示條）、pending 徽章、`virtual_list` |
+| `detail.rs` | 右欄詳情面板：identity 卡（44 monogram＋連結色 url）＋分節欄位（帳密／TOTP），欄位列同行 label＋value（列高 34）；每欄複製鈕 20px（剪貼簿＋success 回饋 1 秒）；密碼遮罩 →「顯示密碼」發 Get(Reveal)，明文只存 `revealed` 訊號、離開詳情即清；TOTP 按鈕發 Use:TotpCode |
 | `form.rs` | 新增/編輯模態（elevated 卡＋背板點擊取消；name/username/password/uri/tags） |
 | `export.rs` | 未加密 JSON 匯出：逐筆 Get(Reveal) → `~/Downloads/bitward-export-<UTC>.json`（0600） |
-| `theme.rs` | 設計 tokens：三層暗色背景、accent 漸變、語意色、文字三級、monogram 8 色盤（名字 FNV hash 穩定派生）；視圖層唯一顏色真相源，禁散落 hex |
+| `theme.rs` | 設計 tokens：三層暗色背景、accent 漸變、語意色、文字三級、密度常量（列高/monogram/輸入框/字級/留白）、monogram 8 色盤（名字 FNV hash 穩定派生）；視圖層唯一顏色與尺寸真相源，禁散落 hex／魔數 |
 | `ui.rs` | 共用小元件：按鈕（primary 漸變/ghost/destructive）、monogram、徽章、表單欄、下拉列、模態殼（absolute 鋪滿 + 置中 elevated 卡）、確認/改密模態、複製鈕 |
 | `shots.rs` | `NSH_GUI_SHOTS` 自我截圖器（AppKit `cacheDisplayInRect` 路徑，不需 TCC；objc2 經 `nsh_platform_macos` 再匯取） |
 

@@ -145,22 +145,22 @@ fn at(ms: u64, f: impl FnOnce() + 'static) {
     set_timeout(Duration::from_millis(ms), f);
 }
 
-/// 開窗後依序跑完整驗收流：列表（搜尋）→ 詳情遮罩 → revealed → 新增表單
+/// 開窗後依序跑完整驗收流：列表全量（密度證據）→ 搜尋 → 詳情遮罩 → revealed → 新增表單
 /// 模態 → 提交新增 → 編輯改名 → 刪除確認（先取消斷言、再確認）→
 /// 匯出確認 → 鎖態頁/解鎖 → 選取態，各步存一張 shot-N-*.png 後結束行程。時序裕量對齊
 /// spike（Background
 /// session 無 vsync 可等，固定 sleep；本地 daemon 往返 <50ms）。
 /// 詳情目標用驗收種子項目「GitHub 測試」，找不到退回第一筆。
 pub fn script(dir: PathBuf, core: AppCore) {
+    let d = dir.clone();
+    at(1800, move || capture(&d, "shot-1-list.png"));
     let c = core.clone();
-    at(1000, move || {
+    at(2200, move || {
         c.query.set("GitHub".into());
         c.send(Cmd::RefetchList);
     });
-    let d = dir.clone();
-    at(2600, move || capture(&d, "shot-1-list.png"));
     let c = core.clone();
-    at(3000, move || {
+    at(3200, move || {
         if let Some(id) = find_id(&c, "GitHub 測試") {
             c.send(Cmd::OpenDetail(id));
         }
