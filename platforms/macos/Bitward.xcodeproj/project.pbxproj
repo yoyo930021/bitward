@@ -45,6 +45,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		026B6FD5C76861C096C6DE8F /* io.bitward.dev.daemon.direct.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = io.bitward.dev.daemon.direct.plist; sourceTree = "<group>"; };
 		0A7B5F02CAB65867EBC45312 /* Bitward.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Bitward.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		0E75116995D1D6A3D6ECC3E3 /* BitwardGroup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BitwardGroup.swift; sourceTree = "<group>"; };
 		25C3BDA637D74D9057065DED /* BTPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BTPClient.swift; sourceTree = "<group>"; };
@@ -81,6 +82,7 @@
 			isa = PBXGroup;
 			children = (
 				389B287D9AED19867AF93398 /* BitwardDaemon-Info.plist */,
+				026B6FD5C76861C096C6DE8F /* io.bitward.dev.daemon.direct.plist */,
 				B84397E49386EDC747BDF3CC /* io.bitward.dev.daemon.plist */,
 			);
 			path = Resources;
