@@ -14,8 +14,8 @@
 #   BW_NOTARIZE=1    notarytool 真公證＋staple＋spctl 斷言（需 BW_APPLE_API_KEY /
 #                    BW_APPLE_API_ISSUER；p8 找 ~/private_keys、~/.asc/keys）。
 #   BW_PROFILE       Developer ID（MAC_APP_DIRECT）.provisionprofile 路徑；設了就嵌進
-#                    App（受限 entitlements 授權用；appex 屬另一 App ID、維持剝除，
-#                    provider 真機填充另產 BitwardProvider 直裝 profile）。
+#                    App（受限 entitlements 授權用）。BW_PROFILE_APPEX 同型、嵌 appex
+#                    （provider 屬另一 App ID）；只給 BW_PROFILE 時 appex 維持剝除。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO=$PWD
@@ -100,7 +100,11 @@ APPEX="$STAGE/root/Bitward.app/Contents/PlugIns/BitwardProvider.appex"
 if [ "$IS_DEVID" = 1 ]; then
   if [ -n "${BW_PROFILE:-}" ]; then
     cp -f "$BW_PROFILE" "$STAGE/root/Bitward.app/Contents/embedded.provisionprofile"
-    rm -f "$APPEX/Contents/embedded.provisionprofile"
+    if [ -n "${BW_PROFILE_APPEX:-}" ]; then
+      cp -f "$BW_PROFILE_APPEX" "$APPEX/Contents/embedded.provisionprofile"
+    else
+      rm -f "$APPEX/Contents/embedded.provisionprofile"
+    fi
   else
     rm -f "$STAGE/root/Bitward.app/Contents/embedded.provisionprofile" \
           "$APPEX/Contents/embedded.provisionprofile"
