@@ -28,7 +28,7 @@ pub fn overlay(core: AppCore) -> View {
         move || back.send(Cmd::OpenList),
         view()
             .flex_col()
-            .gap_4()
+            .gap(px(theme::FORM_GAP))
             .child(
                 text(title)
                     .text_size(px(17.0))

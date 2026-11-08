@@ -82,10 +82,10 @@ pub fn form_field(
 ) -> View {
     view()
         .flex_col()
-        .gap_1p5()
+        .gap_1()
         .child(
             text(label)
-                .text_size(px(12.0))
+                .text_size(px(theme::TEXT_FIELD_LABEL))
                 .font_weight(FontWeight::MEDIUM)
                 .letter_spacing(px(0.4))
                 .text_color(theme::TEXT_SECONDARY),
@@ -97,7 +97,7 @@ pub fn form_field(
                 .placeholder_color(move || theme::TEXT_MUTED.light)
                 .masked(secure)
                 .on_change(move |t: &str| on_change(t.to_owned()))
-                .h_10()
+                .h(px(theme::INPUT_H))
                 .px_3()
                 .rounded_lg()
                 .border(px(1.0))
@@ -168,7 +168,7 @@ pub fn modal_shell(width: f32, on_close: impl Fn() + 'static, card: View) -> Vie
             view()
                 .w(px(width))
                 .flex_col()
-                .gap_4()
+                .gap(px(theme::FORM_GAP))
                 .p_6()
                 .rounded_2xl()
                 .overflow_hidden()
@@ -263,7 +263,7 @@ pub fn change_password_modal(core: AppCore) -> View {
         move || close.send(crate::state::Cmd::CloseChangePassword),
         view()
             .flex_col()
-            .gap_4()
+            .gap(px(theme::FORM_GAP))
             .child(
                 text("變更主密碼")
                     .text_size(px(17.0))
