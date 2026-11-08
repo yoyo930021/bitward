@@ -111,6 +111,24 @@ pub fn flatten(cipher: &serde_json::Value, dec: &dyn Fn(&str) -> Option<String>)
             );
         }
     }
+    // 自訂欄位（v5 三件套）：`field.<n>.name`／`field.<n>.value` 以 0 起索引
+    // 定址（官方 fields[] 無 id；同 uri.<n> 紀律，陣列位移視為不同欄）。
+    if let Some(fields) = cipher.get("fields").and_then(serde_json::Value::as_array) {
+        for (i, f) in fields.iter().enumerate() {
+            put_enc(
+                &format!("field.{i}.name"),
+                f.get("name").and_then(serde_json::Value::as_str),
+            );
+            put_enc(
+                &format!("field.{i}.value"),
+                f.get("value").and_then(serde_json::Value::as_str),
+            );
+        }
+    }
+    // folderId 是明文欄（同 favorite 直接轉字串）；null/缺欄＝未歸屬（鍵缺席）。
+    if let Some(fid) = cipher.get("folderId").and_then(serde_json::Value::as_str) {
+        m.insert("folderId".into(), Some(fid.to_string()));
+    }
     if let Some(fav) = cipher.get("favorite").and_then(serde_json::Value::as_bool) {
         m.insert("favorite".into(), Some(fav.to_string()));
     }
@@ -189,6 +207,13 @@ pub fn apply_merged(
                 "username" => login_set(obj, "username", value.as_deref(), enc_of),
                 "password" => login_set(obj, "password", value.as_deref(), enc_of),
                 "totp" => login_set(obj, "totp", value.as_deref(), enc_of),
+                // folderId 明文欄：Some＝UUID 字串原樣落欄、None＝清 NULL（移出資料夾）。
+                "folderId" => {
+                    match value {
+                        Some(v) => obj.insert("folderId".into(), serde_json::json!(v)),
+                        None => obj.insert("folderId".into(), serde_json::Value::Null),
+                    };
+                }
                 "favorite" => {
                     obj.insert(
                         "favorite".into(),
@@ -221,6 +246,35 @@ pub fn apply_merged(
                                     .as_object_mut()
                                     .unwrap()
                                     .insert("uri".into(), serde_json::Value::Null);
+                            }
+                        }
+                    } else if let Some(rest) = p.strip_prefix("field.")
+                        && let Some((id_s, leaf)) = rest.rsplit_once('.')
+                        && let Some(idx) = id_s.parse::<usize>().ok()
+                        && matches!(leaf, "name" | "value")
+                    {
+                        // fields[] 無 id（官方形態）：索引定址。索引越界＝跳過
+                        // （陣列已被他端收縮，強插會造出缺 type/linkedId 的半套欄位；
+                        // 寫入端 write_patch 在入列前就擋越界）。
+                        let Some(entry) = obj
+                            .get_mut("fields")
+                            .and_then(serde_json::Value::as_array_mut)
+                            .and_then(|arr| arr.get_mut(idx))
+                            .and_then(|e| {
+                                if !e.is_object() {
+                                    *e = serde_json::json!({});
+                                }
+                                e.as_object_mut()
+                            })
+                        else {
+                            continue;
+                        };
+                        match value {
+                            Some(v) => {
+                                entry.insert(leaf.into(), serde_json::json!(enc_of(v)));
+                            }
+                            None => {
+                                entry.insert(leaf.into(), serde_json::Value::Null);
                             }
                         }
                     }
@@ -268,6 +322,7 @@ fn obj_of(v: &mut serde_json::Value) -> &mut serde_json::Map<String, serde_json:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
 
     fn map(pairs: &[(&str, Option<&str>)]) -> FieldMap {
         pairs
@@ -320,6 +375,84 @@ mod tests {
         });
         let idx = plain_index(&cipher, &dec);
         assert_eq!(idx.field_names, vec!["PIN".to_string(), "會員".to_string()]);
+    }
+
+    #[test]
+    fn flatten_includes_field_paths_and_folder_id() {
+        let dec = |s: &str| s.strip_prefix("E.").map(str::to_owned);
+        let cipher = serde_json::json!({
+            "name": "E.GitHub",
+            "folderId": "6f1a-1",
+            "fields": [
+                {"name": "E.PIN", "value": "E.1234", "type": 1},
+                {"name": "E.網站", "value": null, "type": 0}
+            ]
+        });
+        let m = flatten(&cipher, &dec);
+        assert_eq!(m.get("field.0.name").unwrap().as_deref(), Some("PIN"));
+        assert_eq!(m.get("field.0.value").unwrap().as_deref(), Some("1234"));
+        // value null → 鍵缺席（未設值不與「清空」混淆）
+        assert!(!m.contains_key("field.1.value"));
+        assert_eq!(m.get("field.1.name").unwrap().as_deref(), Some("網站"));
+        // folderId 明文入欄；null/缺欄時鍵不存在
+        assert_eq!(m.get("folderId").unwrap().as_deref(), Some("6f1a-1"));
+        let nofolder = flatten(&serde_json::json!({"name": "E.x"}), &dec);
+        assert!(!nofolder.contains_key("folderId"));
+    }
+
+    #[test]
+    fn three_way_merges_disjoint_field_and_folder_edits() {
+        // 雙裝置：A 改 field.0.value、B 改 folderId → 不同鍵自動合併（三件套
+        // 的欄位級併發語意，e2e writepath 手法的單元層對應）。
+        let base = map(&[("name", Some("n")), ("field.0.value", Some("v0"))]);
+        let ours = map(&[("name", Some("n")), ("field.0.value", Some("v1"))]);
+        let theirs = map(&[
+            ("name", Some("n")),
+            ("field.0.value", Some("v0")),
+            ("folderId", Some("folder-A")),
+        ]);
+        match three_way(&base, &ours, &theirs) {
+            Merge::Push(push) => {
+                assert_eq!(push.get("field.0.value").unwrap().as_deref(), Some("v1"));
+                assert!(!push.contains_key("folderId"), "theirs 已有的不動");
+            }
+            other => panic!("expect Push, got {other:?}"),
+        }
+        // 同欄相撞：兩端都改 field.0.value 且不同值 → 衝突（永不靜默覆蓋）。
+        let theirs2 = map(&[("name", Some("n")), ("field.0.value", Some("other"))]);
+        match three_way(&base, &ours, &theirs2) {
+            Merge::Conflict { fields } => assert_eq!(fields, vec!["field.0.value".to_string()]),
+            other => panic!("expect Conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_merged_writes_field_and_folder_paths() {
+        let enc = |s: &str| format!("E.{s}");
+        let theirs = serde_json::json!({
+            "name": "E.old",
+            "folderId": null,
+            "fields": [{"name": "E.PIN", "value": "E.1", "linkedId": null, "type": 1}]
+        });
+        let mut merged = FieldMap::new();
+        merged.insert("field.0.value".into(), Some("9999".into()));
+        merged.insert("folderId".into(), Some("fid-1".into()));
+        let out = apply_merged(&theirs, &merged, &enc);
+        assert_eq!(out["fields"][0]["value"], json!("E.9999"));
+        assert_eq!(out["fields"][0]["type"], json!(1), "type 不動");
+        assert_eq!(out["folderId"], json!("fid-1"));
+        // 越界索引跳過（不造半套欄位）
+        let mut oob = FieldMap::new();
+        oob.insert("field.7.value".into(), Some("x".into()));
+        let out = apply_merged(&theirs, &oob, &enc);
+        assert_eq!(out["fields"].as_array().unwrap().len(), 1);
+        // None 清空：folderId→null、value→null
+        let mut cleared = FieldMap::new();
+        cleared.insert("folderId".into(), None);
+        cleared.insert("field.0.value".into(), None);
+        let out = apply_merged(&theirs, &cleared, &enc);
+        assert_eq!(out["folderId"], Value::Null);
+        assert_eq!(out["fields"][0]["value"], Value::Null);
     }
 
     #[test]

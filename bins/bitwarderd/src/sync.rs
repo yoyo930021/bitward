@@ -97,6 +97,10 @@ impl Hub {
         draft: &CipherDraft,
     ) -> Result<Response, WtpError> {
         self.require_unlocked()?;
+        if let Some(f) = &draft.folder_id {
+            Uuid::parse_str(f)
+                .map_err(|_| denied(format!("folder_id 需為 UUID，got {f:?}")))?;
+        }
         let id = Uuid::new_v4();
         let cipher = self.encrypt_draft(draft, Some(id))?;
         let body = {
@@ -129,6 +133,38 @@ impl Hub {
         self.require_unlocked()?;
         let row = self.store.item(id).map_err(denied)?;
         let base = row.ok_or(WtpError::NotFound)?.enc_cipher;
+        // 三件套路徑預驗（入列前擋，不讓越界編輯靜默蒸發）：
+        // field.<n>.<leaf> 的 n 必須落在現有 fields[] 內；folderId 值為 UUID。
+        for e in edits {
+            if let Some(rest) = e.path.strip_prefix("field.") {
+                let (id_s, leaf) = rest.rsplit_once('.').unwrap_or((rest, ""));
+                if !matches!(leaf, "name" | "value") {
+                    return Err(denied(format!(
+                        "欄位路徑需 field.<n>.name|value，got {:?}",
+                        e.path
+                    )));
+                }
+                let n = id_s
+                    .parse::<usize>()
+                    .map_err(|_| denied(format!("field 索引需為數字，got {id_s:?}")))?;
+                let len = base
+                    .get("fields")
+                    .and_then(Value::as_array)
+                    .map(Vec::len)
+                    .unwrap_or(0);
+                if n >= len {
+                    return Err(denied(format!(
+                        "field.{n} 越界：本項目只有 {len} 個自訂欄位"
+                    )));
+                }
+            }
+            if e.path == "folderId"
+                && let Some(v) = e.value.as_deref()
+                && Uuid::parse_str(v).is_err()
+            {
+                return Err(denied(format!("folderId 需為 UUID 字串，got {v:?}")));
+            }
+        }
         let map: bw_vault::FieldMap = edits
             .iter()
             .map(|e| (e.path.clone(), e.value.clone()))
@@ -235,26 +271,50 @@ impl Hub {
                 if let Some(i) = id {
                     c["id"] = json!(i.to_string());
                 }
+                // folderId 明文 UUID 欄（官方線格式）；非 UUID 已在 write_create 擋下。
+                if let Some(f) = &draft.folder_id {
+                    c["folderId"] = json!(f);
+                }
                 if let Some(n) = &draft.notes {
                     c["notes"] = json!(enc(n));
                 }
-                let mut login = serde_json::Map::new();
-                if let Some(u) = &draft.username {
-                    login.insert("username".into(), json!(enc(u)));
-                }
-                if let Some(p) = &draft.password {
-                    login.insert("password".into(), json!(enc(p)));
-                }
-                if let Some(t) = &draft.totp {
-                    login.insert("totp".into(), json!(enc(t)));
-                }
-                if !draft.uris.is_empty() {
-                    let uris: Vec<Value> = draft
-                        .uris
+                // 自訂欄：官方 fields[] 形態 {name(信封), value(信封|null),
+                // linkedId, type}。hidden→type 1、text→type 0；boolean（2）留批次 2。
+                if !draft.fields.is_empty() {
+                    let fields: Vec<Value> = draft
+                        .fields
                         .iter()
-                        .map(|u| json!({"uri": enc(u), "match": null}))
+                        .map(|f| {
+                            json!({
+                                "name": enc(&f.name),
+                                "value": f.value.as_deref().map(&enc),
+                                "linkedId": null,
+                                "type": if f.hidden { 1 } else { 0 },
+                            })
+                        })
                         .collect();
-                    login.insert("uris".into(), json!(uris));
+                    c["fields"] = Value::Array(fields);
+                }
+                // SecureNote（type 2）官方線格式不帶 login 物件：整塊跳過。
+                let mut login = serde_json::Map::new();
+                if draft.kind != bw_proto::ItemKind::SecureNote {
+                    if let Some(u) = &draft.username {
+                        login.insert("username".into(), json!(enc(u)));
+                    }
+                    if let Some(p) = &draft.password {
+                        login.insert("password".into(), json!(enc(p)));
+                    }
+                    if let Some(t) = &draft.totp {
+                        login.insert("totp".into(), json!(enc(t)));
+                    }
+                    if !draft.uris.is_empty() {
+                        let uris: Vec<Value> = draft
+                            .uris
+                            .iter()
+                            .map(|u| json!({"uri": enc(u), "match": null}))
+                            .collect();
+                        login.insert("uris".into(), json!(uris));
+                    }
                 }
                 if !login.is_empty() {
                     c["login"] = Value::Object(login);
@@ -1127,5 +1187,67 @@ mod tests {
     async fn auto_drain_round_resets_when_idle() {
         let (hub, _d) = unlocked_hub("ad2").await;
         assert_eq!(hub.auto_drain_round(5).await, 0);
+    }
+
+    /// 三件套 create 線格式（官方兼容硬證據的單元層）：SecureNote（type 2）
+    /// 不帶 login、folderId 明文 UUID 入鏡像、fields[] 帶 type/linkedId；
+    /// hidden→type 1。欄值以 user key 信封往復。
+    #[tokio::test]
+    async fn encrypt_draft_emits_official_wire_shape() {
+        let (hub, _d) = unlocked_hub("wire").await;
+        let folder = Uuid::new_v4().to_string();
+        let draft = CipherDraft {
+            kind: bw_proto::ItemKind::SecureNote,
+            name: "筆記".into(),
+            notes: Some("內文".into()),
+            folder_id: Some(folder.clone()),
+            fields: vec![
+                bw_proto::CipherField {
+                    name: "PIN".into(),
+                    value: Some("1234".into()),
+                    hidden: true,
+                },
+                bw_proto::CipherField {
+                    name: "網站".into(),
+                    value: None,
+                    hidden: false,
+                },
+            ],
+            username: Some("note 不該有 login".into()),
+            ..Default::default()
+        };
+        let cipher = hub.encrypt_draft(&draft, None).unwrap();
+        assert_eq!(cipher["type"], json!(2));
+        assert!(cipher.get("login").is_none(), "type 2 官方線格式不帶 login");
+        assert_eq!(cipher["folderId"], json!(&folder));
+        let f0 = &cipher["fields"][0];
+        assert_eq!(f0["type"], json!(1), "hidden→type 1");
+        assert!(f0["linkedId"].is_null());
+        let user = hub
+            .machine
+            .with_keys(|kb| kb.user_key().as_bytes().to_vec())
+            .unwrap();
+        assert_eq!(
+            dec(&user, f0["name"].as_str().unwrap()).as_deref(),
+            Some("PIN")
+        );
+        assert_eq!(
+            dec(&user, f0["value"].as_str().unwrap()).as_deref(),
+            Some("1234")
+        );
+        assert!(cipher["fields"][1]["value"].is_null(), "空值欄 value=null");
+    }
+
+    /// 非 UUID 的 folder_id 在入列前擋下（鏡像 folderId 只收合法 UUID 字串）。
+    #[tokio::test]
+    async fn create_rejects_non_uuid_folder() {
+        let (hub, _d) = unlocked_hub("badfolder").await;
+        let draft = CipherDraft {
+            name: "x".into(),
+            folder_id: Some("not-a-uuid".into()),
+            ..Default::default()
+        };
+        let err = hub.write_create("s", &draft).await.unwrap_err();
+        assert!(matches!(err, WtpError::Denied { .. }), "{err:?}");
     }
 }

@@ -12,8 +12,13 @@
 //! | `totp` | `$.login.totp` | 同上 |
 //! | `favorite` | `$.favorite` | 明碼布林，值域 `"true"`/`"false"`；`None` → `false` |
 //! | `uri.<n>` | `$.login.uris[<n>].uri` | `<n>` 為 0 起索引；**越界回錯**（增刪 uri 是整陣列替換的 ops，不在此路徑） |
-//! | `field.<id>.name` | `$.fields[id==<id>].name` | `<id>` 比對 `fields[].id`（字串或數字都接受，轉字串比） |
-//! | `field.<id>.value` | `$.fields[id==<id>].value` | 找不到該 id → 回錯 |
+//! | `folderId` | `$.folderId` | 明文 UUID 字串（同 favorite 不落佔位）；`None` → `null`＝移出資料夾 |
+//! | `field.<id>.name` | `$.fields[i].name`（`fields[i].id == <id>`） | `<id>` 比對 `fields[].id`（字串或數字都接受，轉字串比） |
+//! | `field.<id>.value` | `$.fields[i].value`（同上） | 找不到該 id → 回錯 |
+//!
+//! `field.<n>.*` 亦接受**純數字索引**形態（`<n>` 為 0 起 `fields[]` 索引）：
+//! 官方 fields[] 本無 id 欄（jslib 以索引定址），鏡像若無 id 就以索引落點；
+//! id 比對優先於索引（兩態都合法的伺服器不死）。越界回錯，同 `uri.<n>` 紀律。
 //!
 //! 為什麼放佔位字串而不是明文：本層不做加密（不持金鑰，不變量 1）。呼叫端
 //! daemon 在 `with_keys` 閉包內把 `placeholder_for(path)` 換成信封
@@ -45,6 +50,7 @@ enum Path<'a> {
     Password,
     Totp,
     Favorite,
+    FolderId,
     Uri(u32),
     FieldName(&'a str),
     FieldValue(&'a str),
@@ -58,6 +64,7 @@ fn parse_path(raw: &str) -> Result<Path<'_>, String> {
         "password" => return Ok(Path::Password),
         "totp" => return Ok(Path::Totp),
         "favorite" => return Ok(Path::Favorite),
+        "folderId" => return Ok(Path::FolderId),
         _ => {}
     }
     if let Some(rest) = raw.strip_prefix("uri.") {
@@ -165,6 +172,13 @@ pub fn build_put_body(
                     .ok_or_else(|| json_err(format!("uri.{n}: entry is not an object")))?;
                 e.insert("uri".to_owned(), opt_value(value, &slot));
             }
+            Path::FolderId => {
+                // 明文 UUID 欄（伺服器不加密）：直接落值，不落佔位字串。
+                match value {
+                    Some(v) => root.insert("folderId".to_owned(), Value::String(v.clone())),
+                    None => root.insert("folderId".to_owned(), Value::Null),
+                };
+            }
             Path::FieldName(id) | Path::FieldValue(id) => {
                 let key = if matches!(p, Path::FieldName(_)) {
                     "name"
@@ -177,12 +191,17 @@ pub fn build_put_body(
                 let arr = fields
                     .as_array_mut()
                     .ok_or_else(|| json_err(format!("field.{id}: fields is not an array")))?;
-                let entry = arr
-                    .iter_mut()
-                    .find(|f| f.get("id").is_some_and(|i| id_of(i).as_deref() == Some(id)))
-                    .ok_or_else(|| {
-                        json_err(format!("field.{id}: no field with id {id:?} in theirs"))
-                    })?;
+                // id 比對優先；官方 fields[] 無 id 欄時退回 0 起索引定址。
+                let hit = arr
+                    .iter()
+                    .position(|f| f.get("id").is_some_and(|i| id_of(i).as_deref() == Some(id)));
+                let entry = match hit {
+                    Some(i) => arr.get_mut(i),
+                    None => id.parse::<usize>().ok().and_then(|n| arr.get_mut(n)),
+                }
+                .ok_or_else(|| {
+                    json_err(format!("field.{id}: no field with id/index {id:?} in theirs"))
+                })?;
                 let e = entry
                     .as_object_mut()
                     .ok_or_else(|| json_err(format!("field.{id}: entry is not an object")))?;
@@ -431,6 +450,42 @@ mod tests {
     fn theirs_must_be_an_object() {
         assert!(build_put_body(&json!([]), &BTreeMap::new()).is_err());
         assert!(build_put_body(&json!("x"), &BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn folder_id_lands_plaintext_or_null() {
+        // folderId 是明文欄（同 favorite）：直接落值不落佔位；None → null。
+        let m = merged(&[("folderId", Some("6f1a2b34-0000-4000-8000-0000000000aa"))]);
+        let out = build_put_body(&theirs(), &m).unwrap();
+        assert_eq!(
+            out["folderId"],
+            json!("6f1a2b34-0000-4000-8000-0000000000aa")
+        );
+        let clear = build_put_body(&theirs(), &merged(&[("folderId", None)])).unwrap();
+        assert_eq!(clear["folderId"], Value::Null);
+    }
+
+    #[test]
+    fn field_index_addresses_idless_fields() {
+        // 官方 fields[] 無 id 欄：純數字索引直接定址（本專案鏡像的主要形態）。
+        let idless = json!({
+            "name": "2.n|n|n",
+            "fields": [
+                { "name": "2.a|a|a", "value": "2.b|b|b", "linkedId": null, "type": 0 },
+                { "name": "2.c|c|c", "value": null, "linkedId": null, "type": 1 }
+            ]
+        });
+        let m = merged(&[("field.1.value", Some("secret"))]);
+        let out = build_put_body(&idless, &m).unwrap();
+        assert_eq!(out["fields"][1]["value"], json!(placeholder_for("field.1.value")));
+        assert_eq!(out["fields"][0]["value"], "2.b|b|b", "只動 index 1");
+        assert_eq!(out["fields"][1]["type"], json!(1), "type/linkedId 不被碰");
+        // 越界回錯（同 uri.<n>：增刪欄位是整陣列替換）
+        assert!(build_put_body(&idless, &merged(&[("field.2.value", Some("x"))])).is_err());
+        // id 比對優先於索引：混形態鏡像以 id 命中為準
+        let m = merged(&[("field.0.name", Some("renamed"))]);
+        let out = build_put_body(&theirs(), &m).unwrap();
+        assert_eq!(out["fields"][0]["name"], json!(placeholder_for("field.0.name")));
     }
 
     #[test]
