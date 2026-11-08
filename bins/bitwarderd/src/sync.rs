@@ -287,7 +287,7 @@ impl Hub {
                         .map(|f| {
                             json!({
                                 "name": enc(&f.name),
-                                "value": f.value.as_deref().map(&enc),
+                                "value": f.value.as_deref().map(enc),
                                 "linkedId": null,
                                 "type": if f.hidden { 1 } else { 0 },
                             })
