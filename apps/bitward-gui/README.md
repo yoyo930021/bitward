@@ -33,11 +33,12 @@ cd apps/bitward-gui
 BITWARD_GUI_SOCK=<repo>/dev/e2e/demo/s NSH_GUI_SHOTS=$PWD nsh run --target macos
 ```
 
-依指令序列跑完整驗收流並寫 `shot-1..15-*.png` 後退出：列表（搜尋
-"GitHub"）→ 詳情遮罩 → 詳情 revealed → 新增表單模態 → 真送新增（Create+AddTag）
+依指令序列跑完整驗收流並寫 `shot-1..16-*.png` 後退出：列表（搜尋
+"GitHub"，右欄空態為「選取一個項目」佔位）→ 詳情遮罩 → 詳情 revealed → 新增表單模態 → 真送新增（Create+AddTag）
 → TOTP 拒絕路徑（無 seed → 錯誤橫條）→ 排序下拉 → 標籤 chips 選取 →
 編輯改名（Patch）→ 刪除確認框 → 取消不刪斷言 → 刪除後空列表 →
-鎖態頁（已鎖定+解鎖鈕）→ 解鎖 → 匯出確認框（未加密提醒）→ 匯出完成提示列。
+鎖態頁（已鎖定+解鎖鈕）→ 解鎖 → 匯出確認框（未加密提醒）→ 匯出完成提示列 →
+選取態（清搜尋、開詳情；選中列提亮＋左 3px accent 條）。
 
 注意：流裡會真寫 demo vault（建一筆 "E2E 驗證項目"、改名、軟刪；
 詳情目標是種子項目「GitHub 測試」，找不到退回第一筆）。跑前用

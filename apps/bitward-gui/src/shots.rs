@@ -147,7 +147,7 @@ fn at(ms: u64, f: impl FnOnce() + 'static) {
 
 /// 開窗後依序跑完整驗收流：列表（搜尋）→ 詳情遮罩 → revealed → 新增表單
 /// 模態 → 提交新增 → 編輯改名 → 刪除確認（先取消斷言、再確認）→
-/// 匯出確認 → 鎖態頁/解鎖，各步存一張 shot-N-*.png 後結束行程。時序裕量對齊
+/// 匯出確認 → 鎖態頁/解鎖 → 選取態，各步存一張 shot-N-*.png 後結束行程。時序裕量對齊
 /// spike（Background
 /// session 無 vsync 可等，固定 sleep；本地 daemon 往返 <50ms）。
 /// 詳情目標用驗收種子項目「GitHub 測試」，找不到退回第一筆。
@@ -295,7 +295,22 @@ pub fn script(dir: PathBuf, core: AppCore) {
     at(23300, move || c.send(Cmd::ConfirmYes));
     let d = dir.clone();
     at(25500, move || capture(&d, "shot-15-export-done.png"));
-    at(26100, move || {
+
+    // —— 選取態：清搜尋、開詳情，證據為選中列提亮＋左 3px accent 條 ——
+    let c = core.clone();
+    at(25900, move || {
+        c.query.set(String::new());
+        c.send(Cmd::RefetchList);
+    });
+    let c = core.clone();
+    at(26300, move || {
+        if let Some(id) = find_id(&c, "GitHub 測試") {
+            c.send(Cmd::OpenDetail(id));
+        }
+    });
+    let d = dir.clone();
+    at(27200, move || capture(&d, "shot-16-selected.png"));
+    at(27800, move || {
         on_main(|| {
             #[cfg(target_os = "macos")]
             {

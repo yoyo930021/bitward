@@ -295,7 +295,7 @@ fn split(core: AppCore) -> View {
                             if matches!(loading_cond.route.get(), Route::Detail(_)) {
                                 detail::loading()
                             } else {
-                                view().flex_1()
+                                detail::placeholder()
                             }
                         })),
                 ),

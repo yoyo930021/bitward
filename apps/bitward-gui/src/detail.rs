@@ -54,6 +54,40 @@ pub fn loading() -> View {
         )
 }
 
+/// 右欄未選取時的佔位：淡 monogram 圖示＋置中大字＋次要說明。
+pub fn placeholder() -> View {
+    view()
+        .flex_1()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap_3()
+        .child(
+            view()
+                .w(px(64.0))
+                .h(px(64.0))
+                .rounded(px(16.0))
+                .border(px(1.0))
+                .border_color(theme::HAIRLINE)
+                .bg(theme::SURFACE)
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .child(text("🔑").text_size(px(28.0))),
+        )
+        .child(
+            text("選取一個項目")
+                .text_size(px(20.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::TEXT_MUTED),
+        )
+        .child(
+            text("或按＋新增建立新項目")
+                .text_size(px(13.0))
+                .text_color(theme::TEXT_MUTED),
+        )
+}
+
 fn section(title: &'static str, rows: Vec<View>) -> View {
     let mut rows_box = view()
         .flex_col()
