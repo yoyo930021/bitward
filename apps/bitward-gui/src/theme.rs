@@ -1,4 +1,4 @@
-//! 設計 tokens：視圖層唯一的顏色真相源。所有新外觀只从这里取值，
+//! 設計 tokens：視圖層唯一的顏色與尺寸真相源。所有新外觀只从这里取值，
 //! 散落 hex 視為代碼壞味道。語意命名（base/surface/elevated…），
 //! 不跟 nsh theme() 的 shadcn 語意混用——本 app 強制定位暗色，
 //! 每個 token 的 light/dark 兩槽同值，系統外觀切換不影響截圖一致性。
@@ -61,6 +61,51 @@ pub const TEXT_PRIMARY: AdaptiveColor = white_alpha(0.92);
 pub const TEXT_SECONDARY: AdaptiveColor = white_alpha(0.62);
 /// 弱化文字／節標題（40% 白）。
 pub const TEXT_MUTED: AdaptiveColor = white_alpha(0.40);
+
+// —— 密度 tokens（緊湊規格：尺寸與字級的唯一出處，禁散落魔數） ——
+
+/// 列表列高（雙行 13.5＋11.5 加 2px 行距仍容納）。
+pub const ROW_H: f32 = 38.0;
+/// 列表 monogram：邊長／圓角／字級。
+pub const MONOGRAM_ROW: f32 = 26.0;
+pub const MONOGRAM_ROW_RADIUS: f32 = 8.0;
+pub const MONOGRAM_ROW_TEXT: f32 = 11.0;
+/// 詳情 identity monogram：邊長／圓角／字級（佔位卡圖示同尺等比）。
+pub const MONOGRAM_ID: f32 = 44.0;
+pub const MONOGRAM_ID_RADIUS: f32 = 12.0;
+pub const MONOGRAM_ID_TEXT: f32 = 16.0;
+/// 列表主行／副行字級（15→13.5、12.5→11.5）。
+pub const TEXT_ROW: f32 = 13.5;
+pub const TEXT_ROW_SUB: f32 = 11.5;
+/// 頁面大標題與副行字級（28→22、13→12）。
+pub const TEXT_PAGE_TITLE: f32 = 22.0;
+pub const TEXT_PAGE_SUB: f32 = 12.0;
+/// 詳情 identity 名稱字級（22→17）。
+pub const TEXT_IDENTITY: f32 = 17.0;
+/// 詳情欄位列同行制：label／value 字級與 label 欄寬。
+pub const TEXT_FIELD_LABEL: f32 = 12.0;
+pub const TEXT_FIELD_VALUE: f32 = 13.5;
+pub const FIELD_LABEL_W: f32 = 120.0;
+/// 詳情欄位列高（1Password 式緊湊行）。
+pub const FIELD_H: f32 = 34.0;
+/// 複製鈕邊長（26→20）。
+pub const COPY_BTN: f32 = 20.0;
+/// 輸入框族高度：搜尋框／模態欄位／下拉鈕（44→34）。
+pub const INPUT_H: f32 = 34.0;
+/// 標籤 chips 列高（28 減 20%）。
+pub const CHIP_H: f32 = 22.0;
+/// 小號狀態膠囊（待推送）：高與字級。
+pub const BADGE_H: f32 = 16.0;
+pub const TEXT_BADGE: f32 = 11.0;
+/// 模態欄距（16 減 25%）。
+pub const FORM_GAP: f32 = 12.0;
+/// 標題區頂部／底部留白（20、16 各減 1/3）。
+pub const HEADER_PT: f32 = 13.0;
+pub const HEADER_PB: f32 = 11.0;
+/// 置中卡（鎖態／佔位／連線失敗）標題字級與 glyph 尺寸（等比縮小）。
+pub const TEXT_CARD_TITLE: f32 = 15.0;
+pub const GLYPH_LOCK: f32 = 28.0;
+pub const GLYPH_KEY: f32 = 20.0;
 
 // —— monogram 派生色 ——
 
