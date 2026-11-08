@@ -372,7 +372,9 @@ DER/hash 直簽修復生效）。本輪新增的實測坑：
   另抓出腳本本體無聲早逝根因：`set -euo pipefail` 下 `P8=$(ls 缺glob… | head -1)`
   的 ls 非零狀態會經 pipefail 傳到賦值行斃掉整段（notarytool 根本沒跑）——已加
   `|| true` 包護（實測：修後公證段正常送出）。
-- **公證**：notarytool 提交 `f68de3c4-8f49-4e62-aed1-f005398bdd15`（signed pkg，
+- **公證**：最終產物（嵌 VBX7P3TXC9 的 direct pkg）管線內提交
+  `973ed2ce-ca63-4bdd-8fc4-a7c55a9727a0`；先前 `f68de3c4-8f49-4e62-aed1-f005398bdd15`
+  （signed pkg，
   Developer ID Installer＋時間戳），收案時仍 In Progress；bg 收單迴圈會自動
   `stapler staple`＋`spctl -a -t install`（注意：該提交對像為嵌 profile 前位元組，
   ticket 只對舊摘要有效——最終產物以管線內重跑為準，見上條根因修正）。
