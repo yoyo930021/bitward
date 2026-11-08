@@ -170,17 +170,17 @@ fn header(core: AppCore) -> View {
     view()
         .flex_row()
         .items_center()
-        .gap_4()
+        .gap_3()
         .px_6()
-        .pt_5()
-        .pb_4()
+        .pt(px(theme::HEADER_PT))
+        .pb(px(theme::HEADER_PB))
         .child(
             view()
                 .flex_col()
                 .gap_0p5()
                 .child(
                     text("密碼庫")
-                        .text_size(px(28.0))
+                        .text_size(px(theme::TEXT_PAGE_TITLE))
                         .font_weight(FontWeight::SEMIBOLD)
                         .letter_spacing(px(0.5))
                         .text_color(theme::TEXT_PRIMARY),
@@ -203,7 +203,7 @@ fn header(core: AppCore) -> View {
                                     None => format!("{n} 筆項目 · 連線中"),
                                 }
                             })
-                            .text_size(px(13.0))
+                            .text_size(px(theme::TEXT_PAGE_SUB))
                             .text_color(theme::TEXT_SECONDARY),
                         )
                         .child(when(
@@ -282,7 +282,7 @@ fn split(core: AppCore) -> View {
                         .flex_col()
                         .border_r(px(1.0))
                         .border_color(theme::HAIRLINE)
-                        .pt_3()
+                        .pt_2()
                         .child(list::panel(core.clone())),
                 )
                 .child(

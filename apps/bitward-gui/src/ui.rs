@@ -346,18 +346,18 @@ pub fn monogram(
         )
 }
 
-/// 小膠囊徽章（待推送/提示）；前景背景色由呼叫端給 tokens。
+/// 小號膠囊徽章（待推送/提示）；前景背景色由呼叫端給 tokens。
 pub fn badge(label: &'static str, fg: AdaptiveColor, bg: AdaptiveColor) -> View {
     view()
-        .h(px(20.0))
-        .px_2()
+        .h(px(theme::BADGE_H))
+        .px_1p5()
         .rounded_full()
         .flex_row()
         .items_center()
         .bg(bg)
         .child(
             text(label)
-                .text_size(px(11.0))
+                .text_size(px(theme::TEXT_BADGE))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(fg),
         )

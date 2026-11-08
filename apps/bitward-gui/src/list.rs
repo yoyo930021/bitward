@@ -24,9 +24,9 @@ pub fn toolbar(core: AppCore) -> View {
     let sort_build = core.clone();
     view()
         .flex_col()
-        .gap_2()
+        .gap_1p5()
         .px_6()
-        .pt_4()
+        .pt_2p5()
         .child(
             view()
                 .flex_row()
@@ -47,8 +47,8 @@ pub fn toolbar(core: AppCore) -> View {
                                     search_core.query.set(text.to_owned());
                                     search_core.send(Cmd::RefetchList);
                                 })
-                                .h_10()
-                                .pl(px(40.0))
+                                .h(px(theme::INPUT_H))
+                                .pl(px(34.0))
                                 .pr_3()
                                 .rounded_xl()
                                 .border(px(1.0))
@@ -65,13 +65,13 @@ pub fn toolbar(core: AppCore) -> View {
                                 .top_0()
                                 .bottom_0()
                                 .left_0()
-                                .w(px(40.0))
+                                .w(px(34.0))
                                 .flex_row()
                                 .items_center()
                                 .justify_center()
                                 .child(
                                     text("⌕")
-                                        .text_size(px(17.0))
+                                        .text_size(px(15.0))
                                         .text_color(theme::TEXT_MUTED),
                                 ),
                         ),
@@ -156,8 +156,8 @@ fn chip_dyn(
     let sel_border = selected.clone();
     let sel_text = selected;
     view()
-        .h(px(28.0))
-        .px_3()
+        .h(px(theme::CHIP_H))
+        .px_2p5()
         .rounded_full()
         .flex_row()
         .items_center()
@@ -202,7 +202,7 @@ fn filter_button(
     on_press: impl Fn() + 'static,
 ) -> View {
     view()
-        .h_9()
+        .h(px(theme::INPUT_H))
         .px_3()
         .rounded_full()
         .flex_row()
@@ -251,7 +251,7 @@ fn sort_panel(core: AppCore) -> View {
     view().child(ui::card(rows).w(px(220.0)))
 }
 
-/// 列表本體（左欄）：56px 列、選中列提亮＋左 3px accent 條。
+/// 列表本體（左欄）：38px 緊湊列、選中列提亮＋左 3px accent 條。
 pub fn panel(core: AppCore) -> impl IntoElement {
     let count_core = core.clone();
     let keys_core = core.clone();
@@ -272,7 +272,7 @@ pub fn panel(core: AppCore) -> impl IntoElement {
     .separator(move || {
         view()
             .h(px(1.0))
-            .ml(px(75.0))
+            .ml(px(65.0))
             .mr_4()
             .bg(theme::HAIRLINE)
     })
@@ -292,7 +292,7 @@ pub fn panel(core: AppCore) -> impl IntoElement {
     )
 }
 
-/// 列高 56pt：monogram 36＋雙行文字；右側只放狀態膠囊（待推送）與星。
+/// 列高 38：monogram 26＋雙行緊湊文字；右側只放狀態膠囊（待推送）與星。
 fn row(core: AppCore, at: Position) -> View {
     let press_core = core.clone();
     let name_core = core.clone();
@@ -303,7 +303,7 @@ fn row(core: AppCore, at: Position) -> View {
     let sel_bar = core.clone();
     view()
         .relative()
-        .h(px(56.0))
+        .h(px(theme::ROW_H))
         .pl_6()
         .pr_4()
         .flex_row()
@@ -348,9 +348,9 @@ fn row(core: AppCore, at: Position) -> View {
                     .get(at.index())
                     .and_then(|v| v.meta.name.clone())
             },
-            36.0,
-            10.0,
-            14.0,
+            theme::MONOGRAM_ROW,
+            theme::MONOGRAM_ROW_RADIUS,
+            theme::MONOGRAM_ROW_TEXT,
         ))
         .child(
             view()
@@ -366,7 +366,7 @@ fn row(core: AppCore, at: Position) -> View {
                             .map(|v| v.meta.name.clone().unwrap_or_else(|| "(未命名)".to_owned()))
                             .unwrap_or_default()
                     })
-                    .text_size(px(15.0))
+                    .text_size(px(theme::TEXT_ROW))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme::TEXT_PRIMARY)
                     .number_of_lines(1),
@@ -380,7 +380,7 @@ fn row(core: AppCore, at: Position) -> View {
                             .map(subtitle)
                             .unwrap_or_default()
                     })
-                    .text_size(px(12.5))
+                    .text_size(px(theme::TEXT_ROW_SUB))
                     .text_color(theme::TEXT_SECONDARY)
                     .number_of_lines(1),
                 ),
@@ -389,7 +389,7 @@ fn row(core: AppCore, at: Position) -> View {
             view()
                 .flex_row()
                 .items_center()
-                .gap_2()
+                .gap_1p5()
                 .child(
                     text(move || {
                         if fav_core
