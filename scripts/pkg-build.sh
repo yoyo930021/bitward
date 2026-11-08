@@ -13,6 +13,9 @@
 #                    App 去 app-sandbox、BundleProgram 指回裸二進位、剝 dev profile）。
 #   BW_NOTARIZE=1    notarytool 真公證＋staple＋spctl 斷言（需 BW_APPLE_API_KEY /
 #                    BW_APPLE_API_ISSUER；p8 找 ~/private_keys、~/.asc/keys）。
+#   BW_PROFILE       Developer ID（MAC_APP_DIRECT）.provisionprofile 路徑；設了就嵌進
+#                    App（受限 entitlements 授權用；appex 屬另一 App ID、維持剝除，
+#                    provider 真機填充另產 BitwardProvider 直裝 profile）。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO=$PWD
@@ -90,10 +93,18 @@ codesign -f -s "$IDENTITY" $CS_RUNTIME -i io.bitward.dev.daemon --entitlements b
 # Developer ID 批次：appex 也要同身分重簽（公證要求全部嵌套 code 皆 Developer ID＋
 # 時間戳＋hardened runtime；Xcode 留 Apple Development 會被 notarytool 打回），
 # 並剝掉對直裝無意義的 Apple Development profile（殭屍 profile 保險）。
+# BW_PROFILE=<path.provisionprofile>（MAC_APP_DIRECT，含 App Groups）→ 改嵌該 profile
+# 進 App＋appex（沙盒形態 group.* 需 profile 授權時用；裸二進位無法嵌 profile，
+# TN3125 正解＝BitwardDaemon.app 包殼，direct 分叉不需要它）。
 APPEX="$STAGE/root/Bitward.app/Contents/PlugIns/BitwardProvider.appex"
 if [ "$IS_DEVID" = 1 ]; then
-  rm -f "$STAGE/root/Bitward.app/embedded.provisionprofile" \
-        "$APPEX/embedded.provisionprofile"
+  if [ -n "${BW_PROFILE:-}" ]; then
+    cp -f "$BW_PROFILE" "$STAGE/root/Bitward.app/Contents/embedded.provisionprofile"
+    rm -f "$APPEX/Contents/embedded.provisionprofile"
+  else
+    rm -f "$STAGE/root/Bitward.app/Contents/embedded.provisionprofile" \
+          "$APPEX/Contents/embedded.provisionprofile"
+  fi
   codesign -f -s "$IDENTITY" $CS_RUNTIME \
     --entitlements platforms/macos/BitwardProvider/BitwardProvider.entitlements \
     "$APPEX/Contents/MacOS/BitwardProvider"

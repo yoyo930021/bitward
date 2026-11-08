@@ -354,3 +354,57 @@ DER/hash 直簽修復生效）。本輪新增的實測坑：
   demo daemon（pid 8934）活著，但 group `daemon.sock` 檔案現指向已死的
   手動實例 inode（我實測綁定權限所留），**重啟 demo daemon 才能恢復 group sock
   服務**（使用者方便時）。readpath／pushpath e2e 全綠（未沙盒 dev 形態不受影響）。
+
+## 11. Developer ID 正式憑證批次（2026-11-08，G2 兩分叉復測）
+- **管線參數化（契約 1，commit 4d73c37）**：`BW_SIGN_ID`／`BW_INSTALLER_ID`／
+  `BW_FORM=sandbox|direct`／`BW_NOTARIZE`／`BW_PROFILE`（見腳本頭註解）。預設路徑
+  （Mac Developer＋沙盒＋降未簽 pkg）全管線綠；`dev/e2e/signing.sh`（6cfcb09）
+  為可重跑斷言（逐 Mach-O 身分／hardened／profile 剝除／pkg EKU／staple／spctl）。
+- **鑰匙圈牆與解法**：p12 導入的舊 DP key bag「devid」ACL 只放行 `apple-tool:`，
+  codesign 每發彈「想存取鑰匙圈中的密碼『devid』」——空密碼按「允許」無效會循環
+  重彈（實測）；無簽章 CLI 摸不到 DP 項（SecItemDelete → -34018）、macOS 27
+  Keychain Access.app 是無視窗空殼、`set-key-partition-list` 需登入密碼。**正解＝
+  專用 signing keychain**：`/tmp/devid/signing.keychain-db`（`-A` 開放 ACL 導入
+  cert＋PEM 鑰、`set-keychain-settings -t 0` 免自動鎖、放 search list 頭），
+  codesign／productsign 全程免彈（productsign log 實拍 `from keychain
+  /private/tmp/devid/signing.keychain-db`）。密碼在 `/tmp/devid/kcpass`——**交付：
+  鑰匙圈＋kcpass＋profile 搬到 ~/.asc/keys 並清 /tmp**（含 /tmp/devid/*.key 私鑰）。
+- **公證**：notarytool 提交 `f68de3c4-8f49-4e62-aed1-f005398bdd15`（signed pkg，
+  Developer ID Installer＋時間戳），收案時仍 In Progress；bg 收單迴圈會自動
+  `stapler staple`＋`spctl -a -t install`（管線內 BW_NOTARIZE 段在受管 service
+  環境 notarytool 無聲 exit 1，同 argv 一般 shell 正常——harness 環境嫌疑，非腳本）。
+- **契約 2 判定：Developer ID 直裝要不要 profile？→ App 要，但原因不是 App Groups**：
+  無 profile 的 direct 產物 `open` 即 INIT 163（launchd spawn 拒）；TN3125 明列
+  `com.apple.security.application-groups` 在 macOS 屬 unrestricted（裸 helper 免
+  profile），真正把 App 打死的是 `keychain-access-groups`＋
+  `com.apple.developer.authentication-services.autofill-credential-provider`
+  （restricted）。解法已入管線：`asc --profile lamys`（API key 走檔案、避鑰匙圈框）
+  `profiles create --profile-type MAC_APP_DIRECT --bundle XNW6LLZJU7（resource id，
+  非 reverse-DNS）--certificate N2D9VUTK75` → 「Bitward Developer ID」**VBX7P3TXC9**
+  （到期 2044-11-03；allowlist 含 group.8V5224A99M.io.bitward.dev、8V5224A99M.*
+  keychain、autofill provider、aps production）→ `BW_PROFILE` 嵌 App 重簽 →
+  **INIT 163 解除、App 正常啟動（實測）**。appex 屬另一 App ID（io.bitward.dev.provider）
+  需另產同型 profile（provider 真機填充前置；不影響 register/spawn）。
+- **G2 direct 分叉終態（本批止步點）**：register 仍被 smd 拒
+  「target executable must be sandboxed because the app is sandboxed」——但程序實測
+  **非沙盒**（`ps -E` HOME＝真 home、簽章 entitlements 無 app-sandbox）。判定＝
+  **BTM store 殭屍 record 污染**：舊 record 帶 Mac Developer requirement 串
+  （strings 實拍），新 bundle 的 unregister 報 record not found（log 實拍）清不到它。
+  移開 `~/Library/Containers/io.bitward.dev`（→ `.bak-directfork`）無改善。
+  **交付指令（需使用者）**：重登入 → `open -a Bitward` → 狀態頁按「啟用」→
+  `launchctl print gui/501/io.bitward.dev.daemon` 有 job＝殭屍 record 假說成立、
+  direct 分叉閉環；仍拒→ `sudo` 清 `/var/db/com.apple.backgroundtaskmanagement/
+  BackgroundItems-v18*.btm` 或查 taskgated log 的「no eligible provisioning
+  profiles」是否對裸 helper 復現（application-groups 屬 unrestricted，預期不復現）。
+- **沙盒分叉（MAS 形態）正式簽章復測**：本批未跑（預算界）；指令就緒：
+  `BW_SIGN_ID=152E4509D92E1F1CDC884E0D7A022A2F0F224B1D BW_INSTALLER_ID=AECAA36E20943AEA428C9643643DAD2C1D5459BD BW_FORM=sandbox BW_PROFILE=/tmp/devid/bitward-devid.provisionprofile bash scripts/pkg-build.sh`。
+  預期過 smd 沙盒連鎖閘（目標已是沙盒 daemon.app），下一牆仍是沙盒 unix-bind
+  group sock（§10 seatbelt 判定，形態無關）。
+- **APNs（契約 3）**：`asc web sign-in-keys list` → portal auth keys **空**；
+  create 僅支援 Sign in with Apple 型——**無 asc 產 APNs「Signing key for
+  provider」路徑**，上架批次需 portal UI 產製（daemon 端 BW_APNS_* 注入已由
+  pushpath e2e 驗證）。
+- **本機收尾**：/Applications＝direct 產物（Developer ID＋VBX7P3TXC9＋裸 helper
+  BundleProgram）；SMAppService 未註冊（殭屍 record）；demo daemon 現為 pid 51819
+  （8934 已沒），其 group `daemon.sock` 路徑被我 unlink（清殭屍 sock 時誤判其已死），
+  重登／重啟 daemon 即重建。readpath／pushpath 全綠。
