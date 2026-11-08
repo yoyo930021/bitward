@@ -389,7 +389,8 @@ DER/hash 直簽修復生效）。本輪新增的實測坑：
   （到期 2044-11-03；allowlist 含 group.8V5224A99M.io.bitward.dev、8V5224A99M.*
   keychain、autofill provider、aps production）→ `BW_PROFILE` 嵌 App 重簽 →
   **INIT 163 解除、App 正常啟動（實測）**。appex 屬另一 App ID（io.bitward.dev.provider）
-  需另產同型 profile（provider 真機填充前置；不影響 register/spawn）。
+  需另產同型 profile——已產「BitwardProvider Developer ID」**NCH33X5839**（ACTIVE），
+  管線 `BW_PROFILE_APPEX` 嵌 appex 鉤子同批落地（commit f2b7e16）。
 - **G2 direct 分叉終態（本批止步點）**：register 仍被 smd 拒
   「target executable must be sandboxed because the app is sandboxed」——但程序實測
   **非沙盒**（`ps -E` HOME＝真 home、簽章 entitlements 無 app-sandbox）。判定＝
