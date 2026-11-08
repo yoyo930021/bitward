@@ -321,7 +321,10 @@ impl Hub {
                         login.insert("uris".into(), json!(uris));
                     }
                 }
-                if !login.is_empty() {
+                if !login.is_empty() || draft.kind != bw_proto::ItemKind::SecureNote {
+                    // 純名稱 Login 也恆帶 "login":{}——VW 對 type 1 缺 login 物件回
+                    // 400 "Data missing"（2026-11-09 實錄：drain 建無密碼項目 dead；
+                    // jslib create 同形）。
                     c["login"] = Value::Object(login);
                 }
                 c
@@ -1247,6 +1250,19 @@ mod tests {
             Some("1234")
         );
         assert!(cipher["fields"][1]["value"].is_null(), "空值欄 value=null");
+
+        // 純名稱 Login（無帳密/uris）：VW 仍要求 login 物件，缺它 POST 回
+        // 400 "Data missing"（2026-11-09 實錄）——恆帶空 {}。
+        let bare = CipherDraft {
+            name: "只有名字".into(),
+            ..Default::default()
+        };
+        let cipher2 = hub.encrypt_draft(&bare, None).unwrap();
+        assert_eq!(cipher2["type"], json!(1));
+        assert!(
+            cipher2["login"].is_object(),
+            "type 1 恆帶 login 物件（可為空 {{}}）"
+        );
     }
 
     /// 非 UUID 的 folder_id 在入列前擋下（鏡像 folderId 只收合法 UUID 字串）。
