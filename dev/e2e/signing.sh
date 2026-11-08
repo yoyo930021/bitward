@@ -5,6 +5,7 @@
 #   dev/e2e/signing.sh                       # 預設：Mac Developer 防呆形態（沙盒主線）
 #   BW_EXPECT=devid dev/e2e/signing.sh       # Developer ID 形態：全嵌套同身分＋hardened
 #                                            # ＋時間戳＋（公證跑過才查）staple/spctl
+#   BW_NOTARIZED=0 …                         # 本批跳公證（省隊列）：devid 缺 ticket 判 ok 不判 fail
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 REPO=$PWD
@@ -41,15 +42,23 @@ find "$APP" -type f \( -path '*/MacOS/*' -o -path '*/Helpers/*' \) | while read 
 done
 codesign --verify --deep --strict "$APP" && ok "bundle 深驗通過（含 appex/helper/daemon）"
 
-echo "==> 2. Developer ID 專屬：無殘留 profile＋時間戳"
+echo "==> 2. Developer ID 專屬：無 Apple Development 殘留＋時間戳"
 if [ "$EXPECT" = devid ]; then
-  [ ! -f "$APP/Contents/embedded.provisionprofile" ] \
-    || fail "Contents 仍嵌 Apple Development profile（直裝批次應剝除）"
-  [ ! -f "$APP/Contents/PlugIns/BitwardProvider.appex/Contents/embedded.provisionprofile" ] \
-    || fail "appex 仍嵌 dev profile"
-  codesign -dvv "$APP/Contents/MacOS/Bitward" 2>&1 | grep -q 'TeamIdentifier=8V5224A99M' \
-    || fail "TeamIdentifier 不符"
-  ok "dev profile 已剝、team 綁定正確"
+  # §11 判定：direct 形態必要嵌 Developer ID（MAC_APP_DIRECT）profile——殭屍保險
+  # 的真正對象是 Apple Development 殘留（對直裝無意義、INIT 163 元兇），改判類型。
+  for P in "$APP/Contents/embedded.provisionprofile" \
+           "$APP/Contents/PlugIns/BitwardProvider.appex/Contents/embedded.provisionprofile"; do
+    [ -f "$P" ] || continue
+    security cms -D -i "$P" 2>/dev/null | plutil -extract ProvisionsAllDevices raw -o - - 2>/dev/null | grep -q true \
+      || fail "$P 非 Developer ID 型 profile（疑 Apple Development 殭屍殘留）"
+  done
+  # quirk：`codesign -dvv ... | grep -q` 命中即收線會給 codesign 吃 SIGPIPE，
+  # pipefail 下整條判假（2026-11-08 實測）——先捕獲再配對。
+  CSOUT=$(codesign -dvv "$APP/Contents/MacOS/Bitward" 2>&1)
+  case "$CSOUT" in
+    *TeamIdentifier=8V5224A99M*) ok "profile 型別正確（dev profile 已剝）、team 綁定正確" ;;
+    *) fail "TeamIdentifier 不符" ;;
+  esac
 fi
 
 echo "==> 3. entitlements 形態斷言"
@@ -82,6 +91,9 @@ fi
 if xcrun stapler validate "$PKG" >/dev/null 2>&1; then
   spctl -a -t install "$PKG" 2>/dev/null || fail "staple 在但 spctl 拒收"
   ok "公證 ticket 已釘＋Gatekeeper 願收"
+elif [ "${BW_NOTARIZED:-1}" = 0 ]; then
+  [ "$EXPECT" = devid ] || fail "macdev 批次不該帶 BW_NOTARIZED=0"
+  ok "未公證屬預期（BW_NOTARIZED=0：本批跳隊列，公證另單收）"
 else
   [ "$EXPECT" = macdev ] && ok "未公證（macdev 批次預期）" \
     || fail "devid 批次 pkg 無公證 ticket"
