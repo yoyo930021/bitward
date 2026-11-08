@@ -11,11 +11,11 @@
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bw_proto::{
-    AuthCall, Call, CipherDraft, FieldEdit, ItemId, ItemKind, ItemView, OverlayOpWire, Query,
-    Response, SortKey, UnlockStateView, UseCall, VaultCall, View,
+    AuthCall, Call, CipherDraft, EventTopic, FieldEdit, ItemId, ItemKind, ItemView, OverlayOpWire,
+    Query, Response, SortKey, SyncCall, UnlockStateView, UseCall, VaultCall, View,
 };
 use nsh_core::prelude::*;
 
@@ -84,6 +84,8 @@ pub enum Cmd {
     /// 產生器回包：Some=明文草稿（只活到套用或離開表單）；None=失敗（錯誤已入橫條）。
     Generated(Option<String>),
     RequestUnlock,
+    /// 側欄「立即同步」：Sync:Trigger{force} 拉伺服器＋催背景推送。
+    TriggerSync,
     /// 僅 dev/驗證用：Auth:Lock（正式 UI 未列需求，解鎖鈕才是契約項目）。
     RequestLock,
     /// 開/關「變更主密碼」模態；送出由 SubmitChangePassword 落地。
@@ -136,6 +138,10 @@ pub enum Cmd {
     StateUpdated {
         state: UnlockStateView,
         refetch: bool,
+    },
+    /// Sync:Trigger 成功回包：蓋同步時間戳、提示「已同步」、重抓列表。
+    SyncDone {
+        state: UnlockStateView,
     },
     WriteDone {
         err: Option<String>,
@@ -249,6 +255,8 @@ pub struct AppCore {
     pub totp_valid_for: Signal<u32>,
     pub totp_issued: Signal<Option<Instant>>,
     pub totp_tick: Signal<u64>,
+    /// 側欄同步狀態：本視窗最近一次 Sync:Trigger 成功時刻。
+    pub last_sync: Signal<Option<Instant>>,
     pub confirm: Signal<Option<Arc<Confirm>>>,
     pub form: FormFields,
     /// 改主密碼模態開關 + 三欄（true 時 App 掛 modal）。
@@ -282,6 +290,7 @@ impl AppCore {
             totp_valid_for: signal(0),
             totp_issued: signal(None),
             totp_tick: signal(0),
+            last_sync: signal(None),
             confirm: signal_with(None, SignalEquals::Never),
             pw_modal: signal(false),
             pw: PwFields {
@@ -326,6 +335,27 @@ impl AppCore {
 
     fn settle(&self) {
         self.busy.set(self.busy.get().saturating_sub(1));
+    }
+
+    /// 事件幫浦：自開一條 daemon 監聽連線（執行緒非「背景任務」語意的
+    /// worker，只回投命令、不碰訊號）。`OutboxDrained`／`VaultChanged`
+    /// 到達即重抓列表——VW 恢復後「未同步」徽章無感自動消失；
+    /// 斷線 1 秒重連（daemon 重啟自愈）。
+    pub fn watch_events(&self) {
+        let session = self.session.clone();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || loop {
+            let tx2 = tx.clone();
+            let _ = session.listen(
+                &[EventTopic::OutboxDrained, EventTopic::VaultChanged],
+                move |topic| {
+                    if matches!(topic, EventTopic::OutboxDrained | EventTopic::VaultChanged) {
+                        let _ = tx2.send(Cmd::RefetchList);
+                    }
+                },
+            );
+            std::thread::sleep(Duration::from_secs(1));
+        });
     }
 
     /// 離開詳情/表單時清明文：Reveal 明文只活在詳情元件狀態（契約驗收 3）。
@@ -537,6 +567,23 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                     Err(e) => Cmd::Failed { err: e.display() },
                 },
             );
+        }
+        Cmd::TriggerSync => {
+            core.ipc(|s| match s.call(&Call::Sync(SyncCall::Trigger { force: true })) {
+                Ok(Response::Status(info)) => Cmd::SyncDone { state: info.state },
+                Ok(other) => Cmd::Failed {
+                    err: format!("Sync.Trigger 回應形態不符：{other:?}"),
+                },
+                Err(e) => Cmd::Failed { err: e.display() },
+            });
+        }
+        Cmd::SyncDone { state } => {
+            core.settle();
+            core.vault.set(Some(state));
+            core.error_text.set(None);
+            core.last_sync.set(Some(Instant::now()));
+            core.notice.set(Some("已同步".into()));
+            fetch_list(core);
         }
         Cmd::RequestLock => {
             // lock 會撤銷本 session（A6）：後續 ensure() 重連重 Enroll，

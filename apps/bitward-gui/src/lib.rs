@@ -100,6 +100,7 @@ pub fn App() -> impl IntoElement {
         }
     });
     core.send(Cmd::Boot);
+    core.watch_events();
     on_key("escape", {
         let core = core.clone();
         move |_| core.send(Cmd::OpenList)
@@ -140,7 +141,7 @@ pub fn App() -> impl IntoElement {
         .flex_1()
         .relative()
         .bg(theme::BASE)
-        .child(header(core.clone()))
+        .child(topbar(core.clone()))
         .child(banner(core.clone()))
         .child(when(
             move || conn_cond.phase.get() == Phase::Connecting,
@@ -171,34 +172,33 @@ pub fn App() -> impl IntoElement {
         ))
 }
 
-/// 大標題列：產品名＋「N 筆項目 · 狀態」副行＋右側動作群。
-/// 舊標題列的鎖態指示、匯出提示收進這裡（副行跟 vault_label 走）。
-fn header(core: AppCore) -> View {
+/// 頂部列：產品名＋狀態副行（左）、置中搜尋（官方特徵）、右側藍實色新增。
+/// 舊標題列的匯出/改密移入左側欄；鎖態指示、提示列收在副行/右側。
+fn topbar(core: AppCore) -> View {
     let sub_core = core.clone();
     let busy_cond = core.clone();
     let busy_build = core.clone();
     let notice_cond = core.clone();
     let notice_build = core.clone();
-    let export_core = core.clone();
     let new_core = core.clone();
-    let pw_cond = core.clone();
-    let pw_build = core.clone();
     view()
         .flex_row()
         .items_center()
         .gap_3()
-        .px_6()
-        .pt(px(theme::HEADER_PT))
-        .pb(px(theme::HEADER_PB))
+        .px_4()
+        .h(px(theme::TOPBAR_H))
+        .bg(theme::BASE)
+        .border_b(px(1.0))
+        .border_color(theme::HAIRLINE)
         .child(
             view()
                 .flex_col()
+                .flex_1()
                 .gap_0p5()
                 .child(
-                    text("密碼庫")
+                    text("Bitward 密碼庫")
                         .text_size(px(theme::TEXT_PAGE_TITLE))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .letter_spacing(px(0.5))
                         .text_color(theme::TEXT_PRIMARY),
                 )
                 .child(
@@ -234,35 +234,221 @@ fn header(core: AppCore) -> View {
                         )),
                 ),
         )
+        .child(list::search(core.clone()))
+        .child(
+            view()
+                .flex_1()
+                .flex_row()
+                .items_center()
+                .justify_end()
+                .gap_2()
+                .child(when(
+                    move || notice_cond.notice.get().is_some(),
+                    move || {
+                        let c = notice_build.clone();
+                        view().max_w(px(260.0)).child(
+                            text(move || c.notice.get().unwrap_or_default())
+                                .text_size(px(11.5))
+                                .line_height(px(16.0))
+                                .number_of_lines(2)
+                                .text_color(theme::SUCCESS),
+                        )
+                    },
+                ))
+                .child(ui::button("＋ 新增項目", ui::Btn::PrimaryWide, move || {
+                    new_core.send(Cmd::OpenCreate)
+                })),
+        )
+}
+
+/// 左側欄（官方三欄骨架）：庫入口／垃圾桶＋底部同步狀態與其他動作。
+fn sidebar(core: AppCore) -> View {
+    let vault_sel = core.clone();
+    let vault_press = core.clone();
+    let trash_sel = core.clone();
+    let trash_press = core.clone();
+    let sync_core = core.clone();
+    let sync_time = core.clone();
+    let export_core = core.clone();
+    let pw_cond = core.clone();
+    let pw_build = core.clone();
+    view()
+        .w(px(theme::SIDEBAR_W))
+        .flex_col()
+        .gap_0p5()
+        .bg(theme::SIDEBAR)
+        .border_r(px(1.0))
+        .border_color(theme::HAIRLINE)
+        .px_2()
+        .pt_3()
+        .child(side_item(
+            "我的密碼庫",
+            move || !vault_sel.trash.get(),
+            move || {
+                if vault_press.trash.get() {
+                    vault_press.send(Cmd::ToggleTrash);
+                } else {
+                    vault_press.send(Cmd::OpenList);
+                }
+            },
+            false,
+            None,
+        ))
+        .child(side_item(
+            "已共享",
+            || false,
+            || {},
+            true,
+            Some("組織共享：待 daemon 資料源就緒後開放"),
+        ))
+        .child(side_item(
+            "垃圾桶",
+            move || trash_sel.trash.get(),
+            move || trash_press.send(Cmd::ToggleTrash),
+            false,
+            None,
+        ))
         .child(view().flex_1())
-        .child(when(
-            move || notice_cond.notice.get().is_some(),
-            move || {
-                let c = notice_build.clone();
-                view().max_w(px(360.0)).child(
-                    text(move || c.notice.get().unwrap_or_default())
-                        .text_size(px(11.5))
-                        .line_height(px(16.0))
-                        .number_of_lines(2)
-                        .text_color(theme::SUCCESS),
+        .child(
+            view()
+                .flex_col()
+                .gap_1()
+                .px_1()
+                .pb_3()
+                .child(
+                    text(move || match sync_time.last_sync.get() {
+                        Some(at) => {
+                            let s = at.elapsed().as_secs();
+                            if s < 60 {
+                                "上次同步：剛剛".to_owned()
+                            } else if s < 3600 {
+                                format!("上次同步：{} 分前", s / 60)
+                            } else {
+                                format!("上次同步：{} 小時前", s / 3600)
+                            }
+                        }
+                        None => "上次同步：本視窗尚未觸發".to_owned(),
+                    })
+                    .text_size(px(11.5))
+                    .text_color(theme::TEXT_MUTED),
                 )
-            },
-        ))
-        .child(ui::button("匯出", ui::Btn::Ghost, move || {
-            export_core.send(Cmd::AskExport)
-        }))
-        .child(when(
-            move || state::can_change_password(&pw_cond.vault.get()),
-            move || {
-                let c = pw_build.clone();
-                ui::button("變更主密碼", ui::Btn::Ghost, move || {
-                    c.send(Cmd::OpenChangePassword)
-                })
-            },
-        ))
-        .child(ui::button("＋ 新增", ui::Btn::PrimaryCapsule, move || {
-            new_core.send(Cmd::OpenCreate)
-        }))
+                .child(side_text_button("立即同步", move || {
+                    sync_core.send(Cmd::TriggerSync)
+                }))
+                .child(side_text_button("匯出", move || {
+                    export_core.send(Cmd::AskExport)
+                }))
+                .child(when(
+                    move || state::can_change_password(&pw_cond.vault.get()),
+                    move || {
+                        let c = pw_build.clone();
+                        side_text_button("變更主密碼", move || c.send(Cmd::OpenChangePassword))
+                    },
+                )),
+        )
+}
+
+/// 側欄條目：32px 行；選中＝淡藍底＋左 3px 藍條；停用＝灰字＋tooltip。
+fn side_item(
+    label: &'static str,
+    selected: impl Fn() -> bool + 'static,
+    on_press: impl Fn() + 'static,
+    disabled: bool,
+    tip: Option<&'static str>,
+) -> View {
+    let selected = Rc::new(selected);
+    let sel_bg = selected.clone();
+    let sel_bar = selected.clone();
+    let sel_text = selected;
+    let row = view()
+        .relative()
+        .h(px(theme::SIDE_ITEM_H))
+        .px_3()
+        .rounded(px(theme::RADIUS_CONTROL))
+        .flex_row()
+        .items_center()
+        .cursor_pointer()
+        .transition_colors()
+        .duration(120.0)
+        .bg(move || {
+            if sel_bg() {
+                theme::ACCENT.opacity(0.10)
+            } else {
+                AdaptiveColor::TRANSPARENT
+            }
+        });
+    let row = if disabled {
+        row.tooltip(tooltip_card(tip.unwrap_or("即將推出")))
+    } else {
+        row.on_press(on_press).hover(|s| s.bg(theme::SURFACE_RAISED))
+    };
+    row.child(
+        view()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left_0()
+            .w(px(theme::SIDE_BAR_W))
+            .rounded_full()
+            .bg(move || {
+                if sel_bar() {
+                    theme::ACCENT
+                } else {
+                    AdaptiveColor::TRANSPARENT
+                }
+            }),
+    )
+    .child(
+        text(label)
+            .text_size(px(13.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(move || {
+                if sel_text() {
+                    theme::TEXT_PRIMARY
+                } else if disabled {
+                    theme::TEXT_MUTED
+                } else {
+                    theme::TEXT_SECONDARY
+                }
+            }),
+    )
+}
+
+/// 側欄底部文字鈕（匯出/改密/立即同步）。
+fn side_text_button(label: &'static str, on_press: impl Fn() + 'static) -> View {
+    view()
+        .h(px(theme::SIDE_ITEM_H))
+        .w_full()
+        .px_3()
+        .rounded(px(theme::RADIUS_CONTROL))
+        .flex_row()
+        .items_center()
+        .cursor_pointer()
+        .transition_colors()
+        .duration(120.0)
+        .hover(|s| s.bg(theme::SURFACE_RAISED))
+        .on_press(on_press)
+        .child(
+            text(label)
+                .text_size(px(13.0))
+                .text_color(theme::TEXT_SECONDARY),
+        )
+}
+
+/// tooltip 內容卡（nsh 的 tooltip 收元素，浮層自帶底與描邊）。
+fn tooltip_card(msg: &str) -> View {
+    view()
+        .px_2p5()
+        .py_1p5()
+        .rounded(px(theme::RADIUS_CONTROL))
+        .border(px(1.0))
+        .border_color(theme::HAIRLINE)
+        .bg(theme::ELEVATED)
+        .child(
+            text(msg.to_owned())
+                .text_size(px(12.0))
+                .text_color(theme::TEXT_SECONDARY),
+        )
 }
 
 /// Ready 後的內容區：鎖態整頁取代主從式版面（Route 仍是導航真相）。
@@ -277,44 +463,40 @@ fn router(core: AppCore) -> impl IntoElement {
     .otherwise(move || split(split_build.clone()))
 }
 
-/// 主從式版面：全寬工具列＋（左列表欄｜右詳情欄）。
+/// 主從式版面（官方三欄骨架）：左側欄｜中列表欄｜右詳情欄。
 fn split(core: AppCore) -> View {
     let detail_cond = core.clone();
     let detail_build = core.clone();
     let loading_cond = core.clone();
     view()
-        .flex_col()
+        .flex_row()
         .flex_1()
         .overflow_hidden()
-        .child(list::toolbar(core.clone()))
+        .child(sidebar(core.clone()))
         .child(
             view()
-                .flex_row()
+                .w(px(theme::LIST_W))
+                .flex_col()
+                .border_r(px(1.0))
+                .border_color(theme::HAIRLINE)
+                .pb_2()
+                .child(list::toolbar(core.clone()))
+                .child(list::panel(core.clone())),
+        )
+        .child(
+            view()
                 .flex_1()
-                .overflow_hidden()
-                .child(
-                    view()
-                        .w(px(400.0))
-                        .flex_col()
-                        .border_r(px(1.0))
-                        .border_color(theme::HAIRLINE)
-                        .pt_2()
-                        .child(list::panel(core.clone())),
-                )
-                .child(
-                    view()
-                        .flex_1()
-                        .child(when(
-                            move || detail_cond.detail.get().is_some(),
-                            move || detail::pane(detail_build.clone()),
-                        ).otherwise(move || {
-                            if matches!(loading_cond.route.get(), Route::Detail(_)) {
-                                detail::loading()
-                            } else {
-                                detail::placeholder()
-                            }
-                        })),
-                ),
+                .bg(theme::BASE)
+                .child(when(
+                    move || detail_cond.detail.get().is_some(),
+                    move || detail::pane(detail_build.clone()),
+                ).otherwise(move || {
+                    if matches!(loading_cond.route.get(), Route::Detail(_)) {
+                        detail::loading()
+                    } else {
+                        detail::placeholder()
+                    }
+                })),
         )
 }
 
@@ -336,16 +518,16 @@ fn lock_page(core: AppCore) -> View {
                 .items_center()
                 .gap_2()
                 .p_6()
-                .rounded_2xl()
+                .rounded(px(theme::RADIUS_CARD))
                 .border(px(1.0))
                 .border_color(theme::HAIRLINE)
                 .bg(theme::ELEVATED)
                 .shadow(vec![BoxShadow {
                     offset_x: px(0.0),
-                    offset_y: px(18.0),
-                    blur: px(48.0),
-                    spread: px(-10.0),
-                    color: black().opacity(0.55).into(),
+                    offset_y: px(12.0),
+                    blur: px(32.0),
+                    spread: px(-8.0),
+                    color: black().opacity(0.18).into(),
                     inset: false,
                 }])
                 .child(
@@ -370,7 +552,7 @@ fn lock_page(core: AppCore) -> View {
                     move || {
                         let c = unlock_build.clone();
                         view().w_full().pt_1().child(
-                            ui::button("解鎖", ui::Btn::PrimaryCapsule, move || {
+                            ui::button("解鎖", ui::Btn::PrimaryWide, move || {
                                 c.send(Cmd::RequestUnlock)
                             })
                             .w_full(),
@@ -448,16 +630,16 @@ fn failed_card(core: AppCore) -> View {
                 .items_center()
                 .gap_2()
                 .p_6()
-                .rounded_2xl()
+                .rounded(px(theme::RADIUS_CARD))
                 .border(px(1.0))
                 .border_color(theme::HAIRLINE)
                 .bg(theme::ELEVATED)
                 .shadow(vec![BoxShadow {
                     offset_x: px(0.0),
-                    offset_y: px(18.0),
-                    blur: px(48.0),
-                    spread: px(-10.0),
-                    color: black().opacity(0.55).into(),
+                    offset_y: px(12.0),
+                    blur: px(32.0),
+                    spread: px(-8.0),
+                    color: black().opacity(0.18).into(),
                     inset: false,
                 }])
                 .child(
@@ -479,7 +661,7 @@ fn failed_card(core: AppCore) -> View {
                         .text_center()
                         .text_color(theme::TEXT_SECONDARY),
                 )
-                .child(ui::button("重新連線", ui::Btn::PrimaryCapsule, move || {
+                .child(ui::button("重新連線", ui::Btn::PrimaryWide, move || {
                     retry.send(Cmd::Boot)
                 })),
         )

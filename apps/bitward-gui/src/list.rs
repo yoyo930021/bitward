@@ -1,7 +1,6 @@
-//! Vault 列表（左欄＋全寬工具列）：搜尋（Query.text 交 daemon FTS）、
-//! tag 過濾（chips 行，比對在 daemon）、垃圾桶切換（Query.deleted 三態）、
-//! 排序選單、pending 徽章、
-//! 選中列（Route::Detail 對應項）accent 指示條。鎖態/標題在 lib.rs。
+//! Vault 列表（中欄＋工具列；搜尋框在 lib.rs 頂部列）：搜尋（Query.text 交
+//! daemon FTS）、tag 過濾（chips 行，比對在 daemon）、排序選單、未同步徽章、
+//! 選中列（Route::Detail 對應項）淡藍底＋藍指示條。垃圾桶切換在左側欄（lib.rs）。
 
 use std::rc::Rc;
 
@@ -13,95 +12,100 @@ use crate::state::{AppCore, Cmd, Route};
 use crate::theme;
 use crate::ui;
 
-/// 工具列：全寬圓角搜尋框＋排序/重新整理＋標籤 chips 行（行尾垃圾桶切換）＋排序下拉。
-pub fn toolbar(core: AppCore) -> View {
+/// 頂部列用的置中搜尋框（官方特徵；語義留在 list.rs 與列表同家）。
+pub fn search(core: AppCore) -> View {
     let search_core = core.clone();
     let query = core.query;
-    let sort_btn = core.clone();
+    view()
+        .w(px(theme::SEARCH_W))
+        .relative()
+        .child(
+            input()
+                .value(move || query.get())
+                .placeholder("搜尋名稱、網址或標籤")
+                .placeholder_color(move || theme::TEXT_MUTED.light)
+                .on_change(move |text: &str| {
+                    // 輸入回聲直接寫訊號；重抓走命令佇列（下一個
+                    // tick 合批，連續打字只發一次 List）。
+                    search_core.query.set(text.to_owned());
+                    search_core.send(Cmd::RefetchList);
+                })
+                .h(px(theme::INPUT_H))
+                .pl(px(34.0))
+                .pr_3()
+                .rounded(px(theme::RADIUS_CONTROL))
+                .border(px(1.0))
+                .border_color(theme::HAIRLINE)
+                .bg(theme::SURFACE)
+                .text_color(theme::TEXT_PRIMARY)
+                .transition_colors()
+                .duration(150.0)
+                .focus(|s| s.border_color(theme::ACCENT)),
+        )
+        .child(
+            view()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left_0()
+                .w(px(34.0))
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .child(
+                    text("⌕")
+                        .text_size(px(15.0))
+                        .text_color(theme::TEXT_MUTED),
+                ),
+        )
+}
+
+/// 中欄工具列：標籤 chips（左）＋排序/重新整理（右）＋排序下拉。
+pub fn toolbar(core: AppCore) -> View {
+    let chip_core = core.clone();
+    let sort_label_core = core.clone();
     let sort_open = core.clone();
     let refresh = core.clone();
-    let chip_core = core.clone();
     let sort_cond = core.clone();
     let sort_build = core.clone();
     view()
         .flex_col()
         .gap_1p5()
-        .px_6()
+        .px_4()
         .pt_2p5()
         .child(
             view()
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .child(
-                    view()
-                        .flex_1()
-                        .relative()
-                        .child(
-                            input()
-                                .value(move || query.get())
-                                .placeholder("搜尋名稱、網址或標籤")
-                                .placeholder_color(move || theme::TEXT_MUTED.light)
-                                .on_change(move |text: &str| {
-                                    // 輸入回聲直接寫訊號；重抓走命令佇列（下一個
-                                    // tick 合批，連續打字只發一次 List）。
-                                    search_core.query.set(text.to_owned());
-                                    search_core.send(Cmd::RefetchList);
-                                })
-                                .h(px(theme::INPUT_H))
-                                .pl(px(34.0))
-                                .pr_3()
-                                .rounded_xl()
-                                .border(px(1.0))
-                                .border_color(theme::HAIRLINE)
-                                .bg(theme::SURFACE)
-                                .text_color(theme::TEXT_PRIMARY)
-                                .transition_colors()
-                                .duration(150.0)
-                                .focus(|s| s.border_color(theme::ACCENT)),
-                        )
-                        .child(
-                            view()
-                                .absolute()
-                                .top_0()
-                                .bottom_0()
-                                .left_0()
-                                .w(px(34.0))
-                                .flex_row()
-                                .items_center()
-                                .justify_center()
-                                .child(
-                                    text("⌕")
-                                        .text_size(px(15.0))
-                                        .text_color(theme::TEXT_MUTED),
-                                ),
-                        ),
-                )
+                .child(toolbar_chips(chip_core))
                 .child(filter_button(
                     "排序",
-                    move || sort_label(sort_btn.sort.get()),
+                    move || sort_label(sort_label_core.sort.get()),
                     move || sort_open.send(Cmd::ToggleSortMenu),
                 ))
                 .child(ui::button("重新整理", ui::Btn::Ghost, move || {
                     refresh.send(Cmd::RefetchList)
                 })),
         )
-        .child(chip_row(chip_core))
         .child(when(
             move || sort_cond.sort_menu.get(),
             move || sort_panel(sort_build.clone()),
         ))
 }
 
+/// chips 行包一层 flex_1（工具列內佔滿剩餘寬、溢出裁掉）。
+fn toolbar_chips(core: AppCore) -> View {
+    view().flex_1().overflow_hidden().child(chip_row(core))
+}
+
 /// 標籤 chips 行：選項取自目前載入的清單（過濾仍由 daemon 執行）；
-/// 選中描邊轉 accent，再點一次選中的 chip ＝回到全部。行尾附垃圾桶切換。
+/// 選中描邊轉 accent，再點一次選中的 chip ＝回到全部。
 fn chip_row(core: AppCore) -> View {
     let all_sel = core.clone();
     let all_press = core.clone();
     let items = core.items;
     let row_core = core.clone();
-    let trash_sel = core.trash;
-    let trash_press = core.clone();
     view()
         .flex_row()
         .items_center()
@@ -128,11 +132,6 @@ fn chip_row(core: AppCore) -> View {
                     },
                 )
             },
-        ))
-        .child(chip(
-            "垃圾桶".to_owned(),
-            move || trash_sel.get(),
-            move || trash_press.send(Cmd::ToggleTrash),
         ))
 }
 
@@ -259,7 +258,7 @@ fn sort_panel(core: AppCore) -> View {
     view().child(ui::card(rows).w(px(220.0)))
 }
 
-/// 列表本體（左欄）：38px 緊湊列、選中列提亮＋左 3px accent 條。
+/// 列表本體（中欄）：44px 列、選中列淡藍底＋左 3px 藍條。
 pub fn panel(core: AppCore) -> impl IntoElement {
     let count_core = core.clone();
     let keys_core = core.clone();
@@ -281,8 +280,8 @@ pub fn panel(core: AppCore) -> impl IntoElement {
     .separator(move || {
         view()
             .h(px(1.0))
-            .ml(px(65.0))
-            .mr_4()
+            .ml(px(63.0))
+            .mr_3()
             .bg(theme::HAIRLINE)
     })
     .empty(
@@ -307,10 +306,11 @@ pub fn panel(core: AppCore) -> impl IntoElement {
     )
 }
 
-/// 列高 38：monogram 26＋雙行緊湊文字；右側只放狀態膠囊（待推送）與星。
+/// 列高 44（官方節奏）：型別磚 32＋雙行文字；右側只放狀態膠囊（未同步）與星。
 fn row(core: AppCore, at: Position) -> View {
     let press_core = core.clone();
     let name_core = core.clone();
+    let kind_core = core.clone();
     let sub_core = core.clone();
     let right_core = core.clone();
     let fav_core = core.clone();
@@ -319,8 +319,8 @@ fn row(core: AppCore, at: Position) -> View {
     view()
         .relative()
         .h(px(theme::ROW_H))
-        .pl_6()
-        .pr_4()
+        .pl_4()
+        .pr_3()
         .flex_row()
         .items_center()
         .gap_3()
@@ -330,7 +330,7 @@ fn row(core: AppCore, at: Position) -> View {
         .hover(|s| s.bg(theme::SURFACE_RAISED))
         .bg(move || {
             if is_selected(&sel_bg, at) {
-                theme::SURFACE_RAISED
+                theme::ACCENT.opacity(0.08)
             } else {
                 AdaptiveColor::TRANSPARENT
             }
@@ -346,7 +346,7 @@ fn row(core: AppCore, at: Position) -> View {
                 .top_0()
                 .bottom_0()
                 .left_0()
-                .w(px(3.0))
+                .w(px(theme::SIDE_BAR_W))
                 .bg(move || {
                     if is_selected(&sel_bar, at) {
                         theme::ACCENT
@@ -355,17 +355,17 @@ fn row(core: AppCore, at: Position) -> View {
                     }
                 }),
         )
-        .child(ui::monogram(
+        .child(ui::type_tile(
             move || {
-                name_core
+                kind_core
                     .items
                     .get()
                     .get(at.index())
-                    .and_then(|v| v.meta.name.clone())
+                    .map(|v| v.meta.kind)
+                    .unwrap_or_default()
             },
-            theme::MONOGRAM_ROW,
-            theme::MONOGRAM_ROW_RADIUS,
-            theme::MONOGRAM_ROW_TEXT,
+            theme::TILE_ROW,
+            theme::TILE_ROW_GLYPH,
         ))
         .child(
             view()
@@ -424,7 +424,7 @@ fn row(core: AppCore, at: Position) -> View {
                 )
                 .child(when(
                     move || right_core.items.get().get(at.index()).is_some_and(|v| v.meta.pending),
-                    || ui::badge("待推送", theme::WARNING, theme::WARNING.opacity(0.16)),
+                    || ui::badge("未同步", theme::ACCENT, theme::ACCENT.opacity(0.10)),
                 )),
         )
 }

@@ -15,11 +15,11 @@ use crate::theme;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Btn {
-    /// 藍紫漸變主按鈕。
+    /// 藍實色主按鈕（官方不漸變）。
     Primary,
-    /// 漸變膠囊（標題列「＋ 新增」）。
-    PrimaryCapsule,
-    /// 透明描邊次按鈕（取消等）。
+    /// 藍實色寬鈕（頂部列「＋ 新增項目」、解鎖）。
+    PrimaryWide,
+    /// 白底描邊次按鈕（取消等）。
     Ghost,
     /// 危險實色（刪除確認）。
     Destructive,
@@ -36,11 +36,11 @@ pub fn button_dyn(
     kind: Btn,
     on_press: impl Fn() + 'static,
 ) -> View {
-    let capsule = kind == Btn::PrimaryCapsule;
+    let wide = kind == Btn::PrimaryWide;
     let base = view()
-        .h_9()
-        .px(px(if capsule { 20.0 } else { 16.0 }))
-        .rounded(px(if capsule { 18.0 } else { 9.0 }))
+        .h(px(theme::INPUT_H))
+        .px(px(if wide { 20.0 } else { 16.0 }))
+        .rounded(px(theme::RADIUS_CONTROL))
         .flex_row()
         .items_center()
         .justify_center()
@@ -50,11 +50,11 @@ pub fn button_dyn(
         .active(|s| s.opacity(0.7))
         .on_press(on_press);
     let styled = match kind {
-        Btn::Primary | Btn::PrimaryCapsule => base
-            .bg_linear_to_r()
-            .gradient_from(theme::ACCENT_FROM)
-            .gradient_to(theme::ACCENT_TO),
+        Btn::Primary | Btn::PrimaryWide => base
+            .bg(theme::ACCENT)
+            .hover(|s| s.bg(theme::ACCENT_HOVER)),
         Btn::Ghost => base
+            .bg(theme::BASE)
             .border(px(1.0))
             .border_color(theme::HAIRLINE)
             .hover(|s| s.bg(theme::SURFACE_RAISED)),
@@ -66,7 +66,7 @@ pub fn button_dyn(
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(match kind {
                 Btn::Ghost => theme::TEXT_SECONDARY,
-                _ => theme::TEXT_PRIMARY,
+                _ => theme::TEXT_ON_ACCENT,
             }),
     )
 }
@@ -99,10 +99,10 @@ pub fn form_field(
                 .on_change(move |t: &str| on_change(t.to_owned()))
                 .h(px(theme::INPUT_H))
                 .px_3()
-                .rounded_lg()
+                .rounded(px(theme::RADIUS_CONTROL))
                 .border(px(1.0))
                 .border_color(theme::HAIRLINE)
-                .bg(theme::SURFACE)
+                .bg(theme::BASE)
                 .text_color(theme::TEXT_PRIMARY)
                 .transition_colors()
                 .duration(150.0)
@@ -113,7 +113,7 @@ pub fn form_field(
 /// 下拉面板的一列（排序選項用；標籤已改 chips）。
 pub fn menu_row(label: String, selected: bool, on_press: impl Fn() + 'static) -> View {
     view()
-        .h_9()
+        .h(px(theme::INPUT_H))
         .px_3()
         .flex_row()
         .items_center()
@@ -138,12 +138,20 @@ pub fn menu_row(label: String, selected: bool, on_press: impl Fn() + 'static) ->
 pub fn card(children: Vec<View>) -> View {
     let mut c = view()
         .flex_col()
-        .rounded_xl()
+        .rounded(px(theme::RADIUS_BLOCK))
         .overflow_hidden()
         .border(px(1.0))
         .border_color(theme::HAIRLINE)
         .bg(theme::ELEVATED)
         .py_1()
+        .shadow(vec![BoxShadow {
+            offset_x: px(0.0),
+            offset_y: px(6.0),
+            blur: px(20.0),
+            spread: px(-4.0),
+            color: black().opacity(0.14).into(),
+            inset: false,
+        }])
         .child(view().h(px(1.0)).mx_3().bg(theme::HIGHLIGHT));
     for child in children {
         c = c.child(child);
@@ -170,17 +178,17 @@ pub fn modal_shell(width: f32, on_close: impl Fn() + 'static, card: View) -> Vie
                 .flex_col()
                 .gap(px(theme::FORM_GAP))
                 .p_6()
-                .rounded_2xl()
+                .rounded(px(theme::RADIUS_CARD))
                 .overflow_hidden()
                 .border(px(1.0))
                 .border_color(theme::HAIRLINE)
                 .bg(theme::ELEVATED)
                 .shadow(vec![BoxShadow {
                     offset_x: px(0.0),
-                    offset_y: px(18.0),
-                    blur: px(48.0),
-                    spread: px(-10.0),
-                    color: black().opacity(0.55).into(),
+                    offset_y: px(12.0),
+                    blur: px(32.0),
+                    spread: px(-8.0),
+                    color: black().opacity(0.18).into(),
                     inset: false,
                 }])
                 .on_press(|| {})
@@ -319,30 +327,32 @@ pub fn change_password_modal(core: AppCore) -> View {
     )
 }
 
-/// monogram 色塊：名字首字＋穩定派生底色（列表 26/詳情 44 共用）。
-pub fn monogram(
-    name: impl Fn() -> Option<String> + 'static,
-    size: f32,
-    radius: f32,
-    letter: f32,
-) -> View {
-    let name = Rc::new(name);
-    let name_bg = name.clone();
-    let name_char = name;
+/// 型別字形：官方用單色 icon；nsh 無 icon 系統，以 Unicode 字形＋
+/// U+FE0E（text presentation）強制單色、跟文字色走。
+pub fn type_glyph(kind: ItemKind) -> &'static str {
+    match kind {
+        ItemKind::Login => "🌐\u{fe0e}",
+        ItemKind::Card => "💳\u{fe0e}",
+        ItemKind::Identity => "🔑\u{fe0e}",
+        ItemKind::SecureNote => "📝\u{fe0e}",
+    }
+}
+
+/// 型別磚：淡灰圓角方磚＋單色型別字形（取代 monogram 派生色磚；
+/// 列表 32／詳情 44 共用）。
+pub fn type_tile(kind: impl Fn() -> ItemKind + 'static, size: f32, glyph: f32) -> View {
     view()
         .w(px(size))
         .h(px(size))
-        .rounded(px(radius))
+        .rounded(px(theme::RADIUS_BLOCK))
         .flex_row()
         .items_center()
         .justify_center()
-        .overflow_hidden()
-        .bg(move || theme::monogram_color(name_bg().as_deref()))
+        .bg(theme::SURFACE_RAISED)
         .child(
-            text(move || theme::monogram_char(name_char().as_deref()))
-                .text_size(px(letter))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme::TEXT_PRIMARY),
+            text(move || type_glyph(kind()))
+                .text_size(px(glyph))
+                .text_color(theme::TEXT_SECONDARY),
         )
 }
 
@@ -363,14 +373,12 @@ pub fn badge(label: &'static str, fg: AdaptiveColor, bg: AdaptiveColor) -> View 
         )
 }
 
-/// 節標題：12px 大寫、字距拉開、muted（詳情分節用）。
+/// 節標題：12px 粗灰（官方詳情分節）。
 pub fn section_title(label: &'static str) -> Text {
     text(label)
-        .text_size(px(12.0))
+        .text_size(px(theme::TEXT_FIELD_LABEL))
         .font_weight(FontWeight::SEMIBOLD)
-        .uppercase()
-        .letter_spacing(px(1.2))
-        .text_color(theme::TEXT_MUTED)
+        .text_color(theme::TEXT_SECONDARY)
 }
 
 /// 複製鈕：按下寫系統剪貼簿、圖示轉 success 勾 1 秒後復原。

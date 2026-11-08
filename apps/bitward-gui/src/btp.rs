@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bw_proto::{
-    Auth, Call, ClientMsg, PROTO_VERSION, ProtoVersion, Response, ServerMsg, UnlockStateView,
-    WtpError,
+    Auth, Call, ClientMsg, EventTopic, PROTO_VERSION, ProtoVersion, Response, ServerMsg,
+    UnlockStateView, WtpError,
 };
 
 /// 與 `bw_btp::MAX_FRAME` 同值：幀上限要在解碼前擋住。
@@ -147,14 +147,45 @@ impl Session {
         }
         Err(BtpError::Transport("連線反覆失敗".into()))
     }
+
+    /// 事件監聽：自開一條訂閱連線（不佔用呼叫連線的 Mutex），阻塞收
+    /// `Event` 幀並逐筆交 `on_event`；任何傳輸錯誤即回，由呼叫端重連。
+    /// 監聽連線不發 Invoke，出現非 Event 幀即協定異常、回錯。
+    pub fn listen(
+        &self,
+        wants: &[EventTopic],
+        mut on_event: impl FnMut(EventTopic),
+    ) -> Result<(), BtpError> {
+        let mut conn = Conn::open_with(&self.path, wants.to_vec(), None)?;
+        loop {
+            match read_frame(&mut conn.stream)? {
+                ServerMsg::Event { topic, .. } => on_event(topic),
+                other => {
+                    return Err(BtpError::Transport(format!(
+                        "監聽連線收到非事件幀：{other:?}"
+                    )));
+                }
+            }
+        }
+    }
 }
 
 impl Conn {
     fn open(path: &Path) -> Result<Conn, BtpError> {
+        // 呼叫連線不吃推播（wants 空）：事件走 `Session::listen` 專用連線，
+        // 避免非 round_trip 時段的幀滯留互搶。
+        Conn::open_with(path, Vec::new(), Some(IO_TIMEOUT))
+    }
+
+    fn open_with(
+        path: &Path,
+        wants: Vec<EventTopic>,
+        read_timeout: Option<Duration>,
+    ) -> Result<Conn, BtpError> {
         let stream = std::os::unix::net::UnixStream::connect(path).map_err(|e| {
             BtpError::Transport(format!("連不到 daemon（{}）：{e}", path.display()))
         })?;
-        let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
+        let _ = stream.set_read_timeout(read_timeout);
         let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
         let mut conn = Conn {
             stream,
@@ -170,8 +201,7 @@ impl Conn {
                     display_name: format!("gui:{}", std::process::id()),
                     pair_code: None,
                 },
-                // 事件訂閱留給後續：本輪 GUI 寫入後自行刷新，不吃推播。
-                wants: vec![],
+                wants,
             },
         )?;
         // Hello 之後第一幀必須是 Welcome（daemon 在 serve_conn 就回）。
@@ -290,6 +320,64 @@ mod tests {
             Err(BtpError::Transport(m)) => assert!(m.contains("連不到 daemon")),
             other => panic!("expected Transport, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn listen_pump_delivers_subscribed_events() {
+        use bw_proto::{ServerKind, ServerProfile};
+        let dir = std::env::temp_dir().join(format!("btp-listen-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut head = [0u8; 4];
+            stream.read_exact(&mut head).unwrap();
+            let mut body = vec![0u8; u32::from_le_bytes(head) as usize];
+            stream.read_exact(&mut body).unwrap();
+            let hello: ClientMsg = serde_json::from_slice(&body).unwrap();
+            match hello {
+                ClientMsg::Hello { wants, .. } => {
+                    assert!(wants.contains(&EventTopic::OutboxDrained));
+                }
+                other => panic!("expected Hello, got {other:?}"),
+            }
+            write_frame(
+                &mut stream,
+                &ServerMsg::Welcome {
+                    proto: PROTO_VERSION,
+                    epoch: 1,
+                    server: ServerProfile {
+                        kind: ServerKind::Vaultwarden,
+                        version: None,
+                        features: vec![],
+                    },
+                    state: UnlockStateView::Unlocked {
+                        epoch: 1,
+                        deadline_epoch_ms: None,
+                    },
+                    events_from: 0,
+                },
+            )
+            .unwrap();
+            write_frame(
+                &mut stream,
+                &ServerMsg::Event {
+                    topic: EventTopic::OutboxDrained,
+                    seq: 1,
+                    payload: serde_json::json!({}),
+                },
+            )
+            .unwrap();
+            // 保持連線一會，讓 client 有機會讀到 Event，再以 close 收尾。
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        });
+        let session = Session::new(&path);
+        let mut topics = Vec::new();
+        let _ = session.listen(&[EventTopic::OutboxDrained], |t| topics.push(t));
+        assert_eq!(topics, vec![EventTopic::OutboxDrained]);
+        server.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

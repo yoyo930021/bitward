@@ -259,9 +259,7 @@ fn slider(core: AppCore) -> View {
                         .h_full()
                         .rounded_full()
                         .w(move || px(theme::GEN_TRACK_W * knob_gen.get().length_ratio()))
-                        .bg_linear_to_r()
-                        .gradient_from(theme::ACCENT_FROM)
-                        .gradient_to(theme::ACCENT_TO),
+                        .bg(theme::ACCENT),
                 )
                 .child(
                     view()
@@ -270,7 +268,9 @@ fn slider(core: AppCore) -> View {
                         .w(px(theme::GEN_KNOB))
                         .h(px(theme::GEN_KNOB))
                         .rounded_full()
-                        .bg(theme::TEXT_PRIMARY)
+                        .bg(theme::ELEVATED)
+                        .border(px(1.0))
+                        .border_color(theme::HAIRLINE)
                         .left(move || {
                             px(
                                 theme::GEN_TRACK_W * knob_gen.get().length_ratio()
