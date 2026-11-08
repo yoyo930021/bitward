@@ -211,7 +211,7 @@ pub struct Mutation { pub id: MutationId, pub seq: u64,        // 同 item FIFO�
                       pub state: MutState }                    // Queued|InFlight|Awaiting|Applied|Conflict|Dead
 ```
 
-規則：寫入一律「本地 transaction（mirror+outbox 同交易）→ 非阻塞 push」，UI 從不等網路；`ours`/`theirs` 欄位不相交 ⇒ 自動合併，相交 ⇒ `Conflict` 進 GUI 佇列，**永不靜默覆蓋**；附件 blob 落地排隊（治 FR 4306）；`Dead` 需人類介入，不再自動重試。
+規則：寫入一律「本地 transaction（mirror+outbox 同交易）→ 非阻塞 push」，UI 從不等網路；`ours`/`theirs` 欄位不相交 ⇒ 自動合併，相交 ⇒ `Conflict` 進 GUI 佇列，**永不靜默覆蓋**；附件 blob 落地排隊（治 FR 4306）；`Dead` 需人類介入，不再自動重試。入列後的推送觸發共四源、全部共用 drain 單飛序列化（不另建鎖）：寫路徑即推、手動刷新、背景自動推送常駐輪（outbox 非空且已解鎖才試推；連續失敗依 30s→60s→120s→上限 10 分鐘指數退避，首敗 warn 一輪、續敗降 debug；notifications 重新連上也喚醒 drain）——任一觸發把可推數（queued+in_flight+awaiting，與「待推送」徽章同口徑）推到零即發 `OutboxDrained`，訂閱端據此刷新投影：Vaultwarden 恢復後待推送無感自動消失（驗收：`dev/e2e/autodrain.sh`）。
 
 ### 2.5 BTP（Full↔Thin 協議）
 

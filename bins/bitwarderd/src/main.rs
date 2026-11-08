@@ -276,7 +276,8 @@ async fn main() -> Result<(), String> {
         }
     }
 
-    // drain：觸發式 + 5 秒兜底輪（離線重試與租約過期回收）
+    // drain：寫入即推（mpsc 觸發）＋ 背景自動推送常駐輪（退避、收斂發
+    // OutboxDrained，見 sync.rs auto_drain_loop）＋ 30 秒週期 sync 兜底。
     {
         let hub_a = hub.clone();
         tokio::spawn(async move {
@@ -286,20 +287,19 @@ async fn main() -> Result<(), String> {
             }
         });
         let hub2 = hub.clone();
+        tokio::spawn(async move { hub2.auto_drain_loop().await });
+        let hub3 = hub.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                if hub2.store.depth().map(|d| d.total > 0).unwrap_or(false) {
-                    hub2.drain_until_idle().await;
-                }
                 // 通知是 fire-and-forget：斷線期間的事件永久錯過，30 秒週期 sync 兜底
-                if hub2.machine.is_unlocked()
-                    && hub2.machine.egress_online()
-                    && hub2.store.now_ms()
-                        - hub2.last_sync_ms.load(std::sync::atomic::Ordering::Relaxed)
+                if hub3.machine.is_unlocked()
+                    && hub3.machine.egress_online()
+                    && hub3.store.now_ms()
+                        - hub3.last_sync_ms.load(std::sync::atomic::Ordering::Relaxed)
                         > 30_000
                 {
-                    let _ = hub2.sync_now().await;
+                    let _ = hub3.sync_now().await;
                 }
             }
         });

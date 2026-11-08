@@ -9,6 +9,10 @@
 //! 協議限制：Bitwarden 的 PUT 沒有伺服器端 CAS（revisionDate 只用於比對，
 //! -push 一律覆寫）。本實作在 push 前 GET 比較縮小窗口，最終一致由 FIFO +
 //! 收件匣保證；真正的併發競態（比較後、推送前被改）留給跨裝置 e2e 量化。
+//!
+//! drain 觸發三源（共用 `drain_lock` 單飛序列化）：寫路徑入列即推（mpsc）、
+//! 背景自動推送常駐輪 `auto_drain_loop`（失敗指數退避，見 `drain_backoff`）、
+//! 手動刷新；notifications 重新連上也喚醒 drain（`notify_loop` 內 trigger）。
 
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -25,6 +29,31 @@ use crate::hub::Hub;
 /// 409/412 之外的「服務器上該 cipher 不存在」判定
 fn is_not_found(e: &bw_server::ServerError) -> bool {
     e.status() == Some(404)
+}
+
+/// 背景自動推送的空轉節拍：無失敗史時每 5 秒探一次 outbox
+/// （同時代償過期 lease 的 in_flight 列）。
+pub(crate) const DRAIN_IDLE_TICK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// 背景自動推送退避（純函數）：連續失敗第 n 次 → 30s·2^(n-1)，上限 10 分鐘。
+/// n=0 回 0（呼叫端用 `drain_tick` 取空轉節拍）。
+pub(crate) fn drain_backoff(failures: u32) -> std::time::Duration {
+    if failures == 0 {
+        return std::time::Duration::ZERO;
+    }
+    let secs = 30u64
+        .saturating_mul(1u64 << (failures - 1).min(16))
+        .min(600);
+    std::time::Duration::from_secs(secs)
+}
+
+/// 背景自動推送節拍決策（純函數）：無失敗史 → 5 秒空轉；有 → 退避表。
+pub(crate) fn drain_tick(failures: u32) -> std::time::Duration {
+    if failures == 0 {
+        DRAIN_IDLE_TICK
+    } else {
+        drain_backoff(failures)
+    }
 }
 
 impl Hub {
@@ -239,6 +268,7 @@ impl Hub {
 
     pub async fn drain_until_idle(self: &std::sync::Arc<Self>) {
         let _g = self.drain_lock.lock().await;
+        let mut pushed = 0u32;
         loop {
             if !self.machine.is_unlocked() {
                 return;
@@ -251,11 +281,11 @@ impl Hub {
                 }
             };
             if due.is_empty() {
-                return;
+                break;
             }
             for m in due {
                 match self.push_one(&m).await {
-                    Ok(()) => {}
+                    Ok(()) => pushed += 1,
                     Err(retry_later) => {
                         if retry_later {
                             let _ = self.store.settle(m.id, MutState::Queued);
@@ -266,6 +296,70 @@ impl Hub {
                     }
                 }
             }
+        }
+        // 推送收斂事件（契約 §2.4）：只在本輪實際推過且可推數歸零時發，
+        // 空轉 drain 不常發事件；衝突/死信屬人工介入態、非收斂，不發。
+        // 訂閱端據此刷新「待推送」徽章投影。
+        if pushed > 0 && self.outbox_pushable().unwrap_or(1) == 0 {
+            self.emit(
+                EventTopic::OutboxDrained,
+                json!({"pending": 0, "pushed": pushed}),
+            );
+        }
+    }
+
+    /// 可推送列數：queued+in_flight+awaiting，與「待推送」徽章投影同口徑
+    /// （`refresh_pending` 的 EXISTS 集合）。conflict/dead 屬人工介入態，
+    /// 不計入自動收斂判準。
+    pub(crate) fn outbox_pushable(&self) -> Option<u32> {
+        self.store
+            .depth()
+            .map(|d| d.queued + d.in_flight + d.awaiting)
+            .ok()
+    }
+
+    /// 背景自動推送單輪（`auto_drain_loop` 本體；拆出便於單元測）：
+    /// 鎖著、未登入（無 server handle）或 outbox 空 → 不推，原數回傳（空
+    /// 則歸零）；推後可推數歸零 → backoff 歸零；未歸零 → failures+1，
+    /// 首敗 warn 一輪、續敗降 debug（VW 掛掉不刷錯誤日誌洪流）。
+    /// 重入紀律：與寫路徑即推、手動刷新共用 `drain_lock` 單飛序列化，不另建鎖。
+    pub(crate) async fn auto_drain_round(self: &std::sync::Arc<Self>, failures: u32) -> u32 {
+        if !self.machine.is_unlocked() || self.server.read().await.is_none() {
+            return failures;
+        }
+        let Some(pending) = self.outbox_pushable() else {
+            return failures;
+        };
+        if pending == 0 {
+            return 0;
+        }
+        self.drain_until_idle().await;
+        if self.outbox_pushable().unwrap_or(pending) == 0 {
+            tracing::info!(deferred = failures, "background drain converged");
+            0
+        } else {
+            let next = failures + 1;
+            if next == 1 {
+                tracing::warn!(
+                    pending,
+                    "background drain deferred; further failures at debug"
+                );
+            } else {
+                tracing::debug!(pending, failures = next, "background drain deferred");
+            }
+            next
+        }
+    }
+
+    /// 背景自動推送常駐迴路：VW 恢復後「待推送」無感自動收斂。節拍由
+    /// `drain_tick` 決定（無失敗史 5 秒空轉含租約過期回收；失敗依
+    /// 30s→60s→120s→上限 10 分鐘指數退避）；收斂事件由 `drain_until_idle`
+    /// 於實際推空時發 `OutboxDrained`。
+    pub async fn auto_drain_loop(self: &std::sync::Arc<Self>) {
+        let mut failures = 0u32;
+        loop {
+            tokio::time::sleep(drain_tick(failures)).await;
+            failures = self.auto_drain_round(failures).await;
         }
     }
 
@@ -554,6 +648,10 @@ impl Hub {
             match client.notifications().await {
                 Ok(mut stream) => {
                     self.machine.set_egress(true);
+                    // 共存快路：伺服器重新可達即喚醒 drain（VW 剛回來不必等
+                    // 背景退避輪）。重入由 drain_lock 單飛序列化，空轉成本
+                    // 僅一次 take_due 查詢；pull 路徑（下方 apply_theirs）不動。
+                    self.trigger_drain();
                     loop {
                         // 60 秒讀取逾時：docker stop / 網路中斷常留半開 TCP，
                         // tungstenite 不會自己發現死了；逾時強制走重連路徑。
@@ -969,5 +1067,65 @@ mod tests {
             Some("p-note")
         );
         let _ = shared;
+    }
+
+    /// 退避序列：30→60→120→240→480→600 秒封頂；無失敗史走 5 秒空轉節拍。
+    #[test]
+    fn drain_backoff_sequence_caps_at_ten_minutes() {
+        use std::time::Duration;
+        assert_eq!(drain_backoff(0), Duration::ZERO);
+        for (n, secs) in [
+            (1u32, 30u64),
+            (2, 60),
+            (3, 120),
+            (4, 240),
+            (5, 480),
+            (6, 600),
+            (7, 600),
+            (u32::MAX, 600),
+        ] {
+            assert_eq!(drain_backoff(n), Duration::from_secs(secs), "n={n}");
+        }
+        assert_eq!(drain_tick(0), Duration::from_secs(5));
+        assert_eq!(drain_tick(3), Duration::from_secs(120));
+    }
+
+    /// 背景輪紀律：未登入（無 server handle）不動 outbox；server 不可達
+    /// （fixture 的 discard port）逐輪累計失敗、列回 queued 不成死信。
+    #[tokio::test]
+    async fn auto_drain_round_backs_off_without_killing_rows() {
+        let (hub, _d) = unlocked_hub("ad1").await;
+        let item = Uuid::new_v4();
+        hub.store
+            .enqueue(&MutationDraft {
+                item,
+                payload: json!({"op": "delete"}),
+                base_rev: None,
+                origin: None,
+                mirror: None,
+            })
+            .unwrap();
+        // 未登入：單輪空轉，列不動。
+        let srv = hub
+            .server
+            .write()
+            .await
+            .take()
+            .expect("fixture server handle");
+        assert_eq!(hub.auto_drain_round(0).await, 0);
+        assert_eq!(hub.outbox_pushable(), Some(1));
+        // 已登入但伺服器不可達：逐輪 failures+1，列留 queued（非 Dead）。
+        hub.server.write().await.replace(srv);
+        assert_eq!(hub.auto_drain_round(0).await, 1);
+        assert_eq!(hub.auto_drain_round(1).await, 2);
+        assert_eq!(hub.outbox_pushable(), Some(1));
+        assert_eq!(hub.store.depth().unwrap().dead, 0, "退避不得產生死信");
+    }
+
+    /// outbox 空 → 背景輪把失敗計數歸零（下個 episode 從空轉節拍重新起算）。
+    #[tokio::test]
+    async fn auto_drain_round_resets_when_idle() {
+        let (hub, _d) = unlocked_hub("ad2").await;
+        assert_eq!(hub.auto_drain_round(5).await, 0);
     }
 }
