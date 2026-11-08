@@ -34,10 +34,10 @@ BITWARD_GUI_SOCK=<repo>/dev/e2e/demo/s NSH_GUI_SHOTS=$PWD nsh run --target macos
 ```
 
 依指令序列跑完整驗收流並寫 `shot-1..15-*.png` 後退出：列表（搜尋
-"GitHub"）→ 詳情遮罩 → 詳情 revealed → 新增表單 → 真送新增（Create+AddTag）
-→ TOTP 拒絕路徑（無 seed → 錯誤橫條）→ 排序下拉 → 標籤下拉 → 編輯改名
-（Patch）→ 刪除確認框 → 刪除後空列表 → 鎖態（已鎖定+解鎖鈕）→ 解鎖 →
-匯出確認框（未加密提醒）→ 匯出完成提示列。
+"GitHub"）→ 詳情遮罩 → 詳情 revealed → 新增表單模態 → 真送新增（Create+AddTag）
+→ TOTP 拒絕路徑（無 seed → 錯誤橫條）→ 排序下拉 → 標籤 chips 選取 →
+編輯改名（Patch）→ 刪除確認框 → 取消不刪斷言 → 刪除後空列表 →
+鎖態頁（已鎖定+解鎖鈕）→ 解鎖 → 匯出確認框（未加密提醒）→ 匯出完成提示列。
 
 注意：流裡會真寫 demo vault（建一筆 "E2E 驗證項目"、改名、軟刪；
 詳情目標是種子項目「GitHub 測試」，找不到退回第一筆）。跑前用
@@ -50,12 +50,13 @@ BITWARD_GUI_SOCK=<repo>/dev/e2e/demo/s NSH_GUI_SHOTS=$PWD nsh run --target macos
 |---|---|
 | `btp.rs` | BTP 精簡同步 client：u32 LE 長度前綴 + JSON 幀、`Hello{Enroll pair_code:null}`→`Welcome`→`Invoke`/`Reply`；鎖撤銷（A6）自動重連重 Enroll 一次 |
 | `state.rs` | 應用狀態機：`AppCore`（訊號集）+ `Cmd` 命令佇列 + 唯一 `reduce`；UI handler 只投遞命令，worker 執行緒只回傳命令，訊號全在引擎執行緒寫入 |
-| `lib.rs` | 根元件 `App`：命令幫浦（`set_interval` 50ms + `batch`）、標題列（鎖態/解鎖/匯出/新增/提示列）、錯誤橫條、Phase×Route 路由 |
-| `list.rs` | 搜尋框（Query.text 交 daemon FTS）、標籤下拉（選項取自本地載入清單、比對交 daemon）、排序選單、pending 徽章、`virtual_list` |
-| `detail.rs` | metadata 全欄位；密碼遮罩 →「顯示密碼」發 Get(Reveal)，明文只存 `revealed` 訊號、離開詳情即清；TOTP 按鈕發 Use:TotpCode |
-| `form.rs` | 新增/編輯表單（name/username/password/uri/tags） |
+| `lib.rs` | 根元件 `App`：命令幫浦（`set_interval` 50ms + `batch`）、大標題列（N 筆項目副行/匯出/改密/新增）、錯誤橫條、Phase×Route 主從式版面與鎖態頁 |
+| `list.rs` | 全寬圓角搜尋框（Query.text 交 daemon FTS）、標籤 chips 行（選項取自本地載入清單、比對交 daemon）、排序選單、56px 列（monogram 派生色、選中列 accent 指示條）、pending 徽章、`virtual_list` |
+| `detail.rs` | 右欄詳情面板：identity 卡（大 monogram＋連結色 url）＋分節欄位（帳密／TOTP）；每欄複製鈕（剪貼簿＋success 回饋 1 秒）；密碼遮罩 →「顯示密碼」發 Get(Reveal)，明文只存 `revealed` 訊號、離開詳情即清；TOTP 按鈕發 Use:TotpCode |
+| `form.rs` | 新增/編輯模態（elevated 卡＋背板點擊取消；name/username/password/uri/tags） |
 | `export.rs` | 未加密 JSON 匯出：逐筆 Get(Reveal) → `~/Downloads/bitward-export-<UTC>.json`（0600） |
-| `ui.rs` | 按鈕/徽章/表單欄/下拉列/確認模態（absolute 鋪滿 + 置中卡） |
+| `theme.rs` | 設計 tokens：三層暗色背景、accent 漸變、語意色、文字三級、monogram 8 色盤（名字 FNV hash 穩定派生）；視圖層唯一顏色真相源，禁散落 hex |
+| `ui.rs` | 共用小元件：按鈕（primary 漸變/ghost/destructive）、monogram、徽章、表單欄、下拉列、模態殼（absolute 鋪滿 + 置中 elevated 卡）、確認/改密模態、複製鈕 |
 | `shots.rs` | `NSH_GUI_SHOTS` 自我截圖器（AppKit `cacheDisplayInRect` 路徑，不需 TCC；objc2 經 `nsh_platform_macos` 再匯取） |
 
 導航是 `Route` 狀態機 + `when` 區塊——不用 `nav_stack`（spike FINDINGS

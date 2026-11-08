@@ -146,8 +146,9 @@ fn at(ms: u64, f: impl FnOnce() + 'static) {
 }
 
 /// 開窗後依序跑完整驗收流：列表（搜尋）→ 詳情遮罩 → revealed → 新增表單
-/// → 提交新增 → 編輯改名 → 刪除確認 → 匯出確認 → 鎖態/解鎖，
-/// 各步存一張 shot-N-*.png 後結束行程。時序裕量對齊 spike（Background
+/// 模態 → 提交新增 → 編輯改名 → 刪除確認（先取消斷言、再確認）→
+/// 匯出確認 → 鎖態頁/解鎖，各步存一張 shot-N-*.png 後結束行程。時序裕量對齊
+/// spike（Background
 /// session 無 vsync 可等，固定 sleep；本地 daemon 往返 <50ms）。
 /// 詳情目標用驗收種子項目「GitHub 測試」，找不到退回第一筆。
 pub fn script(dir: PathBuf, core: AppCore) {
@@ -167,7 +168,11 @@ pub fn script(dir: PathBuf, core: AppCore) {
     let d = dir.clone();
     at(4200, move || capture(&d, "shot-2-detail-masked.png"));
     let c = core.clone();
-    at(4500, move || c.send(Cmd::RequestReveal));
+    at(4500, move || {
+        c.send(Cmd::RequestReveal);
+        // 複製鈕同路徑的剪貼簿環境呼叫（e2e 側探針：不能炸）。
+        set_clipboard("bitward-gui-e2e-clipboard-probe");
+    });
     let d = dir.clone();
     at(5700, move || capture(&d, "shot-3-detail-revealed.png"));
     let c = core.clone();
@@ -211,7 +216,7 @@ pub fn script(dir: PathBuf, core: AppCore) {
     let d = dir.clone();
     at(10900, move || capture(&d, "shot-6-totp-denied.png"));
 
-    // —— 排序與標籤下拉（回列表操作）——
+    // —— 排序下拉與標籤 chips（標籤已改 chips 行：選中描邊即證據）——
     let c = core.clone();
     at(11100, move || {
         c.send(Cmd::OpenList);
@@ -222,12 +227,12 @@ pub fn script(dir: PathBuf, core: AppCore) {
     let c = core.clone();
     at(11900, move || {
         c.send(Cmd::ToggleSortMenu);
-        c.send(Cmd::ToggleTagMenu);
+        c.send(Cmd::ChooseTag(Some("dev".into())));
     });
     let d = dir.clone();
     at(12500, move || capture(&d, "shot-8-tag-menu.png"));
     let c = core.clone();
-    at(12700, move || c.send(Cmd::ToggleTagMenu));
+    at(12700, move || c.send(Cmd::ChooseTag(None)));
 
     // —— 編輯改名（Vault:Patch）——
     let c = core.clone();
@@ -243,7 +248,7 @@ pub fn script(dir: PathBuf, core: AppCore) {
     let d = dir.clone();
     at(14600, move || capture(&d, "shot-9-edited.png"));
 
-    // —— 刪除確認框 → Vault:Delete ——
+    // —— 刪除確認框：先取消（斷言未刪）再yes走 Vault:Delete ——
     let c = core.clone();
     at(14800, move || {
         if let Some(id) = find_id(&c, "E2E 驗證項目改名") {
@@ -253,30 +258,44 @@ pub fn script(dir: PathBuf, core: AppCore) {
     let d = dir.clone();
     at(15300, move || capture(&d, "shot-10-delete-confirm.png"));
     let c = core.clone();
-    at(15600, move || c.send(Cmd::ConfirmYes));
+    at(15600, move || c.send(Cmd::ConfirmNo));
+    let c = core.clone();
+    at(16000, move || {
+        let kept = find_id(&c, "E2E 驗證項目改名").is_some();
+        println!("bitward-gui: delete-cancel kept item = {kept}");
+        assert!(kept, "取消刪除後項目應仍在");
+    });
+    let c = core.clone();
+    at(16200, move || {
+        if let Some(id) = find_id(&c, "E2E 驗證項目改名") {
+            c.send(Cmd::AskDelete(id));
+        }
+    });
+    let c = core.clone();
+    at(16500, move || c.send(Cmd::ConfirmYes));
     let d = dir.clone();
-    at(16700, move || capture(&d, "shot-11-after-delete.png"));
+    at(17600, move || capture(&d, "shot-11-after-delete.png"));
 
     // —— 鎖態指示 + 解鎖鈕（Auth:Lock → 按鈕 → Auth:Unlock）——
     let c = core.clone();
-    at(16900, move || c.send(Cmd::RequestLock));
+    at(17800, move || c.send(Cmd::RequestLock));
     let d = dir.clone();
-    at(18700, move || capture(&d, "shot-12-locked.png"));
+    at(19600, move || capture(&d, "shot-12-locked.png"));
     let c = core.clone();
-    at(19200, move || c.send(Cmd::RequestUnlock));
+    at(20100, move || c.send(Cmd::RequestUnlock));
     let d = dir.clone();
-    at(21000, move || capture(&d, "shot-13-unlocked.png"));
+    at(21900, move || capture(&d, "shot-13-unlocked.png"));
 
     // —— 匯出：確認框（未加密提醒）→ 逐筆 Reveal → 落盤 ——
     let c = core.clone();
-    at(21400, move || c.send(Cmd::AskExport));
+    at(22300, move || c.send(Cmd::AskExport));
     let d = dir.clone();
-    at(22000, move || capture(&d, "shot-14-export-confirm.png"));
+    at(22900, move || capture(&d, "shot-14-export-confirm.png"));
     let c = core.clone();
-    at(22400, move || c.send(Cmd::ConfirmYes));
+    at(23300, move || c.send(Cmd::ConfirmYes));
     let d = dir.clone();
-    at(24600, move || capture(&d, "shot-15-export-done.png"));
-    at(25200, move || {
+    at(25500, move || capture(&d, "shot-15-export-done.png"));
+    at(26100, move || {
         on_main(|| {
             #[cfg(target_os = "macos")]
             {
