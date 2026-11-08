@@ -34,6 +34,10 @@ codesign -f -s "$IDENTITY" --entitlements bins/bitwarderd/helper.entitlements \
   || { echo "FATAL: staged helper 不支援 --service（舊殭屍二進位？）"; exit 1; }
 echo "    helper functional OK"
 
+echo "==> force-fresh 巢狀 BitwardGUI.app（殭屍保險同 helper；先內後外再重封外層）"
+BW_SIGN_ID="$IDENTITY" bash scripts/gui-bundle.sh /Applications/Bitward.app/Contents/Applications
+codesign -f -s "$IDENTITY" /Applications/Bitward.app
+
 echo "==> (re)install LaunchAgent"
 /Applications/Bitward.app/Contents/Helpers/bitwarderd --service uninstall >/dev/null 2>&1 || true
 /Applications/Bitward.app/Contents/Helpers/bitwarderd --service install --push-app-group "$GROUP"

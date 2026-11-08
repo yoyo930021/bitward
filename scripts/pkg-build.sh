@@ -16,6 +16,8 @@
 #   BW_PROFILE       Developer ID（MAC_APP_DIRECT）.provisionprofile 路徑；設了就嵌進
 #                    App（受限 entitlements 授權用）。BW_PROFILE_APPEX 同型、嵌 appex
 #                    （provider 屬另一 App ID）；只給 BW_PROFILE 時 appex 維持剝除。
+# 巢狀密碼庫：staging 一律經 scripts/gui-bundle.sh 組 BitwardGUI.app 進
+#   Contents/Applications（同身分＋同 runtime flags 重簽，納入深簽鏈）。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO=$PWD
@@ -116,6 +118,11 @@ if [ "$IS_DEVID" = 1 ]; then
     --entitlements platforms/macos/BitwardProvider/BitwardProvider.entitlements \
     "$APPEX"
 fi
+# 巢狀密碼庫（NSH GUI）：BitwardGUI.app 進 Contents/Applications——殼轉 LSUIElement
+# 背景後由殼 NSWorkspace.open 此 bundle，Dock 只剩「Bitward 密碼庫」單一入口。
+# gui-bundle.sh 先內後外簽完 GUI bundle 深鏈，外層 seal（下段）才把它收進 CodeResources。
+BW_SIGN_ID="$IDENTITY" BW_CS_FLAGS="$CS_RUNTIME" bash scripts/gui-bundle.sh \
+  "$STAGE/root/Bitward.app/Contents/Applications"
 # 殭屍 plist 保險：增量建置可能殘留舊 LaunchAgents（不合規 Label 的兄弟檔會讓
 # SMAppService register 拋 EINVAL，2026-11-07 實測）→ 以源檔為唯一事實重建目錄。
 LA_STAGED="$STAGE/root/Bitward.app/Contents/Library/LaunchAgents"
@@ -204,6 +211,8 @@ fi
 
 echo "==> installer -pkg -target /"
 pgrep -x Bitward >/dev/null && kill -9 "$(pgrep -x Bitward)" 2>/dev/null || true
+# 舊密碼庫實例若活著，殼轉發只會起它（同 bundle id 單例）——先清再測才收新產物。
+pgrep -x BitwardGUI >/dev/null && kill -9 "$(pgrep -x BitwardGUI)" 2>/dev/null || true
 if [ "${BW_NO_INSTALL:-0}" = 1 ]; then
   echo "    BW_NO_INSTALL=1：跳過安裝（產物以 ditto 手動換裝，receipt 維持既有）"
 elif ! sudo -n installer -pkg "$PKG" -target /; then
@@ -228,6 +237,9 @@ cmp -s /Applications/Bitward.app/Contents/Helpers/bitwarderd \
 cmp -s /Applications/Bitward.app/Contents/Helpers/BitwardDaemon.app/Contents/MacOS/bitwarderd \
      "$STAGE/root/Bitward.app/Contents/Helpers/BitwardDaemon.app/Contents/MacOS/bitwarderd" \
   || { echo "FATAL: 已裝 BitwardDaemon.app 與 staging 產物不符"; exit 1; }
+cmp -s /Applications/Bitward.app/Contents/Applications/BitwardGUI.app/Contents/MacOS/BitwardGUI \
+     "$STAGE/root/Bitward.app/Contents/Applications/BitwardGUI.app/Contents/MacOS/BitwardGUI" \
+  || { echo "FATAL: 已裝 BitwardGUI.app 與 staging 產物不符"; exit 1; }
 echo "    已裝 helper ＝ staging 產物（沙盒 helper 的執行探測交給 launchd＋實驗段）"
 echo "    pkg 簽章 / bundle 簽章 / 落地路徑 / receipt / helper 功能：全部 OK"
 pkgutil --pkg-info "$PKG_ID" | sed 's/^/    /'
