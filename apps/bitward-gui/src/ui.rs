@@ -319,7 +319,7 @@ pub fn change_password_modal(core: AppCore) -> View {
     )
 }
 
-/// monogram 色塊：名字首字＋穩定派生底色（列表 36/詳情 64 共用）。
+/// monogram 色塊：名字首字＋穩定派生底色（列表 26/詳情 44 共用）。
 pub fn monogram(
     name: impl Fn() -> Option<String> + 'static,
     size: f32,
@@ -382,9 +382,9 @@ pub fn copy_button(
 ) -> View {
     let press = value;
     view()
-        .w(px(26.0))
-        .h(px(26.0))
-        .rounded_md()
+        .w(px(theme::COPY_BTN))
+        .h(px(theme::COPY_BTN))
+        .rounded(px(5.0))
         .flex_row()
         .items_center()
         .justify_center()
@@ -406,7 +406,7 @@ pub fn copy_button(
         })
         .child(
             text(move || if copied.get() == Some(token) { "✓" } else { "⧉" }.to_owned())
-                .text_size(px(13.0))
+                .text_size(px(11.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(move || {
                     if copied.get() == Some(token) {

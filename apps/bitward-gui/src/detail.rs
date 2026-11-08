@@ -24,9 +24,9 @@ pub fn pane(core: AppCore) -> View {
         .child(scroll().flex_1().child(
             view()
                 .flex_col()
-                .gap_6()
+                .gap_4()
                 .px_8()
-                .py_6()
+                .py_4()
                 .w_full()
                 .max_w(px(680.0))
                 .child(section("帳密", accounts_section(core.clone(), copied)))
@@ -121,14 +121,14 @@ fn identity_header(core: AppCore) -> View {
     view()
         .flex_row()
         .items_center()
-        .gap_4()
+        .gap_3()
         .px_8()
-        .py_5()
+        .py_4()
         .child(ui::monogram(
             move || name_core.detail.get().and_then(|d| d.meta.name.clone()),
-            64.0,
-            16.0,
-            24.0,
+            theme::MONOGRAM_ID,
+            theme::MONOGRAM_ID_RADIUS,
+            theme::MONOGRAM_ID_TEXT,
         ))
         .child(
             view()
@@ -143,7 +143,7 @@ fn identity_header(core: AppCore) -> View {
                             .and_then(|d| d.meta.name.clone())
                             .unwrap_or_else(|| "(未命名)".to_owned())
                     })
-                    .text_size(px(22.0))
+                    .text_size(px(theme::TEXT_IDENTITY))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme::TEXT_PRIMARY)
                     .number_of_lines(1),
@@ -218,7 +218,7 @@ fn accounts_section(core: AppCore, copied: Signal<Option<&'static str>>) -> Vec<
         if d.meta.uris.is_empty() {
             "—".into()
         } else {
-            d.meta.uris.join("\n")
+            d.meta.uris.join(" · ")
         }
     });
     let tags = detail_disp(&core, |d| {
@@ -263,17 +263,15 @@ fn password_field(core: AppCore, copied: Signal<Option<&'static str>>) -> View {
     let copy_build = core.clone();
     let toggle = core.clone();
     view()
+        .h(px(theme::FIELD_H))
         .px_4()
-        .py_3()
         .flex_row()
         .items_center()
-        .justify_between()
         .gap_3()
+        .child(label("密碼"))
         .child(
             view()
-                .flex_col()
-                .gap_0p5()
-                .child(label("密碼"))
+                .flex_1()
                 .child(
                     when(
                         move || shown_cond.revealed.get().is_some(),
@@ -284,10 +282,10 @@ fn password_field(core: AppCore, copied: Signal<Option<&'static str>>) -> View {
                                 Some(pw) => pw,
                                 None => String::new(),
                             })
-                            .text_size(px(15.0))
-                            .line_height(px(21.0))
+                            .text_size(px(theme::TEXT_FIELD_VALUE))
                             .font_family(ui::mono_font())
                             .text_color(theme::TEXT_PRIMARY)
+                            .number_of_lines(1)
                         },
                     )
                     .otherwise(move || {
@@ -298,9 +296,9 @@ fn password_field(core: AppCore, copied: Signal<Option<&'static str>>) -> View {
                                 .and_then(|d| d.password_masked.clone())
                                 .unwrap_or_else(|| "••••••••".to_owned())
                         })
-                        .text_size(px(15.0))
-                        .line_height(px(21.0))
+                        .text_size(px(theme::TEXT_FIELD_VALUE))
                         .text_color(theme::TEXT_PRIMARY)
+                        .number_of_lines(1)
                     }),
                 ),
         )
@@ -333,15 +331,20 @@ fn password_field(core: AppCore, copied: Signal<Option<&'static str>>) -> View {
         )
 }
 
-fn label(text_label: &'static str) -> Text {
-    text(text_label)
-        .text_size(px(12.0))
-        .font_weight(FontWeight::MEDIUM)
-        .letter_spacing(px(0.3))
-        .text_color(theme::TEXT_SECONDARY)
+fn label(text_label: &'static str) -> View {
+    view()
+        .w(px(theme::FIELD_LABEL_W))
+        .flex_shrink_0()
+        .child(
+            text(text_label)
+                .text_size(px(theme::TEXT_FIELD_LABEL))
+                .font_weight(FontWeight::MEDIUM)
+                .letter_spacing(px(0.3))
+                .text_color(theme::TEXT_MUTED),
+        )
 }
 
-/// 欄位列：label(12 secondary)／value(15 primary) 兩行＋右側按鈕群。
+/// 欄位列：同行 label(12 muted 固定欄寬)＋value(13.5)＋右側按鈕群，列高 34。
 fn field(label_text: &'static str, value: Disp, trailing: Vec<View>) -> View {
     let v1 = value.clone();
     let mut actions = view().flex_row().items_center().gap_1();
@@ -349,25 +352,18 @@ fn field(label_text: &'static str, value: Disp, trailing: Vec<View>) -> View {
         actions = actions.child(t);
     }
     view()
+        .h(px(theme::FIELD_H))
         .px_4()
-        .py_3()
         .flex_row()
         .items_center()
-        .justify_between()
         .gap_3()
+        .child(label(label_text))
         .child(
-            view()
-                .flex_col()
-                .gap_0p5()
+            text(move || v1())
+                .text_size(px(theme::TEXT_FIELD_VALUE))
+                .text_color(theme::TEXT_PRIMARY)
                 .flex_1()
-                .child(label(label_text))
-                .child(
-                    text(move || v1())
-                        .text_size(px(15.0))
-                        .line_height(px(21.0))
-                        .text_color(theme::TEXT_PRIMARY)
-                        .number_of_lines(2),
-                ),
+                .number_of_lines(1),
         )
         .child(actions)
 }
@@ -420,25 +416,19 @@ fn field_dyn(
     trailing: impl Fn() -> View + 'static,
 ) -> View {
     view()
+        .h(px(theme::FIELD_H))
         .px_4()
-        .py_3()
         .flex_row()
         .items_center()
-        .justify_between()
         .gap_3()
+        .child(label(label_text))
         .child(
-            view()
-                .flex_col()
-                .gap_0p5()
+            text(value)
+                .text_size(px(theme::TEXT_FIELD_VALUE))
+                .font_family(ui::mono_font())
+                .text_color(theme::TEXT_PRIMARY)
                 .flex_1()
-                .child(label(label_text))
-                .child(
-                    text(value)
-                        .text_size(px(15.0))
-                        .line_height(px(21.0))
-                        .font_family(ui::mono_font())
-                        .text_color(theme::TEXT_PRIMARY),
-                ),
+                .number_of_lines(1),
         )
         .child(dynamic(trailing))
 }
