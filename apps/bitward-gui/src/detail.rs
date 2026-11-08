@@ -287,9 +287,14 @@ fn info_section(core: AppCore, copied: Signal<Option<&'static str>>) -> Vec<View
 }
 
 /// 備註節：notes 明文（Masked 視窗即帶全文；Metadata 下鍵不存在）。
-fn notes_section(core: AppCore, _copied: Signal<Option<&'static str>>) -> Vec<View> {
+fn notes_section(core: AppCore, copied: Signal<Option<&'static str>>) -> Vec<View> {
     let notes = detail_disp(&core, |d| d.notes.clone().unwrap_or_else(|| "—".into()));
-    vec![field_multiline("備註", notes)]
+    let copy = notes.clone();
+    vec![block(
+        move || notes(),
+        true,
+        vec![ui::copy_button(copy, "備註", copied)],
+    )]
 }
 
 /// 自訂欄位節：pane 每次 detail 重建時快照（Reveal 不改欄集）。
@@ -298,9 +303,9 @@ fn custom_fields_section(core: AppCore, copied: Signal<Option<&'static str>>) ->
         return Vec::new();
     };
     if d.fields.is_empty() {
-        return vec![field_static(
-            "自訂欄位".to_owned(),
-            "（無自訂欄位）".to_owned(),
+        return vec![block(
+            || "（無自訂欄位）".to_owned(),
+            false,
             Vec::new(),
         )];
     }
@@ -418,6 +423,60 @@ fn label(text_label: &'static str) -> Text {
         .text_color(theme::TEXT_SECONDARY)
 }
 
+/// 值塊（無欄位名）：單欄分節（驗證碼/備註）由節標題承擔命名，不重複標。
+fn block(value: impl Fn() -> String + 'static, multiline: bool, trailing: Vec<View>) -> View {
+    let mut actions = view().flex_row().items_center().gap_1();
+    for t in trailing {
+        actions = actions.child(t);
+    }
+    view()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(
+            view()
+                .flex_1()
+                .px_3()
+                .py_2()
+                .rounded(px(theme::RADIUS_BLOCK))
+                .bg(theme::SURFACE)
+                .child(
+                    text(value)
+                        .text_size(px(theme::TEXT_FIELD_VALUE))
+                        .text_color(theme::TEXT_PRIMARY)
+                        .number_of_lines(if multiline { 4 } else { 1 }),
+                ),
+        )
+        .child(actions)
+}
+
+/// 值塊（trailing 鈕群由閉包現算：跟著訊號變動重建）。
+fn block_dyn(
+    value: impl Fn() -> String + 'static,
+    multiline: bool,
+    trailing: impl Fn() -> View + 'static,
+) -> View {
+    view()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(
+            view()
+                .flex_1()
+                .px_3()
+                .py_2()
+                .rounded(px(theme::RADIUS_BLOCK))
+                .bg(theme::SURFACE)
+                .child(
+                    text(value)
+                        .text_size(px(theme::TEXT_FIELD_VALUE))
+                        .text_color(theme::TEXT_PRIMARY)
+                        .number_of_lines(if multiline { 4 } else { 1 }),
+                ),
+        )
+        .child(dynamic(trailing))
+}
+
 fn label_str(text_label: String) -> Text {
     text(move || text_label.clone())
         .text_size(px(theme::TEXT_FIELD_LABEL))
@@ -456,29 +515,6 @@ fn field(label_text: &'static str, value: Disp, trailing: Vec<View>) -> View {
                         ),
                 )
                 .child(actions),
-        )
-}
-
-/// 欄位值塊（多行值：備註用，塊內最多 4 行截斷）。
-fn field_multiline(label_text: &'static str, value: Disp) -> View {
-    let v1 = value.clone();
-    view()
-        .flex_col()
-        .gap_1()
-        .child(label(label_text))
-        .child(
-            view()
-                .w_full()
-                .px_3()
-                .py_2()
-                .rounded(px(theme::RADIUS_BLOCK))
-                .bg(theme::SURFACE)
-                .child(
-                    text(move || v1())
-                        .text_size(px(theme::TEXT_FIELD_VALUE))
-                        .text_color(theme::TEXT_PRIMARY)
-                        .number_of_lines(4),
-                ),
         )
 }
 
@@ -522,13 +558,13 @@ fn totp_section(core: AppCore, copied: Signal<Option<&'static str>>) -> Vec<View
     let shown_core = core.clone();
     let btn_core = core.clone();
     let copy_core = core.clone();
-    vec![field_dyn(
-        "驗證碼",
+    vec![block_dyn(
         move || {
             hint_core.totp.get().unwrap_or_else(|| {
                 "（按右側「驗證碼」向 daemon 取現算代碼）".to_owned()
             })
         },
+        false,
         move || {
             let btn = btn_core.clone();
             let shown = shown_core.clone();
@@ -551,7 +587,7 @@ fn totp_section(core: AppCore, copied: Signal<Option<&'static str>>) -> Vec<View
                         "TOTP",
                         copied,
                     )
-                                    },
+                },
             ));
             actions
         },
@@ -621,39 +657,6 @@ fn countdown(core: AppCore) -> View {
                         theme::TEXT_MUTED
                     }
                 }),
-        )
-}
-
-/// 欄位值塊（trailing 鈕群由閉包現算：跟著的訊號變動重建）。
-fn field_dyn(
-    label_text: &'static str,
-    value: impl Fn() -> String + 'static,
-    trailing: impl Fn() -> View + 'static,
-) -> View {
-    view()
-        .flex_col()
-        .gap_1()
-        .child(label(label_text))
-        .child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(
-                    view()
-                        .flex_1()
-                        .px_3()
-                        .py_2()
-                        .rounded(px(theme::RADIUS_BLOCK))
-                        .bg(theme::SURFACE)
-                        .child(
-                            text(value)
-                                .text_size(px(theme::TEXT_FIELD_VALUE))
-                                .text_color(theme::TEXT_PRIMARY)
-                                .number_of_lines(1),
-                        ),
-                )
-                .child(dynamic(trailing)),
         )
 }
 
