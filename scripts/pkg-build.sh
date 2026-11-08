@@ -182,10 +182,11 @@ echo "==> notarize（BW_NOTARIZE=${BW_NOTARIZE:-0}）"
 if [ "${BW_NOTARIZE:-0}" = 1 ]; then
   : "${BW_APPLE_API_KEY:?BW_NOTARIZE=1 需 BW_APPLE_API_KEY（ASC API key id）}"
   : "${BW_APPLE_API_ISSUER:?BW_NOTARIZE=1 需 BW_APPLE_API_ISSUER}"
-  # p8 依 key id 配對優先（private_keys → .asc/keys），再降任何 private_keys/*.p8（舊慣例）
-  P8=${BW_APPLE_API_KEY_P8:-$(ls "$HOME"/private_keys/AuthKey_${BW_APPLE_API_KEY}.p8 \
+  # p8 依 key id 配對優先（private_keys → .asc/keys），再降任何 private_keys/*.p8（舊慣例）。
+  # || true：ls 對不存在 glob 回非零，pipefail＋set -e 會在賦值處無聲斃掉腳本（2026-11-08 實測）。
+  P8=${BW_APPLE_API_KEY_P8:-$( { ls "$HOME"/private_keys/AuthKey_${BW_APPLE_API_KEY}.p8 \
     "$HOME"/.asc/keys/AuthKey_${BW_APPLE_API_KEY}.p8 \
-    "$HOME"/private_keys/*.p8 2>/dev/null | head -1)}
+    "$HOME"/private_keys/*.p8 2>/dev/null || true; } | head -1)}
   [ -n "$P8" ] || { echo "FATAL: BW_NOTARIZE=1 但找不到 AuthKey_${BW_APPLE_API_KEY}.p8（BW_APPLE_API_KEY_P8 可指定）"; exit 1; }
   xcrun notarytool submit "$PKG" --key "$P8" --key-id "$BW_APPLE_API_KEY" \
     --issuer "$BW_APPLE_API_ISSUER" --wait
