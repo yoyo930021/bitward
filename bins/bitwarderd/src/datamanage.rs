@@ -2,6 +2,7 @@
 //! 全部寫路徑複用 outbox（§2.4）：本地交易先行 → drain push。
 
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use bw_proto::{DupGroup, ItemId, OverlayOpWire, Response, WtpError};
 use bw_store::{MutationDraft, Overlay, OverlayOp};
@@ -169,5 +170,132 @@ impl Hub {
             .map_err(denied)?;
         self.trigger_drain();
         Ok(Response::Ok)
+    }
+
+    // —— 資料夾與硬刪（v5 三件套；垃圾桶三態為 Main 裁定追加）——
+
+    /// 新建資料夾：名稱以 user key 加密後 `POST /folders`（官方客戶端語意：
+    /// 資料夾屬個人 vault，不走 org key）。同步呼叫不入列——資料夾非 outbox
+    /// 載體，離線時快速失敗（批次 2 GUI 再評估佇列化）。
+    pub async fn create_folder(&self, name: &str) -> Result<Response, WtpError> {
+        self.require_unlocked()?;
+        let enc_name = self
+            .machine
+            .with_keys(|kb| bw_crypto::encrypt(kb.user_key(), name).map(|e| e.to_string()))
+            .map_err(|_| WtpError::Locked)?
+            .map_err(denied)?;
+        let client = self.client().await?;
+        let created = client.folder_create(&enc_name).await.map_err(crate::hub::map_server_err)?;
+        let id_s = created
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| crate::hub::drift("folders 回包缺 id"))?;
+        let id = Uuid::parse_str(id_s).map_err(|_| crate::hub::drift(format!("folder id {id_s}")))?;
+        self.store.folder_put(id, &created).map_err(denied)?;
+        Ok(Response::Json(json!({"id": id.to_string(), "name": name})))
+    }
+
+    /// 資料夾清單：id 恆出；名稱是信封字串，解鎖態解明文、鎖定態 null
+    /// （金鑰不在時不猜）。排序：明文名稱不分大小寫，未解名排後。
+    pub fn list_folders(&self) -> Result<Response, WtpError> {
+        let rows = self.store.folder_list().map_err(denied)?;
+        let names: Option<Vec<Option<String>>> = self
+            .machine
+            .with_keys(|kb| {
+                let key = kb.user_key().as_bytes().to_vec();
+                rows.iter()
+                    .map(|r| {
+                        r.name.as_deref().and_then(|n| {
+                            bw_crypto::decrypt_bytes_with_key(&key, n)
+                                .ok()
+                                .and_then(|b| String::from_utf8(b).ok())
+                        })
+                    })
+                    .collect()
+            })
+            .ok();
+        let mut out: Vec<Value> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                json!({
+                    "id": r.id.to_string(),
+                    "name": names.as_ref().and_then(|ns| ns[i].clone()),
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            let name = |v: &Value| match v["name"].as_str() {
+                Some(s) => (0u8, s.to_lowercase()),
+                None => (1u8, String::new()),
+            };
+            name(a)
+                .cmp(&name(b))
+                .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+        });
+        Ok(Response::Json(Value::Array(out)))
+    }
+
+    /// 刪除資料夾（官方語意同序）：先把夾內項目 `folderId` 清 NULL
+    /// （逐筆走 outbox patch，離線可收斂），再 `DELETE /folders/{id}`
+    /// （404＝已不存在，冪等收斂），最後摘除鏡像列。
+    /// 伺服器刪除失敗（離線）→ 回錯但項目 patch 已入列；重試收斂。
+    pub async fn delete_folder(&self, session: &str, id: ItemId) -> Result<Response, WtpError> {
+        self.require_unlocked()?;
+        let items = self
+            .store
+            .query(&bw_proto::Query {
+                folder: Some(id.to_string()),
+                limit: u32::MAX,
+                ..Default::default()
+            })
+            .map_err(denied)?;
+        for m in items {
+            self.write_patch(
+                session,
+                m.id,
+                &[bw_proto::FieldEdit {
+                    path: "folderId".into(),
+                    value: None,
+                }],
+            )
+            .await?;
+        }
+        let client = self.client().await?;
+        match client.folder_delete(id).await {
+            Ok(()) => {}
+            Err(e) if e.status() == Some(404) => {}
+            Err(e) => return Err(crate::hub::map_server_err(e)),
+        }
+        self.store.folder_remove(id).map_err(denied)?;
+        self.emit(
+            bw_proto::EventTopic::VaultChanged,
+            json!({"folder": id.to_string(), "op": "folder-delete"}),
+        );
+        Ok(Response::Ok)
+    }
+
+    /// 硬刪：**本機鏡像永久移除**（鏡像行＋明文索引＋關聯＋outbox＋overlay，
+    /// 見 `Store::purge`）。僅開放垃圾桶項目（鏡像帶軟刪標記）；伺服器端
+    /// 已被既有 DELETE 路徑軟刪，上線時補打 `DELETE /ciphers/{id}`（硬刪）
+    /// 防下次 `/sync` 復活——離線則拒（純本地摘列會復活，語意不收斂）。
+    pub async fn purge_item(&self, id: ItemId) -> Result<Response, WtpError> {
+        let row = self.store.item(id).map_err(denied)?;
+        let row = row.ok_or(WtpError::NotFound)?;
+        if !row.deleted {
+            return Err(denied("Purge 僅開放垃圾桶項目（先 rm 軟刪）"));
+        }
+        let client = self.client().await?;
+        match client.cipher_delete(id, bw_server::DeleteKind::Hard).await {
+            Ok(()) => {}
+            Err(e) if e.status() == Some(404) => {}
+            Err(e) => return Err(crate::hub::map_server_err(e)),
+        }
+        let n = self.store.purge(id).map_err(denied)?;
+        self.emit(
+            bw_proto::EventTopic::VaultChanged,
+            json!({"id": id.to_string(), "op": "purge"}),
+        );
+        Ok(Response::Json(json!({"purged": id.to_string(), "mirror_rows": n})))
     }
 }

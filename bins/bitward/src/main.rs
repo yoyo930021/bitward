@@ -10,10 +10,10 @@ use uuid::Uuid;
 
 use bw_btp::{read_server, write_client};
 use bw_proto::{
-    AdminCall, AgentCall, Auth, AuthCall, Call, CipherDraft, ClientMsg, FieldEdit, FillCall,
-    ItemId, ItemKind, MutationId, OverlayOpWire, PROTO_VERSION, PasskeyCall, ProtoVersion, Query,
-    Resolution, Response, ServerMsg, SessionToken, SortKey, SyncCall, UseCall, VaultCall, View,
-    WtpError,
+    AdminCall, AgentCall, Auth, AuthCall, Call, CipherDraft, CipherField, ClientMsg, FieldEdit,
+    FillCall, ItemId, ItemKind, ItemView, MutationId, OverlayOpWire, PROTO_VERSION, PasskeyCall,
+    ProtoVersion, Query, Resolution, Response, ServerMsg, SessionToken, SortKey, SyncCall, UseCall,
+    VaultCall, View, WtpError,
 };
 
 #[derive(Parser)]
@@ -61,6 +61,12 @@ enum Cmd {
         /// 只列該 collection（org 共享集合）的項目（P4b）
         #[arg(long)]
         collection: Option<String>,
+        /// 只列該資料夾（UUID）；空字串＝個人未歸屬
+        #[arg(long)]
+        folder: Option<String>,
+        /// 列垃圾桶（帶 deleted_at；默認只列未刪）
+        #[arg(long)]
+        trash: bool,
         #[arg(long, default_value = "name")]
         sort: String,
         #[arg(long, default_value_t = 100)]
@@ -99,6 +105,9 @@ enum Cmd {
     New {
         #[arg(long)]
         name: String,
+        /// 項目型別：login|note（SecureNote；card/identity 留後續批次）
+        #[arg(long = "type", default_value = "login")]
+        type_: String,
         #[arg(long)]
         username: Option<String>,
         /// 從 stdin 讀一行作為密碼（不進 argv，A11）
@@ -110,10 +119,28 @@ enum Cmd {
         totp: Option<String>,
         #[arg(long)]
         notes: Option<String>,
+        /// 建立時歸屬的資料夾（UUID；`bitward folder ls` 取 id）
+        #[arg(long)]
+        folder: Option<String>,
+        /// 自訂文字欄 `k=v`，可重複
+        #[arg(long = "field")]
+        fields: Vec<String>,
+        /// 自訂 hidden 欄 `k=v`，可重複（回程值以 ••• 代，reveal 才出）
+        #[arg(long = "field!")]
+        hidden_fields: Vec<String>,
+    },
+    /// 資料夾（官方 folders 語意：名稱 user key 加密）
+    Folder {
+        #[command(subcommand)]
+        cmd: FolderCmd,
+    },
+    /// 硬刪垃圾桶項目：本機鏡像永久移除＋伺服器 DELETE（離線拒）
+    Purge {
+        id: String,
     },
     Edit {
         id: String,
-        /// `path=value`，可重複。path ∈ name|notes|username|password|totp|uri.<n>|favorite
+        /// `path=value`，可重複。path ∈ name|notes|username|password|totp|uri.<n>|favorite|folderId|field.<n>.name|field.<n>.value
         #[arg(long = "set")]
         sets: Vec<String>,
         /// 清除欄位，可重複
@@ -230,6 +257,19 @@ enum TagCmd {
         id: String,
         #[arg(default_value = "true")]
         on: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum FolderCmd {
+    /// 列資料夾（鎖定態 name 為 null——名稱是信封字串）
+    Ls,
+    Create {
+        name: String,
+    },
+    /// 刪除：夾內項目 folderId 先清 NULL（官方語意同序）
+    Delete {
+        id: String,
     },
 }
 
@@ -777,6 +817,8 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             uri,
             value,
             collection,
+            folder,
+            trash,
             sort,
             limit,
         } => Call::Vault(VaultCall::List {
@@ -794,8 +836,8 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                 },
                 limit: *limit,
                 collection: collection.as_deref().map(parse_id).transpose()?,
-                folder: None,
-                deleted: None,
+                folder: folder.clone(),
+                deleted: trash.then_some(true),
             },
             view: View::Metadata,
         }),
@@ -911,20 +953,35 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
         Cmd::Version => Call::Admin(AdminCall::Version),
         Cmd::New {
             name,
+            type_,
             username,
             password_stdin,
             uri,
             totp,
             notes,
+            folder,
+            fields,
+            hidden_fields,
         } => {
             let password = if *password_stdin {
                 Some(read_line_stdin()?)
             } else {
                 None
             };
+            let kind = match type_.as_str() {
+                "login" => ItemKind::Login,
+                "note" => ItemKind::SecureNote,
+                other => {
+                    return Err(format!(
+                        "--type 僅支援 login|note（card/identity 留後續批次），got {other}"
+                    ));
+                }
+            };
+            let mut draft_fields = parse_field_pairs(fields, false)?;
+            draft_fields.extend(parse_field_pairs(hidden_fields, true)?);
             Call::Vault(VaultCall::Create {
                 draft: CipherDraft {
-                    kind: ItemKind::Login,
+                    kind,
                     name: name.clone(),
                     username: username.clone(),
                     password,
@@ -932,11 +989,19 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                     uris: uri.clone().into_iter().collect(),
                     notes: notes.clone(),
                     favorite: false,
-                    folder_id: None,
-                    fields: Vec::new(),
+                    folder_id: folder.clone(),
+                    fields: draft_fields,
                 },
             })
         }
+        Cmd::Folder { cmd } => match cmd {
+            FolderCmd::Ls => Call::Vault(VaultCall::ListFolders),
+            FolderCmd::Create { name } => Call::Vault(VaultCall::CreateFolder {
+                name: name.clone(),
+            }),
+            FolderCmd::Delete { id } => Call::Vault(VaultCall::DeleteFolder { id: parse_id(id)? }),
+        },
+        Cmd::Purge { id } => Call::Vault(VaultCall::Purge { id: parse_id(id)? }),
         Cmd::Edit {
             id,
             sets,
@@ -1082,6 +1147,23 @@ fn parse_id(s: &str) -> Result<ItemId, String> {
     Uuid::parse_str(s).map_err(|e| format!("item id: {e}"))
 }
 
+/// `--field k=v` / `--field! k=v`：官方自訂欄（hidden 走 type 1 線格式）。
+fn parse_field_pairs(pairs: &[String], hidden: bool) -> Result<Vec<CipherField>, String> {
+    pairs
+        .iter()
+        .map(|s| {
+            let (k, v) = s
+                .split_once('=')
+                .ok_or_else(|| format!("--field 需要 k=v，got {s}"))?;
+            Ok(CipherField {
+                name: k.to_owned(),
+                value: Some(v.to_owned()),
+                hidden,
+            })
+        })
+        .collect()
+}
+
 fn parse_approval(s: &str) -> Result<Uuid, String> {
     Uuid::parse_str(s).map_err(|e| format!("approval/session id: {e}"))
 }
@@ -1111,14 +1193,11 @@ fn print_response(resp: &Response, json: bool) {
             }
         }
         Response::Item(Some(v)) => {
-            println!(
-                "{}",
-                if json {
-                    serde_json::to_string_pretty(v).unwrap()
-                } else {
-                    format!("{v:?}")
-                }
-            );
+            if json {
+                println!("{}", serde_json::to_string_pretty(v).unwrap());
+            } else {
+                println!("{}", format_item(v));
+            }
         }
         Response::Item(None) => println!("(not found)"),
         Response::Secret(s) => println!("{s}"),
@@ -1205,6 +1284,44 @@ fn print_response(resp: &Response, json: bool) {
         ),
         other => println!("{}", serde_json::to_string_pretty(other).unwrap()),
     }
+}
+
+/// 詳情頁人類可讀排版：筆記／資料夾／自訂欄（三件套）。
+/// hidden 欄值缺席時以 ••• 代（daemon 未在該視窗返回值＝金鑰不可見）。
+fn format_item(v: &ItemView) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("{}  {}\n", v.meta.id, v.meta.name.clone().unwrap_or_default()));
+    out.push_str(&format!("type: {:?}\n", v.meta.kind));
+    if let Some(f) = &v.meta.folder_id {
+        out.push_str(&format!("folder: {f}\n"));
+    }
+    for u in &v.meta.uris {
+        out.push_str(&format!("uri: {u}\n"));
+    }
+    if let Some(u) = &v.username {
+        out.push_str(&format!("username: {u}\n"));
+    }
+    if let Some(p) = &v.password_masked {
+        out.push_str(&format!("password: {p}\n"));
+    }
+    if let Some(p) = &v.password {
+        out.push_str(&format!("password: {p}\n"));
+    }
+    if let Some(n) = &v.notes {
+        out.push_str(&format!("notes: {n}\n"));
+    }
+    for f in &v.fields {
+        let val = f.value.clone().unwrap_or_else(|| "•••".into());
+        let tag = if f.hidden { "hidden" } else { "text" };
+        out.push_str(&format!("field[{}]: {} = {val}\n", tag, f.name));
+    }
+    if let Some(t) = &v.meta.updated_at {
+        out.push_str(&format!("updated: {t}\n"));
+    }
+    if v.meta.pending {
+        out.push_str("(pending)\n");
+    }
+    out.trim_end().to_owned()
 }
 
 fn wtp_to_string(e: &WtpError) -> String {

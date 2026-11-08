@@ -82,7 +82,7 @@ impl Hub {
         }
     }
 
-    async fn client(&self) -> Result<std::sync::Arc<bw_server::Client>, WtpError> {
+    pub(crate) async fn client(&self) -> Result<std::sync::Arc<bw_server::Client>, WtpError> {
         let g = self.server.read().await;
         g.as_ref()
             .map(|h| h.client.clone())

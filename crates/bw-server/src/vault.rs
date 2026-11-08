@@ -300,6 +300,20 @@ impl Client {
         }
     }
 
+    /// `POST /folders`：新建資料夾。body 官方形態 `{"name": <信封字串>}`
+    /// （名稱 user key 加密；VW 與官方雲同形，
+    /// https://github.com/dani-garcia/vaultwarden/blob/1.37.2/src/api/core/folders.rs ）
+    /// 回新建的 folder 物件（含伺服器生成的 id）。
+    pub async fn folder_create(&self, name_enc: &str) -> Result<Value, ServerError> {
+        self.post_json("folders", &json!({ "name": name_enc })).await
+    }
+
+    /// `DELETE /folders/{id}`：刪資料夾（兩 server 同形；404＝已不存在，
+    /// 呼叫端按冪等收斂語意自行吞掉）。
+    pub async fn folder_delete(&self, id: ItemId) -> Result<(), ServerError> {
+        self.try_empty_delete(&format!("folders/{id}")).await
+    }
+
     /// `POST /ciphers/{id}/attachment/v2`：拿上傳 URL（不傳檔案）。
     pub async fn attachment_prepare_upload(
         &self,

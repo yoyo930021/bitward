@@ -89,7 +89,7 @@ fn denied(detail: impl std::fmt::Display) -> WtpError {
     }
 }
 
-fn drift(detail: impl std::fmt::Display) -> WtpError {
+pub(crate) fn drift(detail: impl std::fmt::Display) -> WtpError {
     WtpError::ServerDrift {
         detail: detail.to_string(),
     }
@@ -423,13 +423,13 @@ impl Hub {
                 self.write_move(session, *item, org.clone(), collections.clone())
                     .await
             }
-            // 三件套（批次 3 接實作）：資料夾與硬刪的業務在 datamanage.rs。
-            Call::Vault(VaultCall::CreateFolder { .. })
-            | Call::Vault(VaultCall::ListFolders)
-            | Call::Vault(VaultCall::DeleteFolder { .. })
-            | Call::Vault(VaultCall::Purge { .. }) => Err(WtpError::Unsupported {
-                feature: "資料夾／硬刪在 daemon 批次接線".into(),
-            }),
+            // 三件套（v5）：資料夾與硬刪的業務在 datamanage.rs。
+            Call::Vault(VaultCall::CreateFolder { name }) => self.create_folder(name).await,
+            Call::Vault(VaultCall::ListFolders) => self.list_folders(),
+            Call::Vault(VaultCall::DeleteFolder { id }) => {
+                self.delete_folder(session, *id).await
+            }
+            Call::Vault(VaultCall::Purge { id }) => self.purge_item(*id).await,
             Call::Use(UseCall::TotpCode { id }) => self.totp(*id),
             Call::Use(UseCall::GeneratePassword { policy }) => {
                 let opts = bw_crypto::PasswordOptions {
@@ -976,6 +976,7 @@ impl Hub {
         // 共享項目（organizationId 命中已派生 org key）以 org 對稱金鑰解密；
         // 敏感度分級（§2.1）不因 org 放寬——這裡只換鑰，不換視窗。
         let org_keys = self.org_key_map();
+        let reveal = view == View::Reveal;
         let dec = self.machine.with_keys(|kb| {
             let d = cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
             let login = row.enc_cipher.get("login");
@@ -986,17 +987,48 @@ impl Hub {
             let password = login
                 .and_then(|l| l.get("password"))
                 .and_then(Value::as_str)
-                .and_then(d);
-            (username, password)
+                .and_then(&d);
+            let notes = row
+                .enc_cipher
+                .get("notes")
+                .and_then(Value::as_str)
+                .and_then(&d);
+            // 自訂欄（v5 三件套）：欄名恒出（Identity）；text 欄值 Masked 即出、
+            // hidden 欄值僅 Reveal 出（A3：不可見時鍵缺席，非 null）。
+            let fields = match row.enc_cipher.get("fields").and_then(Value::as_array) {
+                Some(arr) => arr
+                    .iter()
+                    .map(|f| {
+                        let hidden = f.get("type").and_then(Value::as_i64) == Some(1);
+                        let value_ok = !hidden || reveal;
+                        bw_proto::CipherField {
+                            name: f
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .and_then(&d)
+                                .unwrap_or_default(),
+                            value: if value_ok {
+                                f.get("value").and_then(Value::as_str).and_then(&d)
+                            } else {
+                                None
+                            },
+                            hidden,
+                        }
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
+            (username, password, notes, fields)
         });
-        let (username, password) = dec.map_err(denied)?;
+        let (username, password, notes, fields) = dec.map_err(denied)?;
         let v = match view {
-            View::Masked => {
-                ItemView::metadata(base).masked(username, password.as_deref().map(mask_tail), false)
-            }
+            View::Masked => ItemView::metadata(base)
+                .masked(username, password.as_deref().map(mask_tail), false)
+                .with_details(notes, fields),
             View::Reveal => ItemView::metadata(base)
                 .masked(username, None, false)
-                .revealed(password),
+                .revealed(password)
+                .with_details(notes, fields),
             View::Metadata => ItemView::metadata(base),
         };
         Ok(Some(v))
@@ -1219,7 +1251,7 @@ fn kdf_params(a: &AccountRecord) -> bw_crypto::KdfParams {
     .to_params()
 }
 
-fn map_server_err(e: ServerError) -> WtpError {
+pub(crate) fn map_server_err(e: ServerError) -> WtpError {
     match e {
         ServerError::TwoFactorRequired { challenge } => WtpError::Denied {
             grant_gap: format!(

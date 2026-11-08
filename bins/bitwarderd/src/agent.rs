@@ -233,8 +233,11 @@ impl Hub {
                 Access::See(bw_proto::Sensitivity::Identity),
                 None,
             ),
-            Call::Vault(VaultCall::DeleteFolder { .. }) | Call::Vault(VaultCall::Purge { .. }) => {
+            Call::Vault(VaultCall::DeleteFolder { .. }) => {
                 (Access::Mutate(MutateOp::Delete), None)
+            }
+            Call::Vault(VaultCall::Purge { id }) => {
+                (Access::Mutate(MutateOp::Delete), Some(*id))
             }
             // passkey 分級（契約 §4）：列表＝Metadata（Identity floor）；
             // Register/Assert 取用私鑰＝Use(UseKind::Passkey)（用而不讀，同 totp 級）
