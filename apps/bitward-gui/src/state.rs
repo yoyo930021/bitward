@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::time::Instant;
 
 use bw_proto::{
     AuthCall, Call, CipherDraft, FieldEdit, ItemId, ItemKind, ItemView, OverlayOpWire, Query,
@@ -20,6 +21,7 @@ use nsh_core::prelude::*;
 
 use crate::btp::Session;
 use crate::export::{self, ExportOutcome};
+use crate::passgen::GenState;
 
 /// 連線生命週期（錯誤畫面 = Failed，重連 = 再發 Boot）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -77,6 +79,10 @@ pub enum Cmd {
     OpenEdit(ItemId),
     RequestReveal,
     RequestTotp,
+    /// 產生器「產生/重新產生」：policy 由 reduce 讀 `form.gen_panel` 現算。
+    GeneratePassword,
+    /// 產生器回包：Some=明文草稿（只活到套用或離開表單）；None=失敗（錯誤已入橫條）。
+    Generated(Option<String>),
     RequestUnlock,
     /// 僅 dev/驗證用：Auth:Lock（正式 UI 未列需求，解鎖鈕才是契約項目）。
     RequestLock,
@@ -85,6 +91,17 @@ pub enum Cmd {
     CloseChangePassword,
     SubmitChangePassword,
     AskDelete(ItemId),
+    /// 垃圾桶切換（工具列膠囊；None 視角＝一般列表）。
+    ToggleTrash,
+    /// 垃圾桶詳情動作：還原（軟刪撤銷）與永久刪除（先確認再 PurgeNow）。
+    RestoreItem(ItemId),
+    AskPurge(ItemId),
+    PurgeNow(ItemId),
+    /// 還原／永久刪除回包：成功才收 notice、回列表重抓。
+    TrashWriteDone {
+        err: Option<String>,
+        notify: Option<String>,
+    },
     AskExport,
     ConfirmYes,
     ConfirmNo,
@@ -112,7 +129,10 @@ pub enum Cmd {
         row: Arc<ItemView>,
     },
     Revealed(Option<String>),
-    TotpLoaded(String),
+    TotpLoaded {
+        code: String,
+        valid_for_secs: u32,
+    },
     StateUpdated {
         state: UnlockStateView,
         refetch: bool,
@@ -141,6 +161,10 @@ pub struct FormFields {
     pub tags: Signal<String>,
     pub error: Signal<Option<String>>,
     pub original: Signal<Option<Arc<FormOriginal>>>,
+    /// 產生器面板狀態（開合／長度／字元集開關）。
+    pub gen_panel: Signal<GenState>,
+    /// 產生器明文草稿：只活到套用進 password 或離開表單（同 Zeroize 紀律）。
+    pub gen_draft: Signal<Option<String>>,
 }
 
 impl FormFields {
@@ -152,6 +176,8 @@ impl FormFields {
         self.tags.set(String::new());
         self.error.set(None);
         self.original.set(original);
+        self.gen_panel.set(GenState::default());
+        self.gen_draft.set(None);
     }
 }
 
@@ -207,6 +233,8 @@ pub struct AppCore {
     pub items: Signal<Arc<Vec<ItemView>>>,
     pub query: Signal<String>,
     pub tag: Signal<Option<String>>,
+    /// 垃圾桶模式：true＝列表只列軟刪項目（Query.deleted 交 daemon 過濾）。
+    pub trash: Signal<bool>,
     pub sort: Signal<SortKey>,
     pub sort_menu: Signal<bool>,
     pub list_gen: Signal<u64>,
@@ -216,6 +244,11 @@ pub struct AppCore {
     pub detail: Signal<Option<Arc<ItemView>>>,
     pub revealed: Signal<Option<String>>,
     pub totp: Signal<Option<String>>,
+    /// TOTP 倒數三件組：視窗秒數、取碼時刻、1s tick（App 的引擎計時器驅動，
+    /// 只用於詳情重繪與到期重取，不是背景任務）。
+    pub totp_valid_for: Signal<u32>,
+    pub totp_issued: Signal<Option<Instant>>,
+    pub totp_tick: Signal<u64>,
     pub confirm: Signal<Option<Arc<Confirm>>>,
     pub form: FormFields,
     /// 改主密碼模態開關 + 三欄（true 時 App 掛 modal）。
@@ -236,6 +269,7 @@ impl AppCore {
             items: signal(Arc::new(Vec::new())),
             query: signal(String::new()),
             tag: signal(None),
+            trash: signal(false),
             sort: signal(SortKey::Name),
             sort_menu: signal(false),
             list_gen: signal(0),
@@ -245,6 +279,9 @@ impl AppCore {
             detail: signal(None),
             revealed: signal(None),
             totp: signal(None),
+            totp_valid_for: signal(0),
+            totp_issued: signal(None),
+            totp_tick: signal(0),
             confirm: signal_with(None, SignalEquals::Never),
             pw_modal: signal(false),
             pw: PwFields {
@@ -261,6 +298,8 @@ impl AppCore {
                 tags: signal(String::new()),
                 error: signal(None),
                 original: signal_with(None, SignalEquals::Never),
+                gen_panel: signal(GenState::default()),
+                gen_draft: signal(None),
             },
         };
         (core, rx)
@@ -296,6 +335,8 @@ impl AppCore {
         // 前的最後持有者；常駐拷貝不存在——GUI 不緩存任何 Reveal 結果）。
         self.revealed.set(None);
         self.totp.set(None);
+        self.totp_valid_for.set(0);
+        self.totp_issued.set(None);
     }
 }
 
@@ -358,7 +399,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.ipc(move |s| match s.call(&get(id, View::Masked)) {
                 Ok(Response::Item(Some(row))) => Cmd::DetailLoaded {
                     id,
-                    row: Arc::new(row),
+                    row: Arc::new(*row),
                 },
                 Ok(Response::Item(None)) => Cmd::Failed {
                     err: "找不到該項目".into(),
@@ -387,7 +428,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.ipc(move |s| match s.call(&get(id, View::Masked)) {
                 Ok(Response::Item(Some(row))) => Cmd::EditPrefilled {
                     id,
-                    row: Arc::new(row),
+                    row: Arc::new(*row),
                 },
                 _ => Cmd::Failed {
                     err: "載入編輯基準失敗".into(),
@@ -449,7 +490,10 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                     Ok(Response::TotpCode {
                         code,
                         valid_for_secs,
-                    }) => Cmd::TotpLoaded(format!("{code}（{valid_for_secs} 秒內有效）")),
+                    }) => Cmd::TotpLoaded {
+                        code,
+                        valid_for_secs,
+                    },
                     Err(e) => Cmd::Failed { err: e.display() },
                     Ok(other) => Cmd::Failed {
                         err: format!("TotpCode 回應形態不符：{other:?}"),
@@ -457,9 +501,28 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 },
             );
         }
-        Cmd::TotpLoaded(text) => {
+        Cmd::TotpLoaded {
+            code,
+            valid_for_secs,
+        } => {
             core.settle();
-            core.totp.set(Some(text));
+            core.totp.set(Some(code));
+            core.totp_valid_for.set(valid_for_secs);
+            core.totp_issued.set(Some(Instant::now()));
+        }
+        Cmd::GeneratePassword => {
+            let policy = core.form.gen_panel.get().policy();
+            core.ipc(move |s| match s.call(&Call::Use(UseCall::GeneratePassword { policy })) {
+                Ok(Response::Secret(pw)) => Cmd::Generated(Some(pw)),
+                Ok(other) => Cmd::Failed {
+                    err: format!("GeneratePassword 回應形態不符：{other:?}"),
+                },
+                Err(e) => Cmd::Failed { err: e.display() },
+            });
+        }
+        Cmd::Generated(pw) => {
+            core.settle();
+            core.form.gen_draft.set(pw);
         }
         Cmd::RequestUnlock => {
             core.ipc(
@@ -548,13 +611,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             }
         }
         Cmd::AskDelete(id) => {
-            let name = core
-                .items
-                .get()
-                .iter()
-                .find(|v| v.meta.id == id)
-                .and_then(|v| v.meta.name.clone())
-                .unwrap_or_else(|| "這個項目".to_owned());
+            let name = item_name(core, id);
             core.confirm.set(Some(Arc::new(Confirm {
                 title: format!("刪除「{name}」？"),
                 description: "將以軟刪除排隊推送到伺服器（可稍後還原）。".into(),
@@ -562,6 +619,69 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 destructive: true,
                 on_confirm: Cmd::DeleteNow(id),
             })));
+        }
+        Cmd::ToggleTrash => {
+            let next = !core.trash.get();
+            core.trash.set(next);
+            core.leave_detail();
+            core.sort_menu.set(false);
+            core.route.set(Route::List);
+            fetch_list(core);
+        }
+        Cmd::RestoreItem(id) => {
+            let name = item_name(core, id);
+            core.ipc(move |s| match s.call(&Call::Vault(VaultCall::Restore { id })) {
+                Ok(Response::Ok) => Cmd::TrashWriteDone {
+                    err: None,
+                    notify: Some(format!("已還原「{name}」")),
+                },
+                Ok(other) => Cmd::TrashWriteDone {
+                    err: Some(format!("Restore 回應形態不符：{other:?}")),
+                    notify: None,
+                },
+                Err(e) => Cmd::TrashWriteDone {
+                    err: Some(e.display()),
+                    notify: None,
+                },
+            });
+        }
+        Cmd::AskPurge(id) => {
+            let name = item_name(core, id);
+            core.confirm.set(Some(Arc::new(Confirm {
+                title: format!("永久刪除「{name}」？"),
+                description: "只清本機：鏡像列、關聯與該項未推送的 outbox 列一併移除，不再發伺服器請求。".into(),
+                confirm_label: "永久刪除".into(),
+                destructive: true,
+                on_confirm: Cmd::PurgeNow(id),
+            })));
+        }
+        Cmd::PurgeNow(id) => {
+            core.ipc(move |s| match s.call(&Call::Vault(VaultCall::Purge { id })) {
+                Ok(Response::Ok) => Cmd::TrashWriteDone {
+                    err: None,
+                    notify: Some("已永久刪除".into()),
+                },
+                Ok(other) => Cmd::TrashWriteDone {
+                    err: Some(format!("Purge 回應形態不符：{other:?}")),
+                    notify: None,
+                },
+                Err(e) => Cmd::TrashWriteDone {
+                    err: Some(e.display()),
+                    notify: None,
+                },
+            });
+        }
+        Cmd::TrashWriteDone { err, notify } => {
+            core.settle();
+            if let Some(e) = err {
+                core.error_text.set(Some(e));
+                return;
+            }
+            core.error_text.set(None);
+            core.notice.set(notify);
+            core.leave_detail();
+            core.route.set(Route::List);
+            fetch_list(core);
         }
         Cmd::AskExport => {
             core.confirm.set(Some(Arc::new(Confirm {
@@ -647,6 +767,22 @@ pub fn get(id: ItemId, view: View) -> Call {
     Call::Vault(VaultCall::Get { id, view })
 }
 
+/// 垃圾桶模式 → `Query.deleted` 三態：true＝只列軟刪；false＝現行預設（None）。
+/// 過濾語意在 daemon（store.query），這裡只做意圖映射（純函數，可單測）。
+pub fn deleted_filter(trash: bool) -> Option<bool> {
+    trash.then_some(true)
+}
+
+/// 確認框用的項目名稱：不在目前清單時退回泛稱。
+fn item_name(core: &AppCore, id: ItemId) -> String {
+    core.items
+        .get()
+        .iter()
+        .find(|v| v.meta.id == id)
+        .and_then(|v| v.meta.name.clone())
+        .unwrap_or_else(|| "這個項目".to_owned())
+}
+
 /// 列表重抓：text/tag/sort 原樣送 daemon（過濾分級語意零複製到 GUI）。
 pub fn fetch_list(core: &AppCore) {
     let seq = core.list_gen.get() + 1;
@@ -656,6 +792,7 @@ pub fn fetch_list(core: &AppCore) {
         tag: core.tag.get(),
         sort: core.sort.get(),
         limit: 0,
+        deleted: deleted_filter(core.trash.get()),
         ..Default::default()
     };
     core.ipc(move |s| {
@@ -705,6 +842,8 @@ fn submit_form(core: &AppCore) {
                     uris: uri.into_iter().collect(),
                     notes: None,
                     favorite: false,
+                    folder_id: None,
+                    fields: Vec::new(),
                 };
                 let err = match s.call(&Call::Vault(VaultCall::Create { draft })) {
                     Ok(Response::Ok) => {
@@ -916,6 +1055,13 @@ mod tests {
     fn nonblank_trims_to_none() {
         assert_eq!(nonblank("  git "), Some("git".into()));
         assert_eq!(nonblank("   "), None);
+    }
+
+    #[test]
+    fn deleted_filter_maps_trash_mode_to_tri_state() {
+        // 一般視角用 None（旧 daemon 兼容），垃圾桶用 Some(true)；不發 Some(false)。
+        assert_eq!(deleted_filter(false), None);
+        assert_eq!(deleted_filter(true), Some(true));
     }
 
     #[test]

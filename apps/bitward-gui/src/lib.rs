@@ -12,6 +12,7 @@ mod btp;
 mod detail;
 mod export;
 mod form;
+mod passgen;
 mod list;
 mod shots;
 mod state;
@@ -102,6 +103,21 @@ pub fn App() -> impl IntoElement {
     on_key("escape", {
         let core = core.clone();
         move |_| core.send(Cmd::OpenList)
+    });
+    // TOTP 倒數心跳：引擎計時器（非背景任務）。只在詳情有碼時重繪 tick，
+    // 視窗過期即重發既有取碼命令，週期沿用 daemon 的 valid_for_secs。
+    let totp_core = core.clone();
+    set_interval(Duration::from_secs(1), move || {
+        if totp_core.totp.get().is_some() {
+            let expired = totp_core
+                .totp_issued
+                .get()
+                .is_some_and(|i| i.elapsed().as_secs() >= totp_core.totp_valid_for.get() as u64);
+            if expired {
+                totp_core.send(Cmd::RequestTotp);
+            }
+            totp_core.totp_tick.set(totp_core.totp_tick.get() + 1);
+        }
     });
     if let Some(dir) = std::env::var_os("NSH_GUI_SHOTS").map(PathBuf::from) {
         shots::script(dir, core.clone());

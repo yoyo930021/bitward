@@ -2,6 +2,8 @@
 //! 密碼預設遮罩，「顯示密碼」才發 Get(Reveal)，明文只存在
 //! `core.revealed` 這個詳情層訊號，離開視圖即清（契約驗收 3）。
 //! 欄位右側複製鈕寫系統剪貼簿並轉 success 勾 1 秒（純視圖行為）。
+//! 垃圾桶條目（`meta.deleted_at` 有值）動作群改「還原／永久刪除」；
+//! TOTP 有碼時行內附倒數細进度條（App 1s 心跳驅動，≤5 秒轉 warning）。
 
 use std::rc::Rc;
 
@@ -115,8 +117,7 @@ fn identity_header(core: AppCore) -> View {
     let name_core = core.clone();
     let uri_core = core.clone();
     let uri_open = core.clone();
-    let edit_core = core.clone();
-    let del_core = core.clone();
+    let actions_core = core.clone();
     let close_core = core.clone();
     view()
         .flex_row()
@@ -175,14 +176,45 @@ fn identity_header(core: AppCore) -> View {
                         ),
                 ),
         )
-        .child(ui::button("編輯", ui::Btn::PrimaryCapsule, move || {
-            if let Route::Detail(id) = edit_core.route.get() {
-                edit_core.send(Cmd::OpenEdit(id));
-            }
-        }))
-        .child(ui::button("刪除", ui::Btn::Ghost, move || {
-            if let Route::Detail(id) = del_core.route.get() {
-                del_core.send(Cmd::AskDelete(id));
+        .child(dynamic(move || {
+            let trashed = actions_core
+                .detail
+                .get()
+                .is_some_and(|d| d.meta.deleted_at.is_some());
+            let edit = actions_core.clone();
+            let del = actions_core.clone();
+            if trashed {
+                let restore = actions_core.clone();
+                let purge = actions_core.clone();
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(ui::button("還原", ui::Btn::Ghost, move || {
+                        if let Route::Detail(id) = restore.route.get() {
+                            restore.send(Cmd::RestoreItem(id));
+                        }
+                    }))
+                    .child(ui::button("永久刪除", ui::Btn::Destructive, move || {
+                        if let Route::Detail(id) = purge.route.get() {
+                            purge.send(Cmd::AskPurge(id));
+                        }
+                    }))
+            } else {
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(ui::button("編輯", ui::Btn::PrimaryCapsule, move || {
+                        if let Route::Detail(id) = edit.route.get() {
+                            edit.send(Cmd::OpenEdit(id));
+                        }
+                    }))
+                    .child(ui::button("刪除", ui::Btn::Ghost, move || {
+                        if let Route::Detail(id) = del.route.get() {
+                            del.send(Cmd::AskDelete(id));
+                        }
+                    }))
             }
         }))
         .child(
@@ -370,9 +402,11 @@ fn field(label_text: &'static str, value: Disp, trailing: Vec<View>) -> View {
 
 /// TOTP 節：代碼列（取碼鈕＋複製）；有無 seed 由 daemon 裁決
 /// （Masked 投影不含 totp 存在性，hub.rs project_one 恆 false）。
+/// 有碼時行內附倒數細进度條＋剩餘秒數（App 的 1s 心跳訊號驅動重繪）。
 fn totp_section(core: AppCore, copied: Signal<Option<&'static str>>) -> Vec<View> {
     let hint_core = core.clone();
     let shown_core = core.clone();
+    let shown_build = core.clone();
     let btn_core = core.clone();
     let copy_core = core.clone();
     vec![field_dyn(
@@ -386,7 +420,12 @@ fn totp_section(core: AppCore, copied: Signal<Option<&'static str>>) -> Vec<View
             let btn = btn_core.clone();
             let shown = shown_core.clone();
             let copy = copy_core.clone();
-            let mut actions = view().flex_row().items_center().gap_1();
+            let bar_build = shown_build.clone();
+            let mut actions = view().flex_row().items_center().gap_1p5();
+            actions = actions.child(when(
+                move || shown.totp.get().is_some(),
+                move || countdown(bar_build.clone()),
+            ));
             actions = actions.child(ui::text_button_dyn(
                 || "一次性密碼".to_owned(),
                 move || btn.send(Cmd::RequestTotp),
@@ -395,10 +434,7 @@ fn totp_section(core: AppCore, copied: Signal<Option<&'static str>>) -> Vec<View
                 move || shown.totp.get().is_some(),
                 move || {
                     ui::copy_button(
-                        Rc::new(move || {
-                            let raw = copy.totp.get().unwrap_or_default();
-                            raw.split('（').next().unwrap_or(&raw).to_owned()
-                        }),
+                        Rc::new(move || copy.totp.get().unwrap_or_default()),
                         "TOTP",
                         copied,
                     )
@@ -407,6 +443,81 @@ fn totp_section(core: AppCore, copied: Signal<Option<&'static str>>) -> Vec<View
             actions
         },
     )]
+}
+
+/// TOTP 視窗週期秒數（與 daemon `hub::totp` 的 `30 - now % 30` 同值）。
+pub const TOTP_PERIOD_SECS: u32 = 30;
+/// 剩餘低於此秒數轉 warning 色。
+pub const TOTP_WARN_SECS: u32 = 5;
+
+/// 剩餘秒數：取碼時的 valid_for_secs 減去經過秒數（純函數，可單測）。
+pub fn totp_remaining(valid_for_secs: u32, elapsed_secs: u64) -> u32 {
+    valid_for_secs.saturating_sub(elapsed_secs as u32)
+}
+
+/// 目前剩餘秒數；讀 `totp_tick`（App 1s 心跳）建立重繪依賴。
+fn countdown_remaining(core: &AppCore) -> u32 {
+    let _ = core.totp_tick.get();
+    match (core.totp_issued.get(), core.totp_valid_for.get()) {
+        (Some(issued), valid) => totp_remaining(valid, issued.elapsed().as_secs()),
+        _ => 0,
+    }
+}
+
+/// 倒數條：accent 漸變細軌＋「剩餘 N 秒」12px；≤5 秒轉 warning 色。
+fn countdown(core: AppCore) -> View {
+    let w_core = core.clone();
+    let g_core = core.clone();
+    let gc_core = core.clone();
+    let t_core = core.clone();
+    let n_core = core;
+    view()
+        .flex_row()
+        .items_center()
+        .gap_1p5()
+        .child(
+            view()
+                .w(px(theme::TOTP_BAR_W))
+                .h(px(theme::TOTP_BAR_H))
+                .rounded_full()
+                .bg(theme::SURFACE_RAISED)
+                .child(
+                    view()
+                        .h_full()
+                        .rounded_full()
+                        .w(move || {
+                            let left = countdown_remaining(&w_core) as f32
+                                / TOTP_PERIOD_SECS as f32;
+                            px(theme::TOTP_BAR_W * left)
+                        })
+                        .bg_linear_to_r()
+                        .gradient_from(move || {
+                            if countdown_remaining(&g_core) <= TOTP_WARN_SECS {
+                                theme::WARNING
+                            } else {
+                                theme::ACCENT_FROM
+                            }
+                        })
+                        .gradient_to(move || {
+                            if countdown_remaining(&gc_core) <= TOTP_WARN_SECS {
+                                theme::WARNING
+                            } else {
+                                theme::ACCENT_TO
+                            }
+                        }),
+                ),
+        )
+        .child(
+            text(move || format!("剩餘 {} 秒", countdown_remaining(&t_core)))
+                .text_size(px(theme::TEXT_PAGE_SUB))
+                .text_color(move || {
+                    if countdown_remaining(&n_core) <= TOTP_WARN_SECS {
+                        theme::WARNING
+                    } else {
+                        theme::TEXT_MUTED
+                    }
+                }),
+        )
 }
 
 /// 欄位列（trailing 鈕群由閉包現算：跟著的訊號變動重建）。
@@ -431,4 +542,24 @@ fn field_dyn(
                 .number_of_lines(1),
         )
         .child(dynamic(trailing))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn totp_remaining_counts_down_and_floors_at_zero() {
+        assert_eq!(totp_remaining(30, 0), 30);
+        assert_eq!(totp_remaining(30, 20), 10);
+        assert_eq!(totp_remaining(12, 7), 5);
+        assert_eq!(totp_remaining(12, 12), 0);
+        assert_eq!(totp_remaining(12, 99), 0);
+    }
+
+    #[test]
+    fn warn_threshold_is_five_seconds() {
+        assert_eq!(TOTP_WARN_SECS, 5);
+        assert_eq!(TOTP_PERIOD_SECS, 30);
+    }
 }

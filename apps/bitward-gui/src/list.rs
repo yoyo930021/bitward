@@ -1,5 +1,6 @@
 //! Vault 列表（左欄＋全寬工具列）：搜尋（Query.text 交 daemon FTS）、
-//! tag 過濾（chips 行，比對在 daemon）、排序選單、pending 徽章、
+//! tag 過濾（chips 行，比對在 daemon）、垃圾桶切換（Query.deleted 三態）、
+//! 排序選單、pending 徽章、
 //! 選中列（Route::Detail 對應項）accent 指示條。鎖態/標題在 lib.rs。
 
 use std::rc::Rc;
@@ -12,7 +13,7 @@ use crate::state::{AppCore, Cmd, Route};
 use crate::theme;
 use crate::ui;
 
-/// 工具列：全寬圓角搜尋框＋排序/重新整理＋標籤 chips 行＋排序下拉。
+/// 工具列：全寬圓角搜尋框＋排序/重新整理＋標籤 chips 行（行尾垃圾桶切換）＋排序下拉。
 pub fn toolbar(core: AppCore) -> View {
     let search_core = core.clone();
     let query = core.query;
@@ -93,12 +94,14 @@ pub fn toolbar(core: AppCore) -> View {
 }
 
 /// 標籤 chips 行：選項取自目前載入的清單（過濾仍由 daemon 執行）；
-/// 選中描邊轉 accent，再點一次選中的 chip ＝回到全部。
+/// 選中描邊轉 accent，再點一次選中的 chip ＝回到全部。行尾附垃圾桶切換。
 fn chip_row(core: AppCore) -> View {
     let all_sel = core.clone();
     let all_press = core.clone();
     let items = core.items;
     let row_core = core.clone();
+    let trash_sel = core.trash;
+    let trash_press = core.clone();
     view()
         .flex_row()
         .items_center()
@@ -125,6 +128,11 @@ fn chip_row(core: AppCore) -> View {
                     },
                 )
             },
+        ))
+        .child(chip(
+            "垃圾桶".to_owned(),
+            move || trash_sel.get(),
+            move || trash_press.send(Cmd::ToggleTrash),
         ))
 }
 
@@ -256,6 +264,7 @@ pub fn panel(core: AppCore) -> impl IntoElement {
     let count_core = core.clone();
     let keys_core = core.clone();
     let row_core = core.clone();
+    let empty_core = core.clone();
     virtual_list(
         move || count_core.items.get().len(),
         move |at| row(row_core.clone(), at),
@@ -277,18 +286,24 @@ pub fn panel(core: AppCore) -> impl IntoElement {
             .bg(theme::HAIRLINE)
     })
     .empty(
-        view()
-            .h_40()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_1()
-            .child(
-                text("找不到符合的項目")
+        dynamic(move || {
+            view()
+                .h_40()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                .child(
+                    text(if empty_core.trash.get() {
+                        "垃圾桶是空的"
+                    } else {
+                        "找不到符合的項目"
+                    })
                     .text_size(px(14.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme::TEXT_SECONDARY),
-            ),
+                )
+        }),
     )
 }
 
@@ -426,8 +441,12 @@ fn is_selected(core: &AppCore, at: Position) -> bool {
     }
 }
 
-/// 副標：uri 首條；沒有 uri 才退到標籤列（不顯示任何 Secret 級欄位）。
+/// 副標：垃圾桶條目顯示刪除時間；否則 uri 首條，沒有 uri 退到標籤列
+/// （不顯示任何 Secret 級欄位）。
 fn subtitle(item: &ItemView) -> String {
+    if let Some(t) = item.meta.deleted_at.as_deref() {
+        return format!("已刪除 · {t}");
+    }
     match item.meta.uris.first() {
         Some(uri) => uri.clone(),
         None if item.meta.tags.is_empty() => String::new(),
@@ -453,6 +472,7 @@ mod tests {
             tags: tags.into_iter().map(str::to_owned).collect(),
             updated_at: None,
             pending: false,
+            deleted_at: None,
         })
     }
 
@@ -467,6 +487,13 @@ mod tests {
             "dev · 工作"
         );
         assert_eq!(subtitle(&view_of(vec![], vec![])), "");
+    }
+
+    #[test]
+    fn subtitle_shows_deleted_time_for_trash_rows() {
+        let mut v = view_of(vec!["https://a.com"], vec![]);
+        v.meta.deleted_at = Some("2026-11-09T00:00:00Z".into());
+        assert_eq!(subtitle(&v), "已刪除 · 2026-11-09T00:00:00Z");
     }
 
     #[test]

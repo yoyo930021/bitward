@@ -106,6 +106,14 @@ pub const HEADER_PB: f32 = 11.0;
 pub const TEXT_CARD_TITLE: f32 = 15.0;
 pub const GLYPH_LOCK: f32 = 28.0;
 pub const GLYPH_KEY: f32 = 20.0;
+/// 產生器面板：滑桿軌道寬／高、命中區高、knob 直徑。
+pub const GEN_TRACK_W: f32 = 240.0;
+pub const GEN_TRACK_H: f32 = 6.0;
+pub const GEN_TRACK_HIT_H: f32 = 18.0;
+pub const GEN_KNOB: f32 = 14.0;
+/// TOTP 倒數細进度條：軌道寬／高。
+pub const TOTP_BAR_W: f32 = 120.0;
+pub const TOTP_BAR_H: f32 = 4.0;
 
 // —— monogram 派生色 ——
 

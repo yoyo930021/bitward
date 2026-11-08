@@ -7,7 +7,7 @@
 //! main queue。驗證流程見 README。
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nsh_core::prelude::*;
 
@@ -147,7 +147,9 @@ fn at(ms: u64, f: impl FnOnce() + 'static) {
 
 /// 開窗後依序跑完整驗收流：列表全量（密度證據）→ 搜尋 → 詳情遮罩 → revealed → 新增表單
 /// 模態 → 提交新增 → 編輯改名 → 刪除確認（先取消斷言、再確認）→
-/// 匯出確認 → 鎖態頁/解鎖 → 選取態，各步存一張 shot-N-*.png 後結束行程。時序裕量對齊
+/// 匯出確認 → 鎖態頁/解鎖 → 選取態 → 垃圾桶（列表/還原動作/還原後列表）→
+/// 產生器面板 → TOTP 倒數三段（真取碼後偽造時間源示 30/10/5 秒比例），
+/// 各步存一張 shot-N-*.png 後結束行程。時序裕量對齊
 /// spike（Background
 /// session 無 vsync 可等，固定 sleep；本地 daemon 往返 <50ms）。
 /// 詳情目標用驗收種子項目「GitHub 測試」，找不到退回第一筆。
@@ -310,7 +312,74 @@ pub fn script(dir: PathBuf, core: AppCore) {
     });
     let d = dir.clone();
     at(27200, move || capture(&d, "shot-16-selected.png"));
-    at(27800, move || {
+
+    // —— 垃圾桶：進入（軟刪條目＋刪除時間）→ 詳情還原/永久刪除 → 還原回列表 ——
+    let c = core.clone();
+    at(28200, move || c.send(Cmd::ToggleTrash));
+    let d = dir.clone();
+    at(29000, move || capture(&d, "shot-17-trash.png"));
+    let c = core.clone();
+    at(29400, move || {
+        if let Some(id) = find_id(&c, "E2E 驗證項目改名") {
+            c.send(Cmd::OpenDetail(id));
+        }
+    });
+    let d = dir.clone();
+    at(30200, move || capture(&d, "shot-18-trash-restore.png"));
+    let c = core.clone();
+    at(30600, move || {
+        if let Some(id) = find_id(&c, "E2E 驗證項目改名") {
+            c.send(Cmd::RestoreItem(id));
+        }
+    });
+    let c = core.clone();
+    at(31600, move || c.send(Cmd::ToggleTrash));
+    let d = dir.clone();
+    at(32400, move || capture(&d, "shot-19-restored.png"));
+
+    // —— 產生器：模態展開面板＋真送 Use:GeneratePassword 取草稿 ——
+    let c = core.clone();
+    at(33000, move || c.send(Cmd::OpenCreate));
+    let c = core.clone();
+    at(33400, move || {
+        c.form.gen_panel.update(|g| g.open = true);
+        c.send(Cmd::GeneratePassword);
+    });
+    let d = dir.clone();
+    at(34400, move || capture(&d, "shot-20-generator.png"));
+
+    // —— TOTP 倒數三段：真取碼（Local OTP 有 seed）＋偽造時間源示比例 ——
+    let c = core.clone();
+    at(34800, move || {
+        c.send(Cmd::OpenList);
+        if let Some(id) = find_id(&c, "Local OTP") {
+            c.send(Cmd::OpenDetail(id));
+        }
+    });
+    let c = core.clone();
+    at(35600, move || c.send(Cmd::RequestTotp));
+    let c = core.clone();
+    at(36600, move || {
+        c.totp_valid_for.set(30);
+        c.totp_issued.set(Some(Instant::now()));
+    });
+    let d = dir.clone();
+    at(36800, move || capture(&d, "shot-21-totp-30s.png"));
+    let c = core.clone();
+    at(37200, move || {
+        c.totp_valid_for.set(30);
+        c.totp_issued.set(Some(Instant::now() - Duration::from_secs(20)));
+    });
+    let d = dir.clone();
+    at(37400, move || capture(&d, "shot-22-totp-10s.png"));
+    let c = core.clone();
+    at(37800, move || {
+        c.totp_valid_for.set(30);
+        c.totp_issued.set(Some(Instant::now() - Duration::from_secs(25)));
+    });
+    let d = dir.clone();
+    at(38000, move || capture(&d, "shot-23-totp-5s.png"));
+    at(38600, move || {
         on_main(|| {
             #[cfg(target_os = "macos")]
             {
