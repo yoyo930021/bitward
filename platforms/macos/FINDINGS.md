@@ -414,3 +414,36 @@ DER/hash 直簽修復生效）。本輪新增的實測坑：
   BundleProgram）；SMAppService 未註冊（殭屍 record）；demo daemon 現為 pid 51819
   （8934 已沒），其 group `daemon.sock` 路徑被我 unlink（清殭屍 sock 時誤判其已死），
   重登／重啟 daemon 即重建。readpath／pushpath 全綠。
+
+## 12. 巢狀密碼庫整合批次（2026-11-08，NSH GUI 進 Bitward.app）
+- **形態**：殼轉 `LSUIElement`（Info.plist）；啟動時 `NSWorkspace.open` 巢狀
+  `Contents/Applications/BitwardGUI.app`（帶 `--sock`，預設 group container 路徑、
+  `defaults write io.bitward.dev DaemonSockPath <path>` 覆寫——實測覆寫後 GUI argv
+  正確改指 demo sock）。原 TabView 拆成 `Window(id:"approvals"/"status")` 皆
+  `.defaultLaunchBehavior(.suppressed)`，選單「Bitward → 批准中心⋯／狀態⋯／
+  開啟密碼庫⋯」喚起；`open -a Bitward`（已跑）＝reopen 轉發帶回密碼庫窗。
+  批准輪詢＋identity store 同步從視窗生命週期改掛 App 層（背景殼無開窗也要跑，
+  否則 Safari 內聯建議會隨視窗關閉靜默停擺）。
+- **打包裁定（nsh 0.3.0 實測）**：`nsh package --target macos` 有 .app 形態但只出
+  debug runner（無 `--release`）、id/name 取自 nsh.json——改走「cargo release 產物
+  ＋最小 bundle」（`scripts/gui-bundle.sh`：Contents/MacOS/BitwardGUI＝cargo 本尊、
+  Info.plist `io.bitward.dev.gui`／「Bitward 密碼庫」、殭屍 cmp 保險、先內後外重簽）。
+  dev 形態 `cargo run`／`nsh run` 完全不受影響（README 驗證流照跑，shots e2e 15/15 綠）。
+- **hardened runtime 檔案存取判定**：非沙盒 GUI＋Developer ID＋`-o runtime` 實測
+  ①連 group container `daemon.sock`（vault 清單 40 筆渲染）②匯出寫 `~/Downloads`
+  （0600 JSON 落地＋「已匯出 40 筆（未加密）」橫條）——**皆不擋，GUI 零 entitlements**。
+  唯一未測面：經 LaunchServices 啟動時首次 Downloads 寫入理論上有一次 TCC 允許框
+  （terminal 直跑歸因 terminal，測不出）；若實測礙事再加
+  `temporary-exception.files.home-relative-path.read-write=/Downloads/`。
+- **深簽鏈**：GUI 進 staging 一律经 gui-bundle.sh（同 $IDENTITY＋$CS_RUNTIME），
+  `codesign --verify --deep --strict` 與 signing.sh §1（`*/MacOS/*` 掃描）自動收它；
+  安裝斷言加 BitwardGUI 內容 cmp。dev-install.sh 同批加 GUI 重組＋外層重封。
+- **signing.sh 追修（6f77437）**：§2「無 profile」斷言是 §11 判定（direct 必要嵌
+  Developer ID profile）之前的殭屍寫法，改判 profile **型別**（拒 Apple Development
+  殘留）；公證段尊重 `BW_NOTARIZED=0`（本批跳隊列，公證由 973ed2ce 單收）；
+  抓出 `codesign -dvv | grep -q` 命中即收線的 SIGPIPE＋pipefail 競態，改捕獲再配對。
+- **本批判定（BW_NOTARIZE=0 direct 全管線）**：pkg→安裝→`open -a Bitward` 密碼庫窗
+  直接現（截圖證據）；選單喚起批准中心（「目前沒有待批准的請求」＝daemon 連通）＋
+  狀態頁（轉發 sock 行在位）；pluginkit `io.bitward.dev.provider` 註冊在、readpath
+  全綠；spctl 直裝 bundle＝rejected（source=Unnotarized Developer ID，屬預期記錄）。
+  `--experiment` 段改走「選單→狀態⋯」（TabView radio 已拆）。

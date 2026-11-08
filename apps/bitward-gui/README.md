@@ -11,6 +11,16 @@ Reveal/TOTP/新增/編輯/刪除/匯出/鎖態+解鎖，全部經 BTP 真連本�
 cargo run -- --sock <path>          # 或 nsh run --target macos
 ```
 
+### 正式形態（巢狀進 Bitward.app）
+
+`scripts/gui-bundle.sh` 以 cargo release 產物組最小 `BitwardGUI.app`
+（id `io.bitward.dev.gui`、名「Bitward 密碼庫」、零 entitlements——hardened
+runtime 實測不擋 group sock 與 ~/Downloads），由 `scripts/pkg-build.sh`／
+`scripts/dev-install.sh` 放進 `Bitward.app/Contents/Applications/` 並納入深簽鏈。
+LSUIElement 背景殼啟動時轉發開啟本 app（帶 `--sock`，預設 group container
+路徑，`defaults write io.bitward.dev DaemonSockPath <path>` 覆寫）；
+判定鏈見 `platforms/macos/FINDINGS.md` §12。開發形態（cargo run／nsh run）不受影響。
+
 連線參數解析順序：`--sock <path>` > `BITWARD_GUI_SOCK` >
 `$BITWARD_DATA_DIR/daemon.sock` > 平台資料目錄下的 `bitward/daemon.sock`。
 daemon 不在 → 錯誤畫面（含路徑與重連鈕）。`nsh run` 沒有 argv 透傳，
