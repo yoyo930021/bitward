@@ -210,10 +210,9 @@ else
 fi
 
 echo "==> installer -pkg -target /"
-# BundleOverwriteAction=update 只覆蓋 BOM 內檔案：dev-install 塞過的
-# embedded.provisionprofile 等殭屍檔不在新 BOM→裝後殘留→deep seal 紅
-# （2026-11-08 實測）。裝前整包移除，安裝即乾淨替換。
-sudo -n rm -rf /Applications/Bitward.app 2>/dev/null || rm -rf /Applications/Bitward.app 2>/dev/null || true
+# BundleOverwriteAction=update 只覆蓋 BOM 內檔：dev-install 塞的 embedded.provisionprofile
+# 等殭屍檔不在新 BOM→裝後殘留→deep seal 紅（2026-11-08 實測）。殭屍清理放裝後：
+# 裝前 rm 整包會令 installer 對「被改過的 bundle」拒覆蓋、靜默裝半套（同日實測）。
 pgrep -x Bitward >/dev/null && kill -9 "$(pgrep -x Bitward)" 2>/dev/null || true
 # 舊密碼庫實例若活著，殼轉發只會起它（同 bundle id 單例）——先清再測才收新產物。
 pgrep -x BitwardGUI >/dev/null && kill -9 "$(pgrep -x BitwardGUI)" 2>/dev/null || true
@@ -225,6 +224,18 @@ elif ! sudo -n installer -pkg "$PKG" -target /; then
 fi
 
 echo "==> 斷言"
+# 殭屍檔清理（dev-install 形態殘留，見上註）：staging 沒有的 profile 即屬殭屍，
+# 刪除後外層 seal 需重封（--deep --force 先內後外一次到位，身分與 runtime 同管線）。
+find /Applications/Bitward.app -name embedded.provisionprofile \
+  ! -path "*/Bitward.app/Contents/embedded.provisionprofile" -delete 2>/dev/null || true
+if [ ! -f /Applications/Bitward.app/Contents/embedded.provisionprofile ] \
+   && [ -f "$STAGE/root/Bitward.app/Contents/embedded.provisionprofile" ]; then
+  # installer 拒覆蓋改過的 bundle（殭屍在場時裝半套）→ admin 群組直接換裝整包
+  ditto "$STAGE/root/Bitward.app" /Applications/Bitward.app.tmp && \
+    rm -rf /Applications/Bitward.app && mv /Applications/Bitward.app.tmp /Applications/Bitward.app \
+    || osascript -e "do shell script \"/bin/rm -rf /Applications/Bitward.app && /usr/bin/ditto '$STAGE/root/Bitward.app' '/Applications/Bitward.app'\" with administrator privileges"
+  echo "    已裝 bundle 與 staging 不符 → ditto 換裝完成"
+fi
 if pkgutil --check-signature "$PKG" >/dev/null 2>&1; then
   pkgutil --check-signature "$PKG" | grep -q 'Installer' \
     || { echo "FATAL: pkg 簽章不是 Installer 身分"; exit 1; }
