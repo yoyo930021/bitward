@@ -178,13 +178,16 @@ mcp_start F "$TOKEN_F"
 mcp_send F initialize '{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}' >/dev/null
 mcp_notify F notifications/initialized
 RID=$(mcp_send F tools/call "$(jq -nc --arg i "$A1" '{name:"vault_reveal",arguments:{id:$i}}')")
-# 背景批准：poll pending 取 id → approve（5 秒節拍，語意同規格）
+# 背景批准：poll pending 取 id → approve（5 秒節拍，語意同規格）；
+# 批准前把整份 pending 清單落盤，供 f+ 斷言 requested_at_ms 資料源。
 (
   sleep 5
   for _ in $(seq 1 12); do
-    AID=$(B agent pending --json 2>/dev/null | jq -r '.[0].id // empty' || true)
-    if [[ -n "$AID" ]] && B approve "$AID" >/dev/null 2>&1; then
-      break
+    PJSON=$(B agent pending --json 2>/dev/null || true)
+    AID=$(jq -r '.[0].id // empty' <<<"$PJSON" 2>/dev/null || true)
+    if [[ -n "$AID" ]]; then
+      echo "$PJSON" > "$DATA/pending-row.json"
+      B approve "$AID" >/dev/null 2>&1 && break
     fi
     sleep 5
   done
@@ -195,6 +198,16 @@ wait "$APPROVER" 2>/dev/null || true
 [[ $(jq -r '.result.isError' <<<"$FRV") == "false" ]] || fail "f：核准後 vault_reveal 仍失敗：$FRV"
 text_of "$FRV" | grep -q "$SECRET" || fail "f：核准後未回 \$SECRET 明文：$(text_of "$FRV")"
 pass "f：NeedsApproval → 人工 approve → 同 call 成功，明文如約出現"
+
+# —— f+：pending 列必須帶 requested_at_ms（GUI 批准佇列的等待時長資料源），
+# 且 epoch 落在近期視窗（捕捉點與斷言點最多相差一輪批准節拍，留 130s 餘裕）——
+[[ -f "$DATA/pending-row.json" ]] || fail "f+：批准者未捕捉到 pending 列"
+REQ_MS=$(jq -r '.[0].requested_at_ms // empty' "$DATA/pending-row.json")
+[[ -n "$REQ_MS" ]] || fail "f+：pending 應帶 requested_at_ms：$(cat "$DATA/pending-row.json")"
+NOW_MS=$(( $(date +%s) * 1000 ))
+(( REQ_MS >= NOW_MS - 130000 && REQ_MS <= NOW_MS + 5000 )) \
+  || fail "f+：requested_at_ms 不在近期視窗：req=$REQ_MS now=$NOW_MS"
+pass "f+：pending 列含 requested_at_ms 且 epoch 近期"
 eval "exec ${MCP_FD[F]}>&-"
 wait "${MCP_PID[F]}" 2>/dev/null || true
 

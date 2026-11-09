@@ -49,6 +49,8 @@ pub struct LiveSession {
 pub struct PendingApproval {
     pub target: String,
     pub summary: String,
+    /// 請求進佇列的 unix ms（記憶體態；ListPending 投影給 GUI 顯示等待時長）
+    pub requested_at_ms: u64,
     pub tx: tokio::sync::oneshot::Sender<ApprovalDecision>,
 }
 
@@ -130,6 +132,7 @@ impl Hub {
                     PendingApproval {
                         target: sess.row.id.clone(),
                         summary: summarize(call),
+                        requested_at_ms: self.store.now_ms(),
                         tx,
                     },
                 );
@@ -466,12 +469,12 @@ impl Hub {
         Ok(Response::Sessions(rows))
     }
 
-    pub fn pending_list(&self) -> Vec<(String, String)> {
+    pub fn pending_list(&self) -> Vec<(String, String, u64)> {
         self.pending
             .lock()
             .unwrap()
             .iter()
-            .map(|(id, p)| (id.0.to_string(), p.summary.clone()))
+            .map(|(id, p)| (id.0.to_string(), p.summary.clone(), p.requested_at_ms))
             .collect()
     }
 
@@ -822,7 +825,14 @@ mod tests {
                 .await
         });
         let id = loop {
-            if let Some((s, _)) = hub.pending_list().first() {
+            if let Some((s, _, at_ms)) = hub.pending_list().first() {
+                // 弱斷言：請求時間欄必須存在且落在 daemon 時鐘的近期視窗
+                // （±2s 容忍排程抖動）——GUI 批准佇列的等待時長資料源。
+                let now = hub.store.now_ms();
+                assert!(
+                    at_ms.abs_diff(now) <= 2_000,
+                    "requested_at_ms 應在近期視窗內：at={at_ms} now={now}"
+                );
                 break ApprovalId(Uuid::parse_str(s).unwrap());
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;

@@ -600,7 +600,9 @@ impl Hub {
             Call::Agent(AgentCall::ListPending) => Ok(Response::Sessions(
                 self.pending_list()
                     .into_iter()
-                    .map(|(id, summary)| json!({"id": id, "summary": summary}))
+                    .map(|(id, summary, requested_at_ms)| {
+                        json!({"id": id, "summary": summary, "requested_at_ms": requested_at_ms})
+                    })
                     .collect(),
             )),
             Call::Admin(AdminCall::Version) => Ok(Response::Version(format!(
