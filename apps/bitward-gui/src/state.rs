@@ -129,6 +129,14 @@ pub enum Cmd {
     CloseChangePassword,
     SubmitChangePassword,
     AskDelete(ItemId),
+    /// 匯入模態開關；預覽＝本地解析計數（(可匯入, 跳過)），
+    /// 執行＝逐筆既有 Create 路徑（daemon 無 import 面，2b 本地兜底）。
+    OpenImport,
+    CloseImport,
+    ImportPreview,
+    ImportPreviewed(Result<(usize, usize), String>),
+    ImportRun,
+    ImportDone(Result<crate::import::ImportOutcome, String>),
     /// 垃圾桶切換（側欄列；None 視角＝一般列表）。
     ToggleTrash,
     /// 側欄資料夾節點：None＝全部項目、Some("")＝未歸屬、Some(id)＝該夾。
@@ -352,6 +360,10 @@ pub struct AppCore {
     /// 改主密碼模態開關 + 三欄（true 時 App 掛 modal）。
     pub pw_modal: Signal<bool>,
     pub pw: PwFields,
+    /// 匯入模態開關＋路徑＋預覽結果（None＝尚未預覽）。
+    pub import_modal: Signal<bool>,
+    pub import_path: Signal<String>,
+    pub import_preview: Signal<Option<Result<(usize, usize), String>>>,
 }
 
 impl AppCore {
@@ -390,6 +402,9 @@ impl AppCore {
                 confirm: signal(String::new()),
                 error: signal(None),
             },
+            import_modal: signal(false),
+            import_path: signal(String::new()),
+            import_preview: signal(None),
             form: FormFields {
                 name: signal(String::new()),
                 username: signal(String::new()),
@@ -875,6 +890,52 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 on_confirm: Cmd::RunExport,
             })));
         }
+        Cmd::OpenImport => {
+            core.import_path.set(String::new());
+            core.import_preview.set(None);
+            core.import_modal.set(true);
+        }
+        Cmd::CloseImport => {
+            core.import_modal.set(false);
+            core.import_path.set(String::new());
+            core.import_preview.set(None);
+        }
+        Cmd::ImportPreview => {
+            let path = core.import_path.get();
+            core.ipc(move |s| {
+                let _ = s;
+                Cmd::ImportPreviewed(match crate::import::read_text(&path) {
+                    Err(e) => Err(e),
+                    Ok(text) => crate::import::parse(&text)
+                        .map(|p| (p.rows.len(), p.skipped)),
+                })
+            });
+        }
+        Cmd::ImportPreviewed(res) => {
+            core.settle();
+            core.import_preview.set(Some(res));
+        }
+        Cmd::ImportRun => {
+            let path = core.import_path.get();
+            core.ipc(move |s| Cmd::ImportDone(crate::import::read_text(&path).and_then(|text| {
+                crate::import::run(&s, &text)
+            })));
+        }
+        Cmd::ImportDone(res) => {
+            core.settle();
+            core.import_modal.set(false);
+            match res {
+                Ok(out) => {
+                    core.error_text.set(None);
+                    core.notice.set(Some(format!(
+                        "已匯入 {} 筆（跳過 {}、失敗 {}）",
+                        out.created, out.skipped, out.failed
+                    )));
+                    fetch_list(core);
+                }
+                Err(e) => core.error_text.set(Some(format!("匯入失敗：{e}"))),
+            }
+        }
         Cmd::ConfirmYes => {
             let Some(c) = core.confirm.get() else {
                 return;
@@ -1155,7 +1216,7 @@ fn submit_form(core: &AppCore) {
 }
 
 /// 逐筆套 overlay 標籤；回傳第一個錯誤（若有）。
-fn apply_tags(s: &Session, id: ItemId, remove: &[String], add: &[String]) -> Option<String> {
+pub(crate) fn apply_tags(s: &Session, id: ItemId, remove: &[String], add: &[String]) -> Option<String> {
     for t in remove {
         if let Err(e) = s.call(&Call::Vault(VaultCall::Overlay {
             id,
@@ -1177,7 +1238,7 @@ fn apply_tags(s: &Session, id: ItemId, remove: &[String], add: &[String]) -> Opt
 
 /// Create 不回 id 的代償：用明文名稱查回剛建立的項目。
 /// 候選取「名字完全相符且無 updated_at（尚未推過伺服器）」者。
-fn find_created(s: &Arc<Session>, name: &str) -> Option<ItemId> {
+pub(crate) fn find_created(s: &Session, name: &str) -> Option<ItemId> {
     let q = Query {
         text: Some(name.to_owned()),
         limit: 0,

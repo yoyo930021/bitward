@@ -12,8 +12,9 @@ mod btp;
 mod detail;
 mod export;
 mod form;
-mod passgen;
+mod import;
 mod list;
+mod passgen;
 mod shots;
 mod state;
 mod theme;
@@ -138,6 +139,8 @@ pub fn App() -> impl IntoElement {
     let modal_build = core.clone();
     let pw_modal_cond = core.clone();
     let pw_modal_build = core.clone();
+    let import_cond = core.clone();
+    let import_build = core.clone();
     let form_cond = core.clone();
     let form_build = core.clone();
     view()
@@ -173,6 +176,10 @@ pub fn App() -> impl IntoElement {
         .child(when(
             move || pw_modal_cond.pw_modal.get(),
             move || ui::change_password_modal(pw_modal_build.clone()),
+        ))
+        .child(when(
+            move || import_cond.import_modal.get(),
+            move || ui::import_modal(import_build.clone()),
         ))
 }
 
@@ -291,6 +298,7 @@ fn sidebar(core: AppCore) -> View {
     let sync_core = core.clone();
     let sync_time = core.clone();
     let export_core = core.clone();
+    let import_core = core.clone();
     let pw_cond = core.clone();
     let pw_build = core.clone();
     view()
@@ -395,6 +403,9 @@ fn sidebar(core: AppCore) -> View {
                 }))
                 .child(side_text_button("匯出", move || {
                     export_core.send(Cmd::AskExport)
+                }))
+                .child(side_text_button("匯入", move || {
+                    import_core.send(Cmd::OpenImport)
                 }))
                 .child(when(
                     move || state::can_change_password(&pw_cond.vault.get()),

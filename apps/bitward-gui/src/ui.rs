@@ -10,7 +10,7 @@ use bw_proto::ItemKind;
 use nsh_base::{input, theme};
 use nsh_core::prelude::*;
 
-use crate::state::{AppCore, Confirm};
+use crate::state::{AppCore, Cmd, Confirm};
 use crate::theme;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -251,6 +251,95 @@ pub fn confirm_modal(core: AppCore, confirm: &Confirm) -> View {
                             }
                         },
                         move || yes.send(crate::state::Cmd::ConfirmYes),
+                    )),
+            ),
+    )
+}
+
+/// 匯入模態：路徑輸入（nsh 選檔面板僅支援圖片→貼路徑兜底）→ 預覽計數
+/// （本地解析，不回明文）→ 確認匯入（逐筆既有 Create 路徑）。
+pub fn import_modal(core: AppCore) -> View {
+    let close = core.clone();
+    let close2 = core.clone();
+    let path = core.import_path;
+    let preview = core.clone();
+    let line_cond = core.clone();
+    let line_build = core.clone();
+    let run_cond = core.clone();
+    let run_build = core.clone();
+    modal_shell(
+        480.0,
+        move || close.send(Cmd::CloseImport),
+        view()
+            .flex_col()
+            .gap(px(theme::FORM_GAP))
+            .child(
+                text("匯入")
+                    .text_size(px(17.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme::TEXT_PRIMARY),
+            )
+            .child(
+                text("支援官方 Bitwarden「未加密 JSON」匯出檔與本 App 匯出檔。桌面選檔面板目前僅支援圖片，請直接貼上檔案路徑。")
+                    .text_size(px(12.5))
+                    .line_height(px(19.0))
+                    .text_color(theme::TEXT_MUTED),
+            )
+            .child(
+                input()
+                    .value(move || path.get())
+                    .placeholder("例：~/Downloads/bitward-export-….json")
+                    .placeholder_color(move || theme::TEXT_MUTED.light)
+                    .on_change(move |t: &str| path.set(t.to_owned()))
+                    .h(px(theme::INPUT_H))
+                    .px_3()
+                    .rounded(px(theme::RADIUS_CONTROL))
+                    .border(px(1.0))
+                    .border_color(theme::HAIRLINE)
+                    .bg(theme::BASE)
+                    .text_color(theme::TEXT_PRIMARY)
+                    .font_family(mono_font())
+                    .transition_colors()
+                    .duration(150.0)
+                    .focus(|s| s.border_color(theme::ACCENT)),
+            )
+            .child(when(
+                move || line_cond.import_preview.get().is_some(),
+                move || {
+                    let c = line_build.clone();
+                    text(move || match c.import_preview.get() {
+                        Some(Ok((n, skipped))) => format!("偵測到 {n} 筆可匯入（跳過 {skipped} 筆）"),
+                        Some(Err(e)) => e.clone(),
+                        None => String::new(),
+                    })
+                    .text_size(px(12.5))
+                    .line_height(px(18.0))
+                    .text_color(move || {
+                        match line_build.import_preview.get() {
+                            Some(Ok(_)) => theme::SUCCESS,
+                            _ => theme::DESTRUCTIVE,
+                        }
+                    })
+                },
+            ))
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .justify_end()
+                    .gap_2()
+                    .child(button("取消", Btn::Ghost, move || {
+                        close2.send(Cmd::CloseImport)
+                    }))
+                    .child(button("預覽", Btn::Ghost, move || {
+                        preview.send(Cmd::ImportPreview)
+                    }))
+                    .child(when(
+                        move || matches!(run_cond.import_preview.get(), Some(Ok(_))),
+                        move || {
+                            let c = run_build.clone();
+                            button("匯入", Btn::Primary, move || c.send(Cmd::ImportRun))
+                        },
                     )),
             ),
     )
