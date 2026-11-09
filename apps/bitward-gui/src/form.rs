@@ -451,7 +451,7 @@ fn field_row(fields: Signal<Arc<Vec<FieldDraft>>>, key: u32, is_create: bool) ->
                 .flex_1(),
         );
     let del_sig = fields;
-    let row = if is_create {
+    if is_create {
         let hid_sig = fields;
         row.child(
             view()
@@ -509,8 +509,7 @@ fn field_row(fields: Signal<Arc<Vec<FieldDraft>>>, key: u32, is_create: bool) ->
                 .text_color(theme::TEXT_MUTED)
                 .tooltip(ui::tooltip_card("型別旗標建立後不可更改")),
         )
-    };
-    row
+    }
 }
 
 /// 產生器面板：長度滑桿（8–64）、三個字元集開關、草稿與套用。
