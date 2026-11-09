@@ -25,7 +25,9 @@ cd "$REPO"
 
 echo "==> deploy to /Applications"
 kill -9 "$(pgrep -x Bitward)" 2>/dev/null || true
-rm -rf /Applications/Bitward.app
+# installer 裝過的 bundle 屬 root（icns 等）：user rm 會清半套留殘骸（2026-11-09 實錄）
+rm -rf /Applications/Bitward.app 2>/dev/null || true
+[ -e /Applications/Bitward.app ] && osascript -e 'do shell script "/bin/rm -rf /Applications/Bitward.app" with administrator privileges'
 ditto "$BUNDLE" /Applications/Bitward.app
 
 echo "==> force-fresh daemon helper (殭屍二進位保險)"
