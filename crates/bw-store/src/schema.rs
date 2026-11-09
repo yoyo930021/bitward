@@ -1,5 +1,5 @@
 /// schema 版本；每次加表/改表就 +1 並在本檔補一段遷移 SQL。
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// v1→v2：值搜尋明文索引欄。舊庫 ALTER；新庫 V1 已含，Duplicate column 容忍。
 pub const V2: &str = "ALTER TABLE meta_plain ADD COLUMN username_plain TEXT;
@@ -42,6 +42,11 @@ CREATE TRIGGER meta_plain_au AFTER UPDATE ON meta_plain BEGIN
   INSERT INTO meta_fts(meta_fts, rowid, name, uris, fields_plain) VALUES('delete', old.rowid, old.name, old.uris, old.fields_plain);
   INSERT INTO meta_fts(rowid, name, uris, fields_plain) VALUES (new.rowid, new.name, new.uris, new.fields_plain);
 END;";
+
+/// v5→v6（批次 4a 附件）：`attachments` 鏡像表在 V1（CREATE IF NOT EXISTS
+/// 冪等，形態同 v3/v4 紀律）；欄位級無 ALTER，版本號提升只為
+/// schema_version_guard 的可見性。
+pub const V6: &str = "";
 
 /// v1：鏡像（密文原樣）+ 明文 metadata 索引（FTS5）+ overlay + outbox +
 /// audit（append-only hash 鏈）+ sessions + blobs 登記 + meta。
@@ -107,6 +112,21 @@ CREATE TABLE IF NOT EXISTS cipher_collections(
   PRIMARY KEY (cipher, collection)
 );
 CREATE INDEX IF NOT EXISTS cipher_collections_col ON cipher_collections(collection);
+
+-- v6（批次 4a 附件）：/sync 的 ciphers[].attachments 鏡像。
+-- file_name/size_name/key 存伺服器原樣（信封或明文，本層不判斷）；
+-- url 是短效簽名直連（過期是常態，下載前必經 GET attachment/{aid} 重取）；
+-- id 非 UUID（VW 20 位 hex），TEXT 原樣主鍵。隨 write_cipher 逐 cipher 重建。
+CREATE TABLE IF NOT EXISTS attachments(
+  id        TEXT PRIMARY KEY,
+  cipher    TEXT NOT NULL,
+  file_name TEXT,
+  size      INTEGER,
+  size_name TEXT,
+  key       TEXT,
+  url       TEXT
+);
+CREATE INDEX IF NOT EXISTS attachments_cipher ON attachments(cipher);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS meta_fts USING fts5(
   name, uris, fields_plain,

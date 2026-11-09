@@ -7,7 +7,7 @@ use bw_proto::ItemId;
 use serde_json::{Value, json};
 
 use crate::Client;
-use crate::error::ServerError;
+use crate::error::{ApiError, ServerError};
 use crate::json::{get, get_array, get_str};
 use crate::profile::Quirk;
 
@@ -362,6 +362,52 @@ impl Client {
             cipher: get(&raw, &["cipherResponse", "cipher"]).cloned(),
             raw,
         })
+    }
+
+    /// `POST /ciphers/{id}/attachment`：multipart 上傳（批次 4a 實錄形態）。
+    /// VW 1.37.2 認的欄位是 `key`（附件金鑰信封字串）＋ `data`（加密檔身）；
+    /// `data` 段的 multipart filename **原樣落庫成 fileName**——所以這裡傳
+    /// 加密後的檔名。官方 `model`+`data` 變體在 VW 上 model 被忽略且缺 key
+    /// 回 400 "No attachment key provided"（2026-11-09 probe，見
+    /// `dev/e2e/attachments.sh` 斷言）。成功回完整 cipherDetails（含
+    /// attachments[]，id 由伺服器生成）。
+    pub async fn attachment_upload(
+        &self,
+        cipher: ItemId,
+        key_enc: &str,
+        file_name_enc: &str,
+        data: &[u8],
+    ) -> Result<Value, ServerError> {
+        self.require_token().await?;
+        let url = format!("{}/ciphers/{cipher}/attachment", self.url("api").await);
+        let form = reqwest::multipart::Form::new()
+            .text("key", key_enc.to_owned())
+            .part(
+                "data",
+                reqwest::multipart::Part::bytes(data.to_vec())
+                    .file_name(file_name_enc.to_owned())
+                    .mime_str("application/octet-stream")
+                    .map_err(|e| ServerError::Malformed(e.to_string()))?,
+            );
+        let req = self.authorized(self.http.post(&url)).await;
+        let (status, text) = self.send(req.multipart(form)).await?;
+        match self.parse_ok(status, &text) {
+            Ok(v) => Ok(v),
+            Err(e) => Err(e.into_server_error()),
+        }
+    }
+
+    /// 直連取回附件位元組（簽名 URL，token 在 query 內；仍補 bearer 無害）。
+    /// 不過 `send`（其回 String，附件是二進位），單獨走 bytes 路徑。
+    pub async fn attachment_fetch_bytes(&self, url: &str) -> Result<Vec<u8>, ServerError> {
+        let req = self.authorized(self.http.get(url)).await;
+        let resp = req.send().await?;
+        let status = u16::from(resp.status());
+        if !(200..299).contains(&status) {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ApiError::parse(status, &body).into_server_error());
+        }
+        Ok(resp.bytes().await?.to_vec())
     }
 
     /// `GET /ciphers/{id}/attachment/{aid}`：拿簽好名的下載 URL。

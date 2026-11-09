@@ -195,6 +195,11 @@ enum Cmd {
         keep_both: bool,
     },
     SignOut,
+    /// 附件（VW 免費開放；內容加密以附件金鑰、元資料鏡像隨 /sync）
+    Attach {
+        #[command(subcommand)]
+        cmd: AttachCmd,
+    },
     /// 本地 overlay 標籤（FR 132）
     Tag {
         #[command(subcommand)]
@@ -284,6 +289,32 @@ enum TagCmd {
         id: String,
         #[arg(default_value = "true")]
         on: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AttachCmd {
+    /// 上傳檔案（≤32MiB；離線自動入佇列收斂）
+    Add {
+        item: String,
+        path: String,
+    },
+    /// 列附件（元資料；需解鎖——檔名是信封字串）
+    Ls {
+        item: String,
+    },
+    /// 下載到檔案（`-`＝stdout）
+    Get {
+        item: String,
+        #[arg(name = "ATT_ID")]
+        att_id: String,
+        out: String,
+    },
+    /// 刪除附件（需線上；見 daemon 語意）
+    Rm {
+        item: String,
+        #[arg(name = "ATT_ID")]
+        att_id: String,
     },
 }
 
@@ -599,6 +630,21 @@ async fn run() -> Result<(), String> {
     };
     match reply {
         Ok(resp) => {
+            if let Cmd::Attach {
+                cmd: AttachCmd::Get { out, .. },
+            } = &args.cmd
+                && let Response::AttachmentBytes(bytes) = &resp
+            {
+                // 附件內容寫檔不走 stdout（二進位；`-`＝stdout 供管線）
+                if out == "-" {
+                    use std::io::Write as _;
+                    std::io::stdout().write_all(bytes).map_err(|e| e.to_string())?;
+                } else {
+                    std::fs::write(out, bytes).map_err(|e| format!("寫檔失敗：{e}"))?;
+                    println!("ok ({} bytes)", bytes.len());
+                }
+                return Ok(());
+            }
             if matches!(args.cmd, Cmd::ChangePassword)
                 && matches!(resp, Response::Ok)
                 && !args.json
@@ -1150,6 +1196,38 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             PairCmd::Join { .. } => unreachable!("join 不經 daemon 分派"),
         },
         Cmd::SignOut => Call::Auth(AuthCall::SignOut),
+        Cmd::Attach { cmd } => match cmd {
+            AttachCmd::Add { item, path } => {
+                let bytes = std::fs::read(path).map_err(|e| format!("讀不到附件檔：{e}"))?;
+                let file_name = Path::new(path)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "attachment".to_owned());
+                Call::Vault(VaultCall::Attachment {
+                    sub: bw_proto::AttachmentOp::Upload {
+                        item_id: parse_id(item)?,
+                        file_name,
+                        bytes,
+                    },
+                })
+            }
+            AttachCmd::Ls { item } => Call::Vault(VaultCall::Get {
+                id: parse_id(item)?,
+                view: View::Masked,
+            }),
+            AttachCmd::Get { item, att_id, .. } => Call::Vault(VaultCall::Attachment {
+                sub: bw_proto::AttachmentOp::Download {
+                    item_id: parse_id(item)?,
+                    attachment_id: att_id.clone(),
+                },
+            }),
+            AttachCmd::Rm { item, att_id } => Call::Vault(VaultCall::Attachment {
+                sub: bw_proto::AttachmentOp::Delete {
+                    item_id: parse_id(item)?,
+                    attachment_id: att_id.clone(),
+                },
+            }),
+        },
         Cmd::Tag { cmd } => Call::Vault(VaultCall::Overlay {
             id: parse_id(match cmd {
                 TagCmd::Add { id, .. } | TagCmd::Rm { id, .. } | TagCmd::Pin { id, .. } => id,
@@ -1416,6 +1494,10 @@ fn print_response(resp: &Response, json: bool) {
         }
         // AutoType 等計數類結果：扁平 JSON，無外殼（jq 直接命中 .typed）
         Response::Json(v) => println!("{}", serde_json::to_string_pretty(v).unwrap()),
+        // 附件位元組直出口（attach get 在 run() 已攔截寫檔；這裡是旁路觀測形態）
+        Response::AttachmentBytes(v) => {
+            println!("{}", json!({"bytes": v.len()}))
+        }
         // passkey：恆為扁平 JSON（Swift/測試端直接解析，無 --json 分支）
         Response::Passkeys(v) => println!("{}", serde_json::to_string_pretty(v).unwrap()),
         Response::PasskeyAttestation {
@@ -1519,6 +1601,14 @@ fn format_item(v: &ItemView) -> String {
             CipherFieldKind::Boolean => "boolean",
         };
         out.push_str(&format!("field[{}]: {} = {val}\n", tag, f.name));
+    }
+    for a in &v.attachments {
+        let size = match (&a.size, &a.size_name) {
+            (Some(s), _) => format!("{s} B"),
+            (None, Some(n)) => n.clone(),
+            (None, None) => "?".into(),
+        };
+        out.push_str(&format!("attach: {}  {}  ({size})\n", a.id, a.file_name));
     }
     if let Some(t) = &v.meta.updated_at {
         out.push_str(&format!("updated: {t}\n"));

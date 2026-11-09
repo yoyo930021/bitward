@@ -94,6 +94,13 @@ pub struct ConflictRecord {
 impl Store {
     /// 寫入一律「本地 transaction（mirror+outbox 同交易）→ 非阻塞 push」（§2.4）。
     pub fn enqueue(&self, d: &MutationDraft<'_>) -> StoreResult<MutationId> {
+        self.enqueue_state(d, MutState::Queued)
+    }
+
+    /// 指定初始態的入列（批次 4a：附件上傳離線佇列用 `Awaiting`——
+    /// 語意＝等待 blob 就緒/伺服器可達，drain 與 `queued` 同視取用；
+    /// `take_due_at` 兩態都認領，區分留給觀測與排程細分）。
+    pub fn enqueue_state(&self, d: &MutationDraft<'_>, state: MutState) -> StoreResult<MutationId> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let tx = conn.unchecked_transaction()?;
         if let Some(mirror) = d.mirror {
@@ -104,11 +111,12 @@ impl Store {
         }
         tx.execute(
             "INSERT INTO outbox(item, base_rev, payload, state, origin, created_at)
-             VALUES(?1,?2,?3,'queued',?4,?5)",
+             VALUES(?1,?2,?3,?4,?5,?6)",
             rusqlite::params![
                 d.item.to_string(),
                 d.base_rev,
                 serde_json::to_vec(&d.payload)?,
+                state.as_str(),
                 d.origin,
                 unix_ms() as i64,
             ],
@@ -168,21 +176,21 @@ impl Store {
         let mut stmt = tx.prepare(
             "SELECT o.seq, o.item, o.payload, o.base_rev, o.state, o.origin, o.created_at
              FROM outbox o
-             WHERE (o.state = 'queued'
+             WHERE (o.state IN ('queued','awaiting')
                     OR (o.state = 'in_flight' AND COALESCE(o.leased_at, 0) + ?1 <= ?2))
                AND o.seq = (SELECT MIN(x.seq) FROM outbox x
                             WHERE x.item = o.item AND NOT (x.state IN ('applied','dead')))
              ORDER BY o.seq LIMIT ?3",
         )?;
-        let due: Vec<(i64, Vec<u8>)> = stmt
+        let due: Vec<(i64, Vec<u8>, String)> = stmt
             .query_map(
                 rusqlite::params![LEASE_MS as i64, now_ms as i64, n as i64],
-                |r| Ok((r.get(0)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(2)?, r.get(4)?)),
             )?
             .collect::<Result<_, _>>()?;
         drop(stmt);
         let mut out = Vec::with_capacity(due.len());
-        for (seq, payload) in due {
+        for (seq, payload, pre_state) in due {
             tx.execute(
                 "UPDATE outbox SET state='in_flight', leased_at=?1 WHERE seq=?2",
                 rusqlite::params![now_ms as i64, seq],
@@ -197,7 +205,8 @@ impl Store {
                 item: Uuid::parse_str(&row.0).map_err(|e| StoreError::Invalid(e.to_string()))?,
                 payload: serde_json::from_slice(&payload)?,
                 base_rev: row.1,
-                state: MutState::InFlight,
+                // 認領前的態（queued／awaiting）：drain 重試時按原態回置
+                state: MutState::parse(&pre_state)?,
                 origin: row.2,
                 created_at: row.3 as u64,
             });

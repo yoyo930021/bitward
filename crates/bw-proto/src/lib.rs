@@ -8,7 +8,9 @@ pub type ItemId = Uuid;
 pub type FolderId = Uuid;
 pub type CollectionId = Uuid;
 pub type FieldId = String;
-pub type AttachmentId = Uuid;
+/// 附件 id：伺服器生成——VW 1.37.2 實錄為 20 位 hex（非 UUID，
+/// `dev/e2e/attachments.sh` 同源 probe），官方雲同為不透明字串。
+pub type AttachmentId = String;
 
 /// Bitwarden 信封字串 `type.iv|ct|mac`。密文原樣是鏡像與伺服器的共同通货。
 pub type EncStr = String;
@@ -119,6 +121,10 @@ pub struct ItemView {
     /// 鎖定態解不了）；Masked 帶 text 欄值、hidden 欄值為 None；Reveal 全帶。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<CipherField>,
+    /// 附件元資料（批次 4a）。Metadata/鎖定態恆為空（檔名是信封字串）；
+    /// Masked/Reveal 帶解密檔名。內容位元組只經 Download 出口。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentMeta>,
 }
 
 impl ItemView {
@@ -131,13 +137,21 @@ impl ItemView {
             totp_available: false,
             notes: None,
             fields: Vec::new(),
+            attachments: Vec::new(),
         }
     }
 
-    /// 附掛 Secret 級詳情（筆記＋自訂欄）；呼叫端已按 `View` 決定值可見性。
-    pub fn with_details(mut self, notes: Option<String>, fields: Vec<CipherField>) -> Self {
+    /// 附掛 Secret 級詳情（筆記＋自訂欄＋附件元資料）；呼叫端已按 `View`
+    /// 決定值可見性。
+    pub fn with_details(
+        mut self,
+        notes: Option<String>,
+        fields: Vec<CipherField>,
+        attachments: Vec<AttachmentMeta>,
+    ) -> Self {
         self.notes = notes;
         self.fields = fields;
+        self.attachments = attachments;
         self
     }
     pub fn masked(
@@ -166,6 +180,22 @@ pub struct ProtoVersion(pub u16);
 pub const PROTO_VERSION: u16 = 1;
 
 pub type SessionToken = String;
+
+/// `Vec<u8>` 的線形態：JSON 走 base64 字串（serde 預設的數字陣列在
+/// MiB 級附件上膨脹 4 倍且爆 BTP 幀），postcard 下同為緊湊字符串。
+pub mod bytes_b64 {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+
+    pub fn serialize<S: Serializer>(bytes: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
+        STANDARD.encode(bytes).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(d)?;
+        STANDARD.decode(&s).map_err(de::Error::custom)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub Uuid);
@@ -344,6 +374,11 @@ pub enum VaultCall {
         items: Vec<ImportItem>,
         format: bool,
     },
+    /// 置尾（同上紀律）：附件四操作（VW 免費開放；語意見 `AttachmentOp`）。
+    /// 清單走既有 ItemView（`attachments` 欄），無獨立 List 呼叫。
+    Attachment {
+        sub: AttachmentOp,
+    },
 }
 
 /// WebAuthn passkey 操作（macOS autofill 契約 §1）：金鑰與業務全在 daemon，
@@ -476,6 +511,46 @@ pub enum OverlayOpWire {
     RemoveTag(String),
     SetPinned(bool),
     Touch,
+}
+
+/// 附件操作（批次 4a；`VaultCall::Attachment { sub }` 承載）。
+/// 線格式實錄（VW 1.37.2 probe）：上傳＝`POST /ciphers/{id}/attachment`
+/// multipart（`key`＝附件金鑰信封字串、`data`＝密文檔，data 段的
+/// multipart filename 原樣落 `fileName`——所以我們傳**加密後**的檔名）；
+/// 下載＝`GET /ciphers/{id}/attachment/{aid}` 取短效簽名 URL 再直連取位元組；
+/// 刪除＝`DELETE /ciphers/{id}/attachment/{aid}`。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AttachmentOp {
+    /// `bytes` 為**明文**檔內容（本機線安全紀律，與 Login password 同級：
+    /// 只走 UDS/TLS，加密發生在 daemon `with_keys` 閉包）。
+    /// 上限 32 MiB（daemon 入列前擋；BTP 幀上限見 bw-btp MAX_FRAME）。
+    Upload {
+        item_id: ItemId,
+        file_name: String,
+        #[serde(with = "bytes_b64")]
+        bytes: Vec<u8>,
+    },
+    /// 回應 `Response::AttachmentBytes`（解密後的明文位元組，同機線紀律）。
+    Download {
+        item_id: ItemId,
+        attachment_id: AttachmentId,
+    },
+    Delete {
+        item_id: ItemId,
+        attachment_id: AttachmentId,
+    },
+}
+
+/// 附件元資料（ItemView 投影；檔名/尺寸名鏡像端為信封字串，
+/// 解鎖投影時解密——VW 自算的 sizeName 可能是明文，解不開原樣回傳）。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentMeta {
+    pub id: AttachmentId,
+    pub file_name: String,
+    #[serde(default)]
+    pub size: Option<u64>,
+    #[serde(default)]
+    pub size_name: Option<String>,
 }
 
 /// 自訂欄型別（官方 `login.fields[].type`：0=text、1=hidden、2=boolean）。
@@ -793,6 +868,9 @@ pub enum Response {
     RegisterBegin {
         credential_id: String,
     },
+    /// 附件下載的回傳位元組（批次 4a；解密後的明文內容，
+    /// 本機線安全紀律同 Upload bytes；JSON 線形態為 base64 字串）。
+    AttachmentBytes(#[serde(with = "bytes_b64")] Vec<u8>),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1162,6 +1240,67 @@ mod tests {
     }
 
     #[test]
+    fn attachment_ops_roundtrip_and_frame_shape() {
+        let sub = AttachmentOp::Upload {
+            item_id: ItemId::new_v4(),
+            file_name: "帳單.pdf".into(),
+            bytes: vec![0u8, 1, 2, 255, 128],
+        };
+        let msg = ClientMsg::Invoke {
+            rid: 17,
+            call: Call::Vault(VaultCall::Attachment { sub }),
+        };
+        let j = serde_json::to_value(&msg).unwrap();
+        // 線形態：bytes 是 base64 字串（不是數字陣列）
+        assert_eq!(
+            j["Invoke"]["call"]["Vault"]["Attachment"]["sub"]["Upload"]["bytes"],
+            serde_json::json!("AAEC/4A=")
+        );
+        let back: ClientMsg = serde_json::from_slice(&serde_json::to_vec(&msg).unwrap()).unwrap();
+        assert_eq!(back.rid(), 17);
+        let b = postcard::to_allocvec(&msg).unwrap();
+        assert_eq!(postcard::from_bytes::<ClientMsg>(&b).unwrap().rid(), 17);
+
+        let resp = Response::AttachmentBytes(vec![7, 8, 9]);
+        let j = serde_json::to_string(&resp).unwrap();
+        assert!(j.contains("BwgJ"), "{j}");
+        let back =
+            postcard::from_bytes::<Response>(&postcard::to_allocvec(&resp).unwrap()).unwrap();
+        match back {
+            Response::AttachmentBytes(v) => assert_eq!(v, vec![7, 8, 9]),
+            other => panic!("expect AttachmentBytes, got {other:?}"),
+        }
+
+        // 置尾紀律：Attachment 索引在 Import 之後，既有變體不動
+        let idx = |c: &VaultCall| postcard::to_allocvec(c).unwrap()[0];
+        assert!(
+            idx(&VaultCall::Attachment {
+                sub: AttachmentOp::Download {
+                    item_id: ItemId::new_v4(),
+                    attachment_id: "8fd01a914baeef9d1efd".into(),
+                }
+            }) > idx(&VaultCall::Import {
+                items: vec![],
+                format: false
+            })
+        );
+
+        // ItemView.attachments：無附件時鍵缺席（A3 紀律延伸），有則帶元資料
+        let mut v = ItemView::metadata(meta());
+        v.attachments = vec![AttachmentMeta {
+            id: "8fd01a914baeef9d1efd".into(),
+            file_name: "a.bin".into(),
+            size: Some(11),
+            size_name: Some("11.00 bytes".into()),
+        }];
+        let j = serde_json::to_string(&v).unwrap();
+        assert!(j.contains("\"attachments\""));
+        assert_eq!(serde_json::from_str::<ItemView>(&j).unwrap().attachments.len(), 1);
+        let empty = serde_json::to_string(&ItemView::metadata(meta())).unwrap();
+        assert!(!empty.contains("\"attachments\""));
+    }
+
+    #[test]
     fn error_variants_roundtrip() {
         let e = WtpError::StaleEpoch { seen: 3, now: 5 };
         let j = serde_json::to_string(&e).unwrap();
@@ -1357,6 +1496,7 @@ mod tests {
                     value: None,
                     kind: CipherFieldKind::Hidden,
                 }],
+                vec![],
             );
         let j = serde_json::to_string(&v).unwrap();
         assert!(j.contains("\"notes\":\"筆記\""));

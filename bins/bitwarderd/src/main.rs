@@ -4,6 +4,7 @@
 mod agent;
 mod apns;
 mod arena;
+mod attach;
 mod datamanage;
 mod hub;
 mod passkey;

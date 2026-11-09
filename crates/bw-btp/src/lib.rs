@@ -7,8 +7,11 @@ use bw_proto::{ClientMsg, ServerMsg};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-/// 1 MiB 上限。官方 IPC 框架用 1MB 前綴教訓：幀上限要在解碼前擋住，不是解碼後。
-pub const MAX_FRAME: u32 = 1024 * 1024;
+/// 幀上限要在解碼前擋住，不是解碼後（官方 IPC 框架 1MB 前綴教訓）。
+/// 批次 4a 附件上調：32 MiB 檔的 base64 JSON 幀 ≈ 43 MiB（`bytes_b64`），
+/// 加信封欄位預留 → 48 MiB。read 端按實際 len 分配（非上限預分配），
+/// 小幀不受影響；UDS/TLS 本機線對端已經過 uid/簽章白名單（§1.4）。
+pub const MAX_FRAME: u32 = 48 * 1024 * 1024;
 
 #[derive(Error, Debug)]
 pub enum BtpError {

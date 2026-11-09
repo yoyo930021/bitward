@@ -433,6 +433,21 @@ impl Hub {
             Call::Vault(VaultCall::Import { items, format }) => {
                 self.write_import(session, items, *format).await
             }
+            Call::Vault(VaultCall::Attachment { sub }) => match sub {
+                bw_proto::AttachmentOp::Upload {
+                    item_id,
+                    file_name,
+                    bytes,
+                } => self.attach_upload(session, *item_id, file_name, bytes).await,
+                bw_proto::AttachmentOp::Download {
+                    item_id,
+                    attachment_id,
+                } => self.attach_download(*item_id, attachment_id).await,
+                bw_proto::AttachmentOp::Delete {
+                    item_id,
+                    attachment_id,
+                } => self.attach_delete(*item_id, attachment_id).await,
+            },
             Call::Use(UseCall::TotpCode { id }) => self.totp(*id),
             Call::Use(UseCall::GeneratePassword { policy }) => {
                 let opts = bw_crypto::PasswordOptions {
@@ -982,58 +997,61 @@ impl Hub {
         let reveal = view == View::Reveal;
         let dec = self.machine.with_keys(|kb| {
             let d = cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
-            let login = row.enc_cipher.get("login");
-            let username = login
-                .and_then(|l| l.get("username"))
-                .and_then(Value::as_str)
-                .and_then(&d);
-            let password = login
-                .and_then(|l| l.get("password"))
-                .and_then(Value::as_str)
-                .and_then(&d);
-            let notes = row
-                .enc_cipher
-                .get("notes")
-                .and_then(Value::as_str)
-                .and_then(&d);
-            // 自訂欄（v5 三件套）：欄名恒出（Identity）；text/boolean 欄值 Masked
-            // 即出、hidden 欄值僅 Reveal 出（A3：不可見時鍵缺席，非 null）。
-            let fields = match row.enc_cipher.get("fields").and_then(Value::as_array) {
-                Some(arr) => arr
-                    .iter()
-                    .map(|f| {
-                        let kind = bw_proto::CipherFieldKind::from_wire(
-                            f.get("type").and_then(Value::as_i64).unwrap_or(0),
-                        );
-                        let value_ok = kind != bw_proto::CipherFieldKind::Hidden || reveal;
-                        bw_proto::CipherField {
-                            name: f
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .and_then(&d)
-                                .unwrap_or_default(),
-                            value: if value_ok {
-                                f.get("value").and_then(Value::as_str).and_then(&d)
-                            } else {
-                                None
-                            },
-                            kind,
-                        }
-                    })
-                    .collect(),
-                None => Vec::new(),
+            let (username, password, notes, fields) = {
+                let login = row.enc_cipher.get("login");
+                let username = login
+                    .and_then(|l| l.get("username"))
+                    .and_then(Value::as_str)
+                    .and_then(&d);
+                let password = login
+                    .and_then(|l| l.get("password"))
+                    .and_then(Value::as_str)
+                    .and_then(&d);
+                let notes = row
+                    .enc_cipher
+                    .get("notes")
+                    .and_then(Value::as_str)
+                    .and_then(&d);
+                let fields = match row.enc_cipher.get("fields").and_then(Value::as_array) {
+                    Some(arr) => arr
+                        .iter()
+                        .map(|f| {
+                            let kind = bw_proto::CipherFieldKind::from_wire(
+                                f.get("type").and_then(Value::as_i64).unwrap_or(0),
+                            );
+                            let value_ok = kind != bw_proto::CipherFieldKind::Hidden || reveal;
+                            bw_proto::CipherField {
+                                name: f
+                                    .get("name")
+                                    .and_then(Value::as_str)
+                                    .and_then(&d)
+                                    .unwrap_or_default(),
+                                value: if value_ok {
+                                    f.get("value").and_then(Value::as_str).and_then(&d)
+                                } else {
+                                    None
+                                },
+                                kind,
+                            }
+                        })
+                        .collect(),
+                    None => Vec::new(),
+                };
+                (username, password, notes, fields)
             };
-            (username, password, notes, fields)
+            // 附件元資料（批次 4a）：鏡像列＋檔名解密走同一個 dec 座標系
+            let attachments = self.attachment_projection(id, &d);
+            (username, password, notes, fields, attachments)
         });
-        let (username, password, notes, fields) = dec.map_err(denied)?;
+        let (username, password, notes, fields, attachments) = dec.map_err(denied)?;
         let v = match view {
             View::Masked => ItemView::metadata(base)
                 .masked(username, password.as_deref().map(mask_tail), false)
-                .with_details(notes, fields),
+                .with_details(notes, fields, attachments),
             View::Reveal => ItemView::metadata(base)
                 .masked(username, None, false)
                 .revealed(password)
-                .with_details(notes, fields),
+                .with_details(notes, fields, attachments),
             View::Metadata => ItemView::metadata(base),
         };
         Ok(Some(v))
@@ -1299,6 +1317,15 @@ fn action_tag(c: &Call) -> String {
         Call::Vault(VaultCall::DeleteFolder { .. }) => "Vault.DeleteFolder",
         Call::Vault(VaultCall::Purge { .. }) => "Vault.Purge",
         Call::Vault(VaultCall::Import { .. }) => "Vault.Import",
+        Call::Vault(VaultCall::Attachment {
+            sub: bw_proto::AttachmentOp::Upload { .. },
+        }) => "Vault.Attachment.Upload",
+        Call::Vault(VaultCall::Attachment {
+            sub: bw_proto::AttachmentOp::Download { .. },
+        }) => "Vault.Attachment.Download",
+        Call::Vault(VaultCall::Attachment {
+            sub: bw_proto::AttachmentOp::Delete { .. },
+        }) => "Vault.Attachment.Delete",
         Call::Passkey(PasskeyCall::GetPasskeys { .. }) => "Passkey.GetPasskeys",
         Call::Passkey(PasskeyCall::RegisterPasskey { .. }) => "Passkey.RegisterPasskey",
         Call::Passkey(PasskeyCall::AssertPasskey { .. }) => "Passkey.AssertPasskey",
@@ -1369,6 +1396,14 @@ fn sensitivity_of_call(c: &Call, resp: Option<&Response>) -> bw_proto::Sensitivi
         | Call::Vault(VaultCall::DeleteFolder { .. })
         | Call::Vault(VaultCall::Purge { .. })
         | Call::Vault(VaultCall::Import { .. }) => Identity,
+        // 附件內容是 Secret 級出口（Download 明文回程、Upload 明文入程計 bytes）；
+        // Delete 只動元資料列，比照 Patch 級
+        Call::Vault(VaultCall::Attachment {
+            sub: bw_proto::AttachmentOp::Upload { .. } | bw_proto::AttachmentOp::Download { .. },
+        }) => Secret,
+        Call::Vault(VaultCall::Attachment {
+            sub: bw_proto::AttachmentOp::Delete { .. },
+        }) => Identity,
         Call::Use(UseCall::TotpCode { .. })
         | Call::Use(UseCall::Run { .. })
         | Call::Use(UseCall::ResolveRef { .. })

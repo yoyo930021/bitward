@@ -419,7 +419,8 @@ impl Hub {
                     Ok(()) => pushed += 1,
                     Err(retry_later) => {
                         if retry_later {
-                            let _ = self.store.settle(m.id, MutState::Queued);
+                            // 按認領前原態回置（awaiting 的附件佇列不得降成 queued）
+                            let _ = self.store.settle(m.id, m.state);
                             return;
                         }
                         // false：push_one 已自行結算（dead/conflict），drain 不能再動它，
@@ -518,6 +519,7 @@ impl Hub {
                 .await
                 .map(|_| ())
                 .map_err(|e| (e, false)),
+            "attach_upload" => self.push_attach_upload(&client, m).await,
             "move" => self.push_move(&client, m).await,
             other => {
                 tracing::error!(op = other, "unknown outbox op");

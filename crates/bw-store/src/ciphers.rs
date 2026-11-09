@@ -64,7 +64,7 @@ impl Store {
         tx.execute_batch(
             "DELETE FROM meta_plain; DELETE FROM ciphers;
              DELETE FROM orgs; DELETE FROM collections; DELETE FROM cipher_collections;
-             DELETE FROM folders;",
+             DELETE FROM folders; DELETE FROM attachments;",
         )?;
         for c in ciphers {
             let id_s = c
@@ -334,11 +334,46 @@ impl Store {
             "DELETE FROM cipher_collections WHERE cipher = ?1",
             [id.to_string()],
         )?;
+        tx.execute(
+            "DELETE FROM attachments WHERE cipher = ?1",
+            [id.to_string()],
+        )?;
         tx.execute("DELETE FROM outbox WHERE item = ?1", [id.to_string()])?;
         tx.execute("DELETE FROM overlay WHERE id = ?1", [id.to_string()])?;
         tx.commit()?;
         Ok(n as u64)
     }
+
+    /// 單個 cipher 的附件鏡像列（批次 4a；欄位值為伺服器原樣）。
+    pub fn attachment_list(&self, cipher: ItemId) -> StoreResult<Vec<AttachmentRow>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, file_name, size, size_name, key, url
+             FROM attachments WHERE cipher = ?1 ORDER BY id",
+        )?;
+        let rows = stmt.query_map([cipher.to_string()], |r| {
+            Ok(AttachmentRow {
+                id: r.get(0)?,
+                file_name: r.get(1)?,
+                size: r.get(2)?,
+                size_name: r.get(3)?,
+                key: r.get(4)?,
+                url: r.get(5)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+}
+
+/// `attachments` 表的一列（批次 4a）。
+#[derive(Clone, Debug)]
+pub struct AttachmentRow {
+    pub id: String,
+    pub file_name: Option<String>,
+    pub size: Option<i64>,
+    pub size_name: Option<String>,
+    pub key: Option<String>,
+    pub url: Option<String>,
 }
 
 /// `folders` 表的一列（v5）：名稱是伺服器原樣信封，本層不做金鑰語意。
@@ -396,6 +431,7 @@ pub(crate) fn write_cipher(conn: &rusqlite::Connection, id: ItemId, c: &Value) -
         rusqlite::params![id.to_string(), enc_blob, raw, rev, deleted as i64],
     )?;
     write_cipher_collections(conn, id, c)?;
+    write_cipher_attachments(conn, id, c)?;
     // v5（垃圾桶三態）：軟刪列保留在 meta_plain（帶 deleted_at），由 query 的
     // `deleted` 過濾——垃圾桶列表要讀得到；硬刪走 `Store::purge` 摘列。
     conn.execute(
@@ -433,6 +469,43 @@ fn write_cipher_collections(conn: &rusqlite::Connection, id: ItemId, c: &Value) 
         conn.execute(
             "INSERT OR IGNORE INTO cipher_collections(cipher, collection) VALUES(?1,?2)",
             rusqlite::params![id.to_string(), col_id.to_string()],
+        )?;
+    }
+    Ok(())
+}
+
+/// cipher `attachments{}` → 鏡像列（批次 4a）。全量替換語意同 collectionIds：
+/// 先刪該 cipher 的舊列再依伺服器原樣插入。官方形態是 map（key=id）；
+/// 寬容 array 形態（部分 server 變體）。欄位值一律原樣存（信封/明文不判斷）。
+fn write_cipher_attachments(conn: &rusqlite::Connection, id: ItemId, c: &Value) -> StoreResult<()> {
+    conn.execute("DELETE FROM attachments WHERE cipher = ?1", [id.to_string()])?;
+    let empty = Vec::new();
+    let list: Vec<&Value> = match c.get("attachments") {
+        Some(Value::Object(m)) => m.values().collect(),
+        Some(Value::Array(a)) => a.iter().collect(),
+        _ => empty,
+    };
+    for a in list {
+        let Some(aid) = a.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        // size 官方線上是字串（"1024"），寬容數字形態
+        let size = a.get("size").and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        });
+        conn.execute(
+            "INSERT OR REPLACE INTO attachments(id, cipher, file_name, size, size_name, key, url)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            rusqlite::params![
+                aid,
+                id.to_string(),
+                a.get("fileName").and_then(Value::as_str),
+                size,
+                a.get("sizeName").and_then(Value::as_str),
+                a.get("key").and_then(Value::as_str),
+                a.get("url").and_then(Value::as_str),
+            ],
         )?;
     }
     Ok(())

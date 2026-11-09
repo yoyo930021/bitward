@@ -1167,3 +1167,45 @@ fn enqueue_batch_is_all_or_nothing() {
     assert!(store.item(d).unwrap().is_none());
     assert_eq!(store.depth().unwrap().queued, 2, "回滾不得增列");
 }
+
+#[test]
+fn attachments_mirror_and_awaiting_take_due() {
+    let (_d, path) = tmp_vault("att");
+    let store = Store::open(&path).unwrap();
+    let cid = Uuid::new_v4();
+    let mut c = cipher(&cid.to_string(), "2.n|n|n", "rev", false);
+    // 官方形態 attachments 是 map（key=id）；size 是字串
+    c["attachments"] = json!({
+        "8fd01a914baeef9d1efd": {
+            "id": "8fd01a914baeef9d1efd",
+            "fileName": "2.fn|fn|fn",
+            "size": "11",
+            "sizeName": "11.00 bytes",
+            "key": "2.kk|kk|kk",
+            "url": "http://vw/attachments/x?token=t"
+        }
+    });
+    store.apply_sync(&json!({ "ciphers": [c] })).unwrap();
+    let rows = store.attachment_list(cid).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "8fd01a914baeef9d1efd");
+    assert_eq!(rows[0].size, Some(11));
+    assert_eq!(rows[0].file_name.as_deref(), Some("2.fn|fn|fn"));
+
+    // Awaiting 態入列 → take_due 認領（附件離線佇列與 queued 同視）
+    store
+        .enqueue_state(
+            &MutationDraft {
+                item: cid,
+                payload: json!({"op": "attach_upload"}),
+                base_rev: None,
+                origin: None,
+                mirror: None,
+            },
+            MutState::Awaiting,
+        )
+        .unwrap();
+    let due = store.take_due_at(0, 8).unwrap(); // now=0：租約未過也能取 awaiting/queued
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].state, MutState::Awaiting, "認領保留原態供重試回置");
+}

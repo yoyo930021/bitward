@@ -55,6 +55,25 @@ impl Store {
         }
     }
 
+    /// 上傳收訖後的釋放：**僅當沒有未結算 outbox 列仍引用該 ref** 才刪檔＋登記列
+    /// （內容定址去重：同檔兩次上傳共用 ref，先完成者不得拆掉後完成者的糧）。
+    pub fn blob_release(&self, r: &str) -> StoreResult<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let pending: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM outbox
+             WHERE state NOT IN ('applied','dead') AND CAST(payload AS TEXT) LIKE ('%' || ?1 || '%')",
+            [r],
+            |row| row.get(0),
+        )?;
+        if pending > 0 {
+            return Ok(());
+        }
+        conn.execute("DELETE FROM blobs WHERE ref = ?1", [r])?;
+        let path = self.blob_path(r)?;
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
     /// 登記過但檔案遺漏的 ref（fsck／重傳佇列用）。
     pub fn blob_missing(&self) -> StoreResult<Vec<BlobRef>> {
         let refs: Vec<BlobRef> = {

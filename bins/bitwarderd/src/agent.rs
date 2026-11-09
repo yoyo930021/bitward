@@ -243,6 +243,20 @@ impl Hub {
             Call::Vault(VaultCall::Import { .. }) => {
                 (Access::Mutate(MutateOp::Create), None)
             }
+            // 附件：上傳改的是 cipher（Patch 級）、下載出口是內容（See secret）、
+            // 刪除比照 Delete；item 錨定便於 item:/folder: grant 判定
+            Call::Vault(VaultCall::Attachment { sub }) => match sub {
+                bw_proto::AttachmentOp::Upload { item_id, .. } => {
+                    (Access::Mutate(MutateOp::Patch), Some(*item_id))
+                }
+                bw_proto::AttachmentOp::Download { item_id, .. } => (
+                    Access::See(bw_proto::Sensitivity::Secret),
+                    Some(*item_id),
+                ),
+                bw_proto::AttachmentOp::Delete { item_id, .. } => {
+                    (Access::Mutate(MutateOp::Delete), Some(*item_id))
+                }
+            },
             // passkey 分級（契約 §4）：列表＝Metadata（Identity floor）；
             // Register/Assert 取用私鑰＝Use(UseKind::Passkey)（用而不讀，同 totp 級）
             Call::Passkey(PasskeyCall::GetPasskeys { .. }) => {
@@ -727,6 +741,11 @@ pub fn item_of(call: &Call) -> Option<uuid::Uuid> {
         | Call::Vault(VaultCall::Patch { id, .. })
         | Call::Vault(VaultCall::Restore { id })
         | Call::Use(UseCall::TotpCode { id }) => Some(*id),
+        Call::Vault(VaultCall::Attachment { sub }) => Some(match sub {
+            bw_proto::AttachmentOp::Upload { item_id, .. }
+            | bw_proto::AttachmentOp::Download { item_id, .. }
+            | bw_proto::AttachmentOp::Delete { item_id, .. } => *item_id,
+        }),
         Call::Vault(VaultCall::Delete { ids }) => ids.first().copied(),
         Call::Passkey(PasskeyCall::RegisterPasskey {
             item_id: Some(id), ..
@@ -748,6 +767,8 @@ fn summarize(call: &Call) -> String {
         Call::Use(UseCall::Run { plan }) => {
             format!("run {:?}", plan.argv.first().cloned().unwrap_or_default())
         }
+        // 附件 Upload 帶整檔位元組：Debug dump 會把內容潑進審計/核准文字
+        Call::Vault(VaultCall::Attachment { sub }) => crate::attach::op_summary(sub),
         other => format!("{other:?}"),
     }
 }
