@@ -7,10 +7,11 @@
 //! 明文紀律：匯入是匯出的鏡像入口——明文只在 worker 區域與 `Zeroizing`
 //! 副本短暫存在，進 Outgoing 幀即出棧；預覽只回計數，不回明文。
 
-use bw_proto::{Call, CipherDraft, CipherField, ItemKind, Response, VaultCall};
+use bw_proto::{
+    Call, CipherDraft, CipherField, ImportItem, ItemKind, Response, VaultCall,
+};
 
 use crate::btp::Session;
-use crate::state::{apply_tags, find_created};
 
 /// 單次匯入上限（防呆：誤指大檔不炸 daemon）。
 pub const MAX_ROWS: usize = 5000;
@@ -126,14 +127,16 @@ fn row_from(it: &serde_json::Value) -> Option<ImportRow> {
             arr.iter()
                 .filter_map(|f| {
                     let fname = f.get("name").and_then(|n| n.as_str())?.to_owned();
-                    let hidden = f.get("type").and_then(|t| t.as_i64()) == Some(1);
+                    let kind = bw_proto::CipherFieldKind::from_wire(
+                        f.get("type").and_then(|t| t.as_i64()).unwrap_or(0),
+                    );
                     Some(CipherField {
                         name: fname,
                         value: f
                             .get("value")
                             .and_then(|v| v.as_str())
                             .map(str::to_owned),
-                        hidden,
+                        kind,
                     })
                 })
                 .collect()
@@ -164,63 +167,71 @@ pub fn read_text(path: &str) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("讀不到「{path}」：{e}"))
 }
 
-/// 匯入結果（結果列文案來源）。
+/// 匯入結果（結果列文案來源）。語意：跳過＝本地過濾（缺名）不進 items；
+/// 失敗＝daemon 整批拒收（單交易全收或全拒），此時 created=0、failed=送件數。
 #[derive(Clone, Debug, Default)]
 pub struct ImportOutcome {
     pub created: usize,
     pub failed: usize,
     pub skipped: usize,
+    pub reason: Option<String>,
 }
 
-/// 在 worker 執行緒跑完整匯出→建立迴圈（一條連線、逐筆 Create＋tags）。
+/// 解析列 → `VaultCall::Import` 的 items（純函數，可單測）。
+/// 明文紀律：password 在此原樣搬進 draft，序列化進 Outgoing 幀即出棧。
+pub fn to_items(rows: &[ImportRow]) -> Vec<ImportItem> {
+    rows.iter()
+        .map(|r| ImportItem {
+            draft: CipherDraft {
+                kind: r.kind,
+                name: r.name.clone(),
+                username: r.username.clone(),
+                password: r.password.clone(),
+                totp: None,
+                uris: r.uris.clone(),
+                notes: r.notes.clone(),
+                favorite: r.favorite,
+                folder_id: r.folder_id.clone(),
+                fields: r.fields.clone(),
+            },
+            tags: r.tags.clone(),
+        })
+        .collect()
+}
+
+/// 在 worker 執行緒跑匯入：本地解析（預覽同源）→ 單交易 `VaultCall::Import`。
+/// 大檔不再非原子；drain 推 VW 失敗走 daemon 既有 outbox 重試，不影響此處計數。
 pub fn run(session: &Session, text: &str) -> Result<ImportOutcome, String> {
     let Parsed { rows, skipped } = parse(text)?;
-    let mut out = ImportOutcome {
-        created: 0,
-        failed: 0,
-        skipped,
-    };
-    for row in rows {
-        // Zeroize 點：密碼明文只活到序列化進 Outgoing 幀為止。
-        let password = row.password.map(zeroize::Zeroizing::new);
-        let draft = CipherDraft {
-            kind: row.kind,
-            name: row.name.clone(),
-            username: row.username.clone(),
-            password: password.as_deref().map(|p| p.to_string()),
-            totp: None,
-            uris: row.uris.clone(),
-            notes: row.notes.clone(),
-            favorite: row.favorite,
-            folder_id: row.folder_id.clone(),
-            fields: row.fields.clone(),
-        };
-        match session.call(&Call::Vault(VaultCall::Create { draft })) {
-            Ok(Response::Ok) => {
-                if !row.tags.is_empty() {
-                    match find_created(session, &row.name) {
-                        Some(id) => {
-                            if apply_tags(session, id, &[], &row.tags).is_some() {
-                                out.failed += 1;
-                                continue;
-                            }
-                        }
-                        None => {
-                            out.failed += 1;
-                            continue;
-                        }
-                    }
-                }
-                out.created += 1;
-            }
-            Ok(other) => {
-                let _ = other;
-                out.failed += 1;
-            }
-            Err(_) => out.failed += 1,
-        }
+    if rows.is_empty() {
+        return Ok(ImportOutcome {
+            created: 0,
+            failed: 0,
+            skipped,
+            reason: None,
+        });
     }
-    Ok(out)
+    let items = to_items(&rows);
+    match session.call(&Call::Vault(VaultCall::Import { items, format: false })) {
+        Ok(Response::Json(v)) => Ok(ImportOutcome {
+            created: v.get("imported").and_then(|n| n.as_u64()).unwrap_or(0) as usize,
+            failed: 0,
+            skipped,
+            reason: None,
+        }),
+        Ok(other) => Ok(ImportOutcome {
+            created: 0,
+            failed: rows.len(),
+            skipped,
+            reason: Some(format!("Import 回應形態不符：{other:?}")),
+        }),
+        Err(e) => Ok(ImportOutcome {
+            created: 0,
+            failed: rows.len(),
+            skipped,
+            reason: Some(e.display()),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -261,8 +272,8 @@ mod tests {
         assert_eq!(g.folder_id.as_deref(), Some("f-1"));
         assert_eq!(g.uris, vec!["https://g".to_owned()]);
         assert_eq!(g.fields.len(), 2);
-        assert!(g.fields[0].hidden);
-        assert!(!g.fields[1].hidden);
+        assert_eq!(g.fields[0].kind, bw_proto::CipherFieldKind::Hidden);
+        assert_eq!(g.fields[1].kind, bw_proto::CipherFieldKind::Text);
         assert_eq!(p.rows[1].kind, ItemKind::SecureNote);
     }
 
@@ -278,5 +289,24 @@ mod tests {
         let p = parse(r#"[{"name":""},{"name":null}]"#).unwrap();
         assert!(p.rows.is_empty());
         assert_eq!(p.skipped, 2);
+    }
+
+    #[test]
+    fn to_items_builds_atomic_import_request() {
+        let p = parse(
+            r#"{"encrypted":false,"items":[
+                {"type":1,"name":"A","login":{"username":"u","password":"p"},
+                 "fields":[{"name":"vip","value":"true","type":2}]},
+                {"type":2,"name":"N","notes":"x"}
+            ]}"#,
+        )
+        .unwrap();
+        let items = to_items(&p.rows);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].draft.name, "A");
+        assert_eq!(items[0].draft.password.as_deref(), Some("p"));
+        assert_eq!(items[0].draft.fields[0].kind, bw_proto::CipherFieldKind::Boolean);
+        assert_eq!(items[1].draft.kind, ItemKind::SecureNote);
+        assert_eq!(items[1].draft.notes.as_deref(), Some("x"));
     }
 }

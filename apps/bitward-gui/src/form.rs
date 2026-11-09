@@ -6,7 +6,7 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use bw_proto::ItemKind;
+use bw_proto::{CipherFieldKind, ItemKind};
 use nsh_base::input;
 use nsh_core::prelude::*;
 
@@ -71,7 +71,7 @@ pub fn overlay(core: AppCore) -> View {
                     )
                 },
             ))
-            .child(custom_fields_editor(core.clone(), is_create))
+            .child(custom_fields_editor(core.clone()))
             .child(ui::form_field(
                 "標籤",
                 "逗號分隔，例：dev, 工作",
@@ -344,9 +344,9 @@ fn folder_panel(core: AppCore, open: Signal<bool>) -> View {
     ui::card(rows).w(px(260.0))
 }
 
-/// 自訂欄位編輯列：name＋value＋隱藏開關（建立模式）＋增刪。
-/// 編輯模式只改 name/value——daemon 的 FieldEdit 無整陣列增刪路徑。
-fn custom_fields_editor(core: AppCore, is_create: bool) -> View {
+/// 自訂欄位編輯列：name＋（值或布林開關）＋三態型別選單＋增刪。
+/// 建立與編輯模式都可增刪改型（daemon 批次 3 的 SetType/Append/Remove）。
+fn custom_fields_editor(core: AppCore) -> View {
     let fields = core.form.fields;
     let add_fields = fields;
     let row_fields = fields;
@@ -365,15 +365,10 @@ fn custom_fields_editor(core: AppCore, is_create: bool) -> View {
                         .letter_spacing(px(0.4))
                         .text_color(theme::TEXT_SECONDARY),
                 )
-                .child(when(
-                    move || is_create,
+                .child(ui::text_button_dyn(
+                    || "＋ 新增欄位".to_owned(),
                     move || {
-                        ui::text_button_dyn(
-                            || "＋ 新增欄位".to_owned(),
-                            move || {
-                                add_fields.update(|v| Arc::make_mut(v).push(FieldDraft::default()));
-                            },
-                        )
+                        add_fields.update(|v| Arc::make_mut(v).push(FieldDraft::default()));
                     },
                 )),
         )
@@ -381,16 +376,21 @@ fn custom_fields_editor(core: AppCore, is_create: bool) -> View {
             move || (*fields.get()).clone(),
             |f: &FieldDraft| f.key,
             move |item: ReadSignal<FieldDraft>, _i: ReadSignal<usize>| {
-                field_row(row_fields, item.get().key, is_create)
+                field_row(row_fields, item.get().key)
             },
         ))
 }
 
-/// 單列編輯器：三個控制都回寫 `fields` 訊號中 key 相符的那筆。
-fn field_row(fields: Signal<Arc<Vec<FieldDraft>>>, key: u32, is_create: bool) -> View {
+/// 單列編輯器：欄名＋（值輸入或布林開關，依型別）＋三態型別選單＋刪列。
+/// 全部控制回寫 `fields` 訊號中 key 相符的那筆；增刪改型在編輯模式
+/// 同樣開放（daemon 批次 3 的 SetType/Append/Remove）。
+fn field_row(fields: Signal<Arc<Vec<FieldDraft>>>, key: u32) -> View {
     let name_sig = fields;
-    let value_sig = fields;
-    let row = view()
+    let val_cond = fields;
+    let val_build = fields;
+    let bool_cond = fields;
+    let bool_build = fields;
+    view()
         .flex_row()
         .items_center()
         .gap_2()
@@ -422,71 +422,38 @@ fn field_row(fields: Signal<Arc<Vec<FieldDraft>>>, key: u32, is_create: bool) ->
                 .text_color(theme::TEXT_PRIMARY)
                 .flex_1(),
         )
-        .child(
-            input()
-                .value(move || {
-                    fields
-                        .get()
-                        .iter()
-                        .find(|f| f.key == key)
-                        .map(|f| f.value.clone())
-                        .unwrap_or_default()
-                })
-                .placeholder("值")
-                .placeholder_color(move || theme::TEXT_MUTED.light)
-                .on_change(move |t: &str| {
-                    value_sig.update(|v| {
-                        if let Some(f) = Arc::make_mut(v).iter_mut().find(|f| f.key == key) {
-                            f.value = t.to_owned();
-                        }
-                    });
-                })
-                .h(px(theme::INPUT_H))
-                .px_3()
-                .rounded(px(theme::RADIUS_CONTROL))
-                .border(px(1.0))
-                .border_color(theme::HAIRLINE)
-                .bg(theme::BASE)
-                .text_color(theme::TEXT_PRIMARY)
-                .flex_1(),
-        );
-    let del_sig = fields;
-    if is_create {
-        let hid_sig = fields;
-        row.child(
-            view()
-                .h(px(theme::CHIP_H))
-                .px_2p5()
-                .rounded_full()
-                .flex_row()
-                .items_center()
-                .cursor_pointer()
-                .border(px(1.0))
-                .border_color(move || {
-                    let on = hid_sig
-                        .get()
-                        .iter()
-                        .any(|f| f.key == key && f.hidden);
-                    if on {
-                        theme::ACCENT
-                    } else {
-                        theme::HAIRLINE
-                    }
-                })
-                .bg(theme::SURFACE)
-                .on_press(move || {
-                    hid_sig.update(|v| {
-                        if let Some(f) = Arc::make_mut(v).iter_mut().find(|f| f.key == key) {
-                            f.hidden = !f.hidden;
-                        }
-                    });
-                })
-                .child(
-                    text("隱藏")
-                        .text_size(px(12.0))
-                        .text_color(theme::TEXT_SECONDARY),
-                ),
-        )
+        .child(when(
+            move || !is_bool_row(row_kind(val_cond, key)),
+            move || {
+                let edit = val_build;
+                input()
+                    .value(move || {
+                        edit.get().iter().find(|f| f.key == key).map(|f| f.value.clone()).unwrap_or_default()
+                    })
+                    .placeholder("值")
+                    .placeholder_color(move || theme::TEXT_MUTED.light)
+                    .on_change(move |t: &str| {
+                        edit.update(|v| {
+                            if let Some(f) = Arc::make_mut(v).iter_mut().find(|f| f.key == key) {
+                                f.value = t.to_owned();
+                            }
+                        });
+                    })
+                    .h(px(theme::INPUT_H))
+                    .px_3()
+                    .rounded(px(theme::RADIUS_CONTROL))
+                    .border(px(1.0))
+                    .border_color(theme::HAIRLINE)
+                    .bg(theme::BASE)
+                    .text_color(theme::TEXT_PRIMARY)
+                    .flex_1()
+            },
+        ))
+        .child(when(
+            move || is_bool_row(row_kind(bool_cond, key)),
+            move || bool_toggle(bool_build, key),
+        ))
+        .child(kind_menu(fields, key))
         .child(
             view()
                 .w(px(theme::COPY_BTN))
@@ -498,18 +465,139 @@ fn field_row(fields: Signal<Arc<Vec<FieldDraft>>>, key: u32, is_create: bool) ->
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::SURFACE_RAISED))
                 .on_press(move || {
-                    del_sig.update(|v| Arc::make_mut(v).retain(|f| f.key != key));
+                    fields.update(|v| Arc::make_mut(v).retain(|f| f.key != key));
                 })
                 .child(text("✕").text_size(px(11.0)).text_color(theme::TEXT_MUTED)),
         )
-    } else {
-        row.child(
-            text("隱藏欄")
-                .text_size(px(12.0))
-                .text_color(theme::TEXT_MUTED)
-                .tooltip(ui::tooltip_card("型別旗標建立後不可更改")),
+}
+
+/// 取該列目前型別（列不存在退回 Text）。
+fn row_kind(fields: Signal<Arc<Vec<FieldDraft>>>, key: u32) -> CipherFieldKind {
+    fields
+        .get()
+        .iter()
+        .find(|f| f.key == key)
+        .map(|f| f.kind)
+        .unwrap_or_default()
+}
+
+fn is_bool_row(kind: CipherFieldKind) -> bool {
+    kind == CipherFieldKind::Boolean
+}
+
+/// 布林欄的值控制：開關＋是/否（值 "true"/"false" 由 set 端正規化）。
+fn bool_toggle(fields: Signal<Arc<Vec<FieldDraft>>>, key: u32) -> View {
+    let press = fields;
+    let read = fields;
+    let label_read = fields;
+    let is_on = move || {
+        read.get()
+            .iter()
+            .find(|f| f.key == key)
+            .is_some_and(|f| f.bool_value())
+    };
+    view()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .flex_1()
+        .cursor_pointer()
+        .on_press(move || {
+            press.update(|v| {
+                if let Some(f) = Arc::make_mut(v).iter_mut().find(|f| f.key == key) {
+                    f.value = if f.bool_value() { "false" } else { "true" }.to_owned();
+                }
+            });
+        })
+        .child(ui::bool_switch(move || {
+            label_read
+                .get()
+                .iter()
+                .find(|f| f.key == key)
+                .is_some_and(|f| f.bool_value())
+        }))
+        .child(
+            text(move || if is_on() { "是" } else { "否" })
+                .text_size(px(12.5))
+                .text_color(theme::TEXT_SECONDARY),
         )
-    }
+}
+
+/// 三態型別選單膠囊：文字／隱藏／布林；選定即關面板。
+fn kind_menu(fields: Signal<Arc<Vec<FieldDraft>>>, key: u32) -> View {
+    let open = signal(false);
+    let label_sig = fields;
+    let panel_open = open;
+    let panel_fields = fields;
+    view()
+        .relative()
+        .child(
+            view()
+                .h(px(theme::CHIP_H))
+                .px_2p5()
+                .rounded_full()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .cursor_pointer()
+                .border(px(1.0))
+                .border_color(theme::HAIRLINE)
+                .bg(theme::SURFACE)
+                .on_press(move || open.update(|o| *o = !*o))
+                .child(
+                    text(move || {
+                        ui::field_kind_label(
+                            label_sig
+                                .get()
+                                .iter()
+                                .find(|f| f.key == key)
+                                .map(|f| f.kind)
+                                .unwrap_or_default(),
+                        )
+                    })
+                    .text_size(px(12.0))
+                    .text_color(theme::TEXT_SECONDARY),
+                )
+                .child(text("▾").text_size(px(9.0)).text_color(theme::TEXT_MUTED)),
+        )
+        .child(when(
+            move || panel_open.get(),
+            move || kind_panel(panel_fields, key, panel_open),
+        ))
+}
+
+fn kind_panel(fields: Signal<Arc<Vec<FieldDraft>>>, key: u32, open: Signal<bool>) -> View {
+    let cur = fields
+        .get()
+        .iter()
+        .find(|f| f.key == key)
+        .map(|f| f.kind)
+        .unwrap_or_default();
+    let rows: Vec<View> = [
+        CipherFieldKind::Text,
+        CipherFieldKind::Hidden,
+        CipherFieldKind::Boolean,
+    ]
+    .into_iter()
+    .map(|k| {
+        let pick = fields;
+        let close = open;
+        ui::menu_row(ui::field_kind_label(k).to_owned(), cur == k, move || {
+            pick.update(|v| {
+                if let Some(f) = Arc::make_mut(v).iter_mut().find(|f| f.key == key) {
+                    f.set_kind(k);
+                }
+            });
+            close.set(false);
+        })
+    })
+    .collect();
+    view()
+        .absolute()
+        .top(px(theme::CHIP_H + 4.0))
+        .left_0()
+        .z_index(10)
+        .child(ui::card(rows).w(px(theme::KIND_MENU_W)))
 }
 
 /// 產生器面板：長度滑桿（8–64）、三個字元集開關、草稿與套用。

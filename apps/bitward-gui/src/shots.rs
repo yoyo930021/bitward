@@ -502,13 +502,13 @@ pub fn script(dir: PathBuf, core: AppCore) {
                 key: 1,
                 name: "API Key".into(),
                 value: "sk-demo-42".into(),
-                hidden: false,
+                kind: bw_proto::CipherFieldKind::Text,
             },
             FieldDraft {
                 key: 2,
                 name: "復原碼".into(),
                 value: "rc-7788".into(),
-                hidden: true,
+                kind: bw_proto::CipherFieldKind::Hidden,
             },
         ]));
     });
@@ -517,34 +517,75 @@ pub fn script(dir: PathBuf, core: AppCore) {
     let c = core.clone();
     at(44600, move || c.send(Cmd::SubmitForm));
 
-    // —— 匯入模態：fixture 預覽 → 真跑 → 結果列 ——
+    // —— 編輯模式欄位解鎖（批次 3）：text→boolean 拍板 ——
+    let c = core.clone();
+    at(45600, move || {
+        if let Some(id) = find_id(&c, "2b 筆記範例") {
+            c.send(Cmd::OpenEdit(id));
+        }
+    });
+    let c = core.clone();
+    at(46400, move || {
+        c.form.fields.update(|v| {
+            if let Some(f) = std::sync::Arc::make_mut(v).first_mut() {
+                f.set_kind(bw_proto::CipherFieldKind::Boolean);
+                f.value = "true".into();
+            }
+        });
+    });
+    let d = dir.clone();
+    at(46800, move || capture(&d, "shot-31-edit-field-type.png"));
+    // 增一欄、刪一欄（復原碼移除、配對碼追加）。
+    let c = core.clone();
+    at(47000, move || {
+        c.form.fields.update(|v| {
+            let list = std::sync::Arc::make_mut(v);
+            if list.len() > 1 {
+                list.remove(1);
+            }
+            list.push(FieldDraft {
+                key: 99,
+                name: "配對碼".into(),
+                value: "pair-1".into(),
+                kind: bw_proto::CipherFieldKind::Text,
+            });
+        });
+    });
+    let d = dir.clone();
+    at(47400, move || capture(&d, "shot-32-edit-add-remove.png"));
+    let c = core.clone();
+    at(47600, move || c.send(Cmd::SubmitForm));
+    let d = dir.clone();
+    at(48800, move || capture(&d, "shot-33-edit-fields-applied.png"));
+
+    // —— 匯入模態：fixture 預覽 → 真跑（批次 3：單交易 Import）→ 結果列 ——
     let fixture = std::env::temp_dir().join("bitward-gui-import-sample.json");
     let _ = std::fs::write(
         &fixture,
         r#"[{"name":"匯入示範 A","username":"ia@example.com","password":"imp-a-1","uri":"https://imp-a.test","tags":["e2e"]},{"name":"匯入示範 B","username":"ib@example.com","password":null,"uri":null,"tags":[]},{"name":"","username":"skipme"}]"#,
     );
     let c = core.clone();
-    at(45800, move || c.send(Cmd::OpenImport));
+    at(49800, move || c.send(Cmd::OpenImport));
     let c = core.clone();
     let fx = fixture.display().to_string();
-    at(46200, move || {
+    at(50200, move || {
         c.import_path.set(fx);
         c.send(Cmd::ImportPreview);
     });
     let d = dir.clone();
-    at(47000, move || capture(&d, "shot-29-import-modal.png"));
+    at(51000, move || capture(&d, "shot-29-import-modal.png"));
     let c = core.clone();
-    at(47400, move || c.send(Cmd::ImportRun));
+    at(51400, move || c.send(Cmd::ImportRun));
     let c = core.clone();
-    at(49000, move || {
+    at(53000, move || {
         let n = c.notice.get().unwrap_or_default();
         println!("bitward-gui: import result = {n}");
         assert!(n.contains("已匯入 2 筆"), "匯入執行結果列應為已匯入 2 筆：{n}");
     });
     let c = core.clone();
-    at(49200, move || c.send(Cmd::ChooseFolder(None)));
+    at(53200, move || c.send(Cmd::ChooseFolder(None)));
     let c = core.clone();
-    at(49400, move || {
+    at(53400, move || {
         c.query.set("匯入示範".into());
         c.send(Cmd::RefetchList);
     });

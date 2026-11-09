@@ -147,6 +147,12 @@ pub const GEN_KNOB: f32 = 14.0;
 /// TOTP 倒數細进度條：軌道寬／高。
 pub const TOTP_BAR_W: f32 = 120.0;
 pub const TOTP_BAR_H: f32 = 4.0;
+/// 布林開關（編輯列與詳情共用幾何）：軌道寬／高、knob 直徑。
+pub const TOGGLE_W: f32 = 28.0;
+pub const TOGGLE_H: f32 = 16.0;
+pub const TOGGLE_KNOB: f32 = 12.0;
+/// 欄位型別選單寬。
+pub const KIND_MENU_W: f32 = 120.0;
 
 #[cfg(test)]
 mod tests {

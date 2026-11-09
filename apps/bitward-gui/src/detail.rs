@@ -8,6 +8,7 @@
 
 use std::rc::Rc;
 
+use bw_proto::CipherFieldKind;
 use nsh_core::prelude::*;
 
 use crate::state::{AppCore, Cmd, Route};
@@ -302,6 +303,8 @@ fn notes_section(core: AppCore, copied: Signal<Option<&'static str>>) -> Vec<Vie
 }
 
 /// 自訂欄位節：pane 每次 detail 重建時快照（Reveal 不改欄集）。
+/// 布爾欄渲染成開關樣（非純文字）；hidden 欄值僅 Reveal 出、Masked 下
+/// 顯示點號佔位且不給複製鈕。
 fn custom_fields_section(core: AppCore, copied: Signal<Option<&'static str>>) -> Vec<View> {
     let Some(d) = core.detail.get() else {
         return Vec::new();
@@ -316,20 +319,49 @@ fn custom_fields_section(core: AppCore, copied: Signal<Option<&'static str>>) ->
     d.fields
         .iter()
         .map(|f| {
-            let shown = f
-                .value
-                .clone()
-                .unwrap_or_else(|| "••••••••".to_owned());
             let mut trailing = Vec::new();
-            if !f.hidden {
-                let v = f.value.clone().unwrap_or_default();
-                trailing.push(ui::copy_button(
-                    Rc::new(move || v.clone()),
-                    "自訂欄位",
-                    copied,
-                ));
-            }
-            field_static(f.name.clone(), shown, trailing)
+            let value_view = match f.kind {
+                CipherFieldKind::Boolean => {
+                    let on = f.value.as_deref() == Some("true");
+                    let v = f.value.clone().unwrap_or_else(|| "false".into());
+                    trailing.push(ui::copy_button(
+                        Rc::new(move || v.clone()),
+                        "自訂欄位",
+                        copied,
+                    ));
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(ui::bool_switch(move || on))
+                        .child(
+                            text(if on { "是" } else { "否" })
+                                .text_size(px(theme::TEXT_FIELD_VALUE))
+                                .text_color(theme::TEXT_SECONDARY),
+                        )
+                }
+                CipherFieldKind::Hidden => view().child(
+                    text("••••••••")
+                        .text_size(px(theme::TEXT_FIELD_VALUE))
+                        .text_color(theme::TEXT_PRIMARY),
+                ),
+                CipherFieldKind::Text => {
+                    let v = f.value.clone().unwrap_or_else(|| "—".into());
+                    let vc = v.clone();
+                    trailing.push(ui::copy_button(
+                        Rc::new(move || vc.clone()),
+                        "自訂欄位",
+                        copied,
+                    ));
+                    view().child(
+                        text(v)
+                            .text_size(px(theme::TEXT_FIELD_VALUE))
+                            .text_color(theme::TEXT_PRIMARY)
+                            .number_of_lines(1),
+                    )
+                }
+            };
+            field_static_view(f.name.clone(), value_view, trailing)
         })
         .collect()
 }
@@ -522,8 +554,9 @@ fn field(label_text: &'static str, value: Disp, trailing: Vec<View>) -> View {
         )
 }
 
-/// 欄位值塊（build 時快照值；自訂欄位用，欄名是動態字串）。
-fn field_static(label_text: String, value: String, trailing: Vec<View>) -> View {
+/// 欄位值塊（build 時快照；自訂欄位用，欄名是動態字串、值塊内容由呼叫端
+/// 依型別構造——text/hidden 是文字、boolean 是開關樣）。
+fn field_static_view(label_text: String, value: View, trailing: Vec<View>) -> View {
     let mut actions = view().flex_row().items_center().gap_1();
     for t in trailing {
         actions = actions.child(t);
@@ -544,12 +577,7 @@ fn field_static(label_text: String, value: String, trailing: Vec<View>) -> View 
                         .py_2()
                         .rounded(px(theme::RADIUS_BLOCK))
                         .bg(theme::SURFACE)
-                        .child(
-                            text(value)
-                                .text_size(px(theme::TEXT_FIELD_VALUE))
-                                .text_color(theme::TEXT_PRIMARY)
-                                .number_of_lines(1),
-                        ),
+                        .child(value),
                 )
                 .child(actions),
         )

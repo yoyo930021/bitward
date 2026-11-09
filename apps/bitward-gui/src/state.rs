@@ -14,8 +14,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use bw_proto::{
-    AuthCall, Call, CipherDraft, EventTopic, FieldEdit, ItemId, ItemKind, ItemView, OverlayOpWire,
-    Query, Response, SortKey, SyncCall, UnlockStateView, UseCall, VaultCall, View,
+    AuthCall, Call, CipherDraft, CipherFieldKind, EventTopic, FieldEdit, ItemId, ItemKind,
+    ItemView, OverlayOpWire, Query, Response, SortKey, SyncCall, UnlockStateView, UseCall,
+    VaultCall, View,
 };
 use nsh_core::prelude::*;
 
@@ -204,20 +205,36 @@ pub enum Cmd {
     },
 }
 
-/// 自訂欄位編輯草稿。建立模式可增刪＋隱藏開關；編輯模式只改
-/// name/value（daemon FieldEdit 文法無整陣列增刪路徑，與 uri.<n> 同紀律）。
+/// 自訂欄位編輯草稿。三態型別（text/hidden/boolean）＋增刪在建立與
+/// 編輯模式全開放（daemon 批次 3：SetType／AppendField／RemoveField）。
 #[derive(Clone, Debug)]
 pub struct FieldDraft {
-    /// 列身份（每次編輯列唯一；不参与相等比較，只穩住 each 的 key）。
+    /// 列身份（每次編輯列唯一；不参与相等比較，只穩住 each 的 key
+    /// 並讓 diff 以身分對齊而非位置）。
     pub key: u32,
     pub name: String,
+    /// boolean 欄的值正規化成 "true"/"false"（daemon wire 形態）。
     pub value: String,
-    pub hidden: bool,
+    pub kind: CipherFieldKind,
+}
+
+impl FieldDraft {
+    /// 切型別並正規化值：進 boolean 欄只留 "true"/"false"。
+    pub fn set_kind(&mut self, kind: CipherFieldKind) {
+        self.kind = kind;
+        if kind == CipherFieldKind::Boolean {
+            self.value = if self.value == "true" { "true" } else { "false" }.to_owned();
+        }
+    }
+
+    pub fn bool_value(&self) -> bool {
+        self.value == "true"
+    }
 }
 
 impl PartialEq for FieldDraft {
     fn eq(&self, other: &Self) -> bool {
-        self.name == other.name && self.value == other.value && self.hidden == other.hidden
+        self.name == other.name && self.value == other.value && self.kind == other.kind
     }
 }
 
@@ -229,7 +246,7 @@ impl Default for FieldDraft {
             key: rand_key(),
             name: String::new(),
             value: String::new(),
-            hidden: false,
+            kind: CipherFieldKind::Text,
         }
     }
 }
@@ -605,7 +622,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                     key: rand_key(),
                     name: f.name.clone(),
                     value: f.value.clone().unwrap_or_default(),
-                    hidden: f.hidden,
+                    kind: f.kind,
                 })
                 .collect();
             core.form.fields.set(Arc::new(drafts.clone()));
@@ -926,7 +943,11 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.import_modal.set(false);
             match res {
                 Ok(out) => {
-                    core.error_text.set(None);
+                    if let Some(r) = &out.reason {
+                        core.error_text.set(Some(format!("匯入拒收：{r}")));
+                    } else {
+                        core.error_text.set(None);
+                    }
                     core.notice.set(Some(format!(
                         "已匯入 {} 筆（跳過 {}、失敗 {}）",
                         out.created, out.skipped, out.failed
@@ -1083,8 +1104,12 @@ fn submit_form(core: &AppCore) {
                 .filter(|f| !f.name.trim().is_empty() || !f.value.trim().is_empty())
                 .map(|f| bw_proto::CipherField {
                     name: f.name.trim().to_owned(),
-                    value: nonblank(&f.value),
-                    hidden: f.hidden,
+                    value: if f.kind == CipherFieldKind::Boolean {
+                        Some(if f.bool_value() { "true" } else { "false" }.to_owned())
+                    } else {
+                        nonblank(&f.value)
+                    },
+                    kind: f.kind,
                 })
                 .collect();
             core.ipc(move |s| {
@@ -1128,73 +1153,69 @@ fn submit_form(core: &AppCore) {
                 core.form.error.set(Some("尚未載入完成，請稍後再試".into()));
                 return;
             };
-            let mut edits: Vec<FieldEdit> = Vec::new();
+            let mut leaf: Vec<FieldEdit> = Vec::new();
             if name != orig.name {
-                edits.push(FieldEdit {
+                leaf.push(FieldEdit::Set {
                     path: "name".into(),
                     value: Some(name.clone()),
                 });
             }
             if username != orig.username {
-                edits.push(FieldEdit {
+                leaf.push(FieldEdit::Set {
                     path: "username".into(),
                     value: username.clone(),
                 });
             }
             if uri != orig.uri {
-                edits.push(FieldEdit {
+                leaf.push(FieldEdit::Set {
                     path: "uri.0".into(),
                     value: uri.clone(),
                 });
             }
             // 編輯不覆寫既有密碼：只有輸入新值才送 password（清空欄位＝不動）。
             if password.is_some() {
-                edits.push(FieldEdit {
+                leaf.push(FieldEdit::Set {
                     path: "password".into(),
                     value: password.clone(),
                 });
             }
             if notes != orig.notes {
-                edits.push(FieldEdit {
+                leaf.push(FieldEdit::Set {
                     path: "notes".into(),
                     value: notes.clone(),
                 });
             }
             if folder_id != orig.folder_id {
-                edits.push(FieldEdit {
+                leaf.push(FieldEdit::Set {
                     path: "folderId".into(),
                     value: folder_id.clone(),
                 });
             }
-            // 既有欄位逐筆 diff name/value（編輯模式禁增刪，長度恆等）。
-            for (i, cur) in drafts.iter().enumerate() {
-                let Some(base) = orig.fields.get(i) else {
-                    continue;
-                };
-                if cur.name != base.name {
-                    edits.push(FieldEdit {
-                        path: format!("field.{i}.name"),
-                        value: Some(cur.name.clone()),
-                    });
-                }
-                if cur.value != base.value {
-                    edits.push(FieldEdit {
-                        path: format!("field.{i}.value"),
-                        value: nonblank(&cur.value),
-                    });
-                }
-            }
+            // 自訂欄位：key 對齊做 diff，拆成 leaf（Set）與結構（SetType/
+            // Append/Remove）兩批——同欄 type×值改動會被 daemon 判同欄衝突，
+            // 分兩批送即迴避（先值後結構）。
+            let (field_leaf, field_struct) = field_edits(&orig.fields, &drafts);
+            leaf.extend(field_leaf);
             let (add, remove) = diff_tags(&orig.tags, &tags);
-            if edits.is_empty() && add.is_empty() && remove.is_empty() {
+            if leaf.is_empty() && field_struct.is_empty() && add.is_empty() && remove.is_empty()
+            {
                 core.send(Cmd::OpenDetail(id));
                 return;
             }
             core.ipc(move |s| {
                 let mut err: Option<String> = None;
-                if !edits.is_empty() {
+                // 兩批 Patch：先 leaf 值（含 field.<n>.name/value），後結構
+                // （SetType/RemoveField/AppendField）。分批避開同欄 type×值衝突。
+                for batch in [leaf, field_struct] {
+                    if batch.is_empty() || err.is_some() {
+                        continue;
+                    }
                     // Zeroize 點 ②：edits 內的明文在此序列化進 Outgoing 幀，
                     // 呼叫結束即出棧；GUI 端不留常駐明文。
-                    match s.call(&Call::Vault(VaultCall::Patch { id, edits })) {
+                    match s.call(&Call::Vault(VaultCall::Patch {
+                        id,
+                        edits: batch,
+                    })) {
                         Ok(Response::Ok) => {}
                         Ok(other) => err = Some(format!("Patch 回應形態不符：{other:?}")),
                         Err(e) => err = Some(e.display()),
@@ -1309,6 +1330,74 @@ pub fn parse_folders(v: &serde_json::Value) -> Vec<FolderEntry> {
         .unwrap_or_default()
 }
 
+/// 自訂欄位 diff（純函數，可單測）：以 `key` 對齊基準／現況，回
+/// `(leaf, structural)` 兩批。leaf＝`field.<i>.name/value`（i 為基準陣列
+/// 位置）；structural＝SetType（基準位置）→ RemoveField（基準位置，
+/// 遞減穩定）→ AppendField（新增列，尾插、維持表單順序）。
+/// 分兩批是為了迴避 daemon「同欄 type×值」同欄衝突判定。
+pub fn field_edits(
+    orig: &[FieldDraft],
+    cur: &[FieldDraft],
+) -> (Vec<FieldEdit>, Vec<FieldEdit>) {
+    let mut leaf = Vec::new();
+    let mut types = Vec::new();
+    let mut removes = Vec::new();
+    for (i, base) in orig.iter().enumerate() {
+        match cur.iter().find(|c| c.key == base.key) {
+            Some(c) => {
+                if c.name != base.name {
+                    leaf.push(FieldEdit::Set {
+                        path: format!("field.{i}.name"),
+                        value: Some(c.name.clone()),
+                    });
+                }
+                if c.value != base.value {
+                    leaf.push(FieldEdit::Set {
+                        path: format!("field.{i}.value"),
+                        value: if c.kind == CipherFieldKind::Boolean {
+                            Some(if c.bool_value() { "true" } else { "false" }.to_owned())
+                        } else {
+                            nonblank(&c.value)
+                        },
+                    });
+                }
+                if c.kind != base.kind {
+                    types.push(FieldEdit::SetType {
+                        index: i as u32,
+                        kind: c.kind,
+                    });
+                }
+            }
+            None => removes.push(FieldEdit::RemoveField { index: i as u32 }),
+        }
+    }
+    // 遞減刪除：后面的 index 不受前面移除影響。
+    removes.sort_by_key(|e| match e {
+        FieldEdit::RemoveField { index } => std::cmp::Reverse(*index),
+        _ => unreachable!(),
+    });
+    let appends: Vec<FieldEdit> = cur
+        .iter()
+        .filter(|c| !orig.iter().any(|o| o.key == c.key))
+        .filter(|c| !c.name.trim().is_empty() || !c.value.trim().is_empty())
+        .map(|c| FieldEdit::AppendField {
+            field: bw_proto::CipherField {
+                name: c.name.trim().to_owned(),
+                value: if c.kind == CipherFieldKind::Boolean {
+                    Some(if c.bool_value() { "true" } else { "false" }.to_owned())
+                } else {
+                    nonblank(&c.value)
+                },
+                kind: c.kind,
+            },
+        })
+        .collect();
+    let mut structural = types;
+    structural.extend(removes);
+    structural.extend(appends);
+    (leaf, structural)
+}
+
 /// 鎖態的中文標籤（標題列指示器）。
 pub fn vault_label(st: &UnlockStateView) -> &'static str {
     match st {
@@ -1407,6 +1496,106 @@ mod tests {
         assert_eq!(rows[0].name.as_deref(), Some("工作"));
         assert_eq!(rows[1].name, None);
         assert!(parse_folders(&serde_json::json!({"not": "array"})).is_empty());
+    }
+
+    fn draft(key: u32, name: &str, value: &str, kind: CipherFieldKind) -> FieldDraft {
+        FieldDraft {
+            key,
+            name: name.into(),
+            value: value.into(),
+            kind,
+        }
+    }
+
+    #[test]
+    fn field_edits_key_alignment_survives_middle_removal() {
+        let orig = vec![
+            draft(1, "a", "1", CipherFieldKind::Text),
+            draft(2, "b", "2", CipherFieldKind::Text),
+            draft(3, "c", "3", CipherFieldKind::Text),
+        ];
+        // 刪掉中間的 b：不得把 c 的值錯位寫進 b。
+        let cur = vec![
+            draft(1, "a", "1", CipherFieldKind::Text),
+            draft(3, "c", "9", CipherFieldKind::Text),
+        ];
+        let (leaf, structural) = field_edits(&orig, &cur);
+        assert_eq!(leaf.len(), 1);
+        match &leaf[0] {
+            FieldEdit::Set { path, value } => {
+                assert_eq!(path, "field.2.value");
+                assert_eq!(value.as_deref(), Some("9"));
+            }
+            other => panic!("expected Set, got {other:?}"),
+        }
+        assert!(matches!(
+            structural.as_slice(),
+            [FieldEdit::RemoveField { index: 1 }]
+        ));
+    }
+
+    #[test]
+    fn field_edits_type_change_is_structural_and_defers_value() {
+        let orig = vec![draft(1, "k", "v", CipherFieldKind::Text)];
+        // text→boolean：值被正規化成 true；type 走 SetType、值走 leaf，分兩批。
+        let mut nd = draft(1, "k", "true", CipherFieldKind::Boolean);
+        nd.value = "true".into();
+        let (leaf, structural) = field_edits(&orig, &[nd]);
+        assert_eq!(leaf.len(), 1);
+        assert!(matches!(
+            structural.as_slice(),
+            [FieldEdit::SetType { index: 0, kind: CipherFieldKind::Boolean }]
+        ));
+    }
+
+    #[test]
+    fn field_edits_appends_keep_order_and_skips_empty() {
+        let orig: Vec<FieldDraft> = Vec::new();
+        let cur = vec![
+            draft(7, "new1", "x", CipherFieldKind::Text),
+            draft(8, "", "", CipherFieldKind::Text),
+            draft(9, "new2", "true", CipherFieldKind::Boolean),
+        ];
+        let (leaf, structural) = field_edits(&orig, &cur);
+        assert!(leaf.is_empty());
+        let appends: Vec<_> = structural
+            .iter()
+            .filter(|e| matches!(e, FieldEdit::AppendField { .. }))
+            .collect();
+        assert_eq!(appends.len(), 2, "空名空值列不進 AppendField");
+        match &structural[0] {
+            FieldEdit::AppendField { field } => assert_eq!(field.name, "new1"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn field_edits_multiple_removals_descending_indices() {
+        let orig = vec![
+            draft(1, "a", "", CipherFieldKind::Text),
+            draft(2, "b", "", CipherFieldKind::Text),
+            draft(3, "c", "", CipherFieldKind::Text),
+        ];
+        let cur = vec![draft(2, "b", "", CipherFieldKind::Text)];
+        let (_, structural) = field_edits(&orig, &cur);
+        let idx: Vec<u32> = structural
+            .iter()
+            .map(|e| match e {
+                FieldEdit::RemoveField { index } => *index,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(idx, vec![2, 0], "遞減刪除保 index 穩定");
+    }
+
+    #[test]
+    fn boolean_value_normalization_on_kind_switch() {
+        let mut d = draft(1, "k", "abc", CipherFieldKind::Text);
+        d.set_kind(CipherFieldKind::Boolean);
+        assert_eq!(d.value, "false", "非 true 值進布林欄歸 false");
+        d.set_kind(CipherFieldKind::Boolean);
+        d.value = "true".into();
+        assert!(d.bool_value());
     }
 
     #[test]

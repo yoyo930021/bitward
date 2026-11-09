@@ -588,3 +588,51 @@ pub fn mono_font() -> SharedString {
         "monospace".into()
     }
 }
+
+/// 布林開關幾何（編輯列與詳情共用）：on＝accent 軌＋knob 右，
+/// off＝淡灰軌＋knob 左。`on` 為反應式取值；純視覺，點擊語意由呼叫端包。
+pub fn bool_switch(on: impl Fn() -> bool + 'static) -> View {
+    let pad = (theme::TOGGLE_H - theme::TOGGLE_KNOB) / 2.0;
+    let on = std::rc::Rc::new(on);
+    let on_bg = on.clone();
+    let on_knob = on;
+    view()
+        .w(px(theme::TOGGLE_W))
+        .h(px(theme::TOGGLE_H))
+        .rounded_full()
+        .relative()
+        .bg(move || {
+            if on_bg() {
+                theme::ACCENT
+            } else {
+                theme::SURFACE_RAISED
+            }
+        })
+        .child(
+            view()
+                .absolute()
+                .top(px(pad))
+                .left(move || {
+                    if on_knob() {
+                        px(theme::TOGGLE_W - theme::TOGGLE_KNOB - pad)
+                    } else {
+                        px(pad)
+                    }
+                })
+                .w(px(theme::TOGGLE_KNOB))
+                .h(px(theme::TOGGLE_KNOB))
+                .rounded_full()
+                .bg(theme::ELEVATED)
+                .border(px(1.0))
+                .border_color(theme::HAIRLINE),
+        )
+}
+
+/// 自訂欄型別的顯示名（選單與膠囊共用）。
+pub fn field_kind_label(kind: bw_proto::CipherFieldKind) -> &'static str {
+    match kind {
+        bw_proto::CipherFieldKind::Text => "文字",
+        bw_proto::CipherFieldKind::Hidden => "隱藏",
+        bw_proto::CipherFieldKind::Boolean => "布林",
+    }
+}
