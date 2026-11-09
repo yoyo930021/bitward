@@ -232,6 +232,10 @@ fn find_view(core: &AppCore, name: &str) -> Option<bw_proto::ItemView> {
 /// session 無 vsync 可等，固定 sleep；本地 daemon 往返 <50ms）。
 /// 詳情目標用驗收種子項目「GitHub 測試」，找不到退回第一筆。
 pub fn script(dir: PathBuf, core: AppCore) {
+    // 主流截圖釘選淺色皮（機器可能處在暗色系統外觀，跟隨系統會讓證據集
+    // 隨環境漂移）；38–40 再明確切 Dark 做暗色自查，收尾復原 System。
+    let c = core.clone();
+    at(500, move || c.send(Cmd::SetTheme(Appearance::Light)));
     let d = dir.clone();
     at(1800, move || capture(&d, "shot-1-list.png"));
     let c = core.clone();
