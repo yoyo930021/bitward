@@ -26,6 +26,20 @@ LSUIElement 背景殼啟動時轉發開啟本 app（帶 `--sock`，預設 group 
 daemon 不在 → 錯誤畫面（含路徑與重連鈕）。`nsh run` 沒有 argv 透傳，
 開發時用 `BITWARD_GUI_SOCK=...` 指 sock。
 
+## 主題切換（批次 5）
+
+側欄底部「主題」三態：**跟隨系統（預設）／淺色／暗色**。實作口徑：
+
+- nsh-core 自帶 appearance 環境（`ambient.rs`：`dark()` 反應式 env、
+  `set_color_scheme(Appearance)`、`Appearance::{System,Light,Dark}`），
+  「跟隨系統」由平台推送到 env、樣式閉包即時翻轉——**不需要** Mach 層
+  `defaults read -g AppleInterfaceStyle` 輪詢（該兜底路徑查證後未用上，
+  留此註記）。
+- `theme.rs` 是雙槽色板（`AdaptiveColor{light, dark}`），所有元件經
+  `theme::` token 取色即自動翻轉；切換不重建視窗。
+- 選擇持久化在 `<平台資料目錄>/bitward/theme.txt`（`system|light|dark`）；
+  nsh 未暴露 UserDefaults 綁定，小檔最貼近 `sock_path` 既有慣例。
+
 ## 驗證截圖（背景 session 自我截圖模式，照 spike 慣例）
 
 ```sh
@@ -33,7 +47,7 @@ cd apps/bitward-gui
 BITWARD_GUI_SOCK=<repo>/dev/e2e/demo/s NSH_GUI_SHOTS=$PWD nsh run --target macos
 ```
 
-依指令序列跑完整驗收流並寫 `shot-1..23、26..37-*.png`（24/25 見下）後退出：列表全量（三欄骨架、
+依指令序列跑完整驗收流並寫 `shot-1..23、26..40-*.png`（24/25 見下）後退出：列表全量（三欄骨架、
 型別磚、未同步膠囊，右欄空態為「選取一個項目」佔位）→ 搜尋 "GitHub" →
 詳情遮罩 → 詳情 revealed → 新增表單模態 → 真送新增（Create+AddTag）
 → TOTP 拒絕路徑（無 seed → 錯誤橫條）→ 排序下拉 → 標籤 chips 選取 →
@@ -50,7 +64,9 @@ SecureNote 模態（帳密收合、備註大欄、Card/Identity 佔位灰）→
 存檔後詳情頁布爾欄開關樣 shot-33）→ 匯入執行後結果列
 （已匯入 N／跳過 M，走單交易 `VaultCall:Import`，列內含匯入產物）→
 附件生命週期：上傳編輯器預覽（shot-34）→ 背景推送收斂後附件列在列（shot-35，
-靠 `VaultChanged` 事件自動重取詳情）→ 下載落地結果列（shot-36）→ 刪除確認模態（shot-37）。
+靠 `VaultChanged` 事件自動重取詳情）→ 下載落地結果列（shot-36）→ 刪除確認模態（shot-37）→
+暗色皮自查三張（shot-38 列表／39 詳情／40 模態：`SetTheme(Dark)` 即時翻轉不重建視窗，
+收尾復原跟隨系統預設）。
 
 ### 徽章無感收斂證據（`NSH_GUI_SHOTS_DRAIN`）
 
@@ -89,7 +105,7 @@ access token 壽命約 2 小時；daemon 自 4c 起**自動續期**（401 出口
 |---|---|
 | `btp.rs` | BTP 精簡同步 client：u32 LE 長度前綴 + JSON 幀、`Hello{Enroll pair_code:null}`→`Welcome`→`Invoke`/`Reply`；鎖撤銷（A6）自動重連重 Enroll 一次；`listen` 事件監聽連線（wants 訂閱，OutboxDrained/VaultChanged 交 state 幫浦） |
 | `state.rs` | 應用狀態機：`AppCore`（訊號集）+ `Cmd` 命令佇列 + 唯一 `reduce`；UI handler 只投遞命令，worker 執行緒只回傳命令，訊號全在引擎執行緒寫入；`watch_events` 事件幫浦（斷線 1s 重連；`EventsRefresh` 連詳情一起重取） |
-| `lib.rs` | 根元件 `App`：命令幫浦（`set_interval` 50ms + `batch`）、TOTP 心跳（1s 引擎計時器）、頂部列（置中搜尋＋新增項目）、左側欄（我的密碼庫＋資料夾樹／已共享佔位／垃圾桶／同步列／匯出/匯入/改密）、錯誤橫條、Phase×Route 三欄版面與鎖態頁 |
+| `lib.rs` | 根元件 `App`：命令幫浦（`set_interval` 50ms + `batch`）、TOTP 心跳（1s 引擎計時器）、主題 effect（`theme_mode`→`set_color_scheme`，即時翻轉不重建視窗；`theme.txt` 持久化）、頂部列（置中搜尋＋新增項目）、左側欄（我的密碼庫＋資料夾樹／已共享佔位／垃圾桶／同步列／匯出/匯入/改密／主題三態選擇）、錯誤橫條、Phase×Route 三欄版面與鎖態頁 |
 | `list.rs` | 置中搜尋框（Query.text 交 daemon FTS；掛頂部列）、標籤 chips 行＋排序/重新整理（中欄工具列）、排序選單、44px 列（型別磚單色字形、選中列淡藍底＋藍指示條）、未同步膠囊、垃圾桶條目顯示刪除時間、`virtual_list` |
 | `detail.rs` | 右欄詳情面板：官方表單感——大名稱＋型別磚，分節與官方同序（帳密／驗證碼／備註／自訂欄位／附件／資訊），欄位為淺灰圓角值塊（label 12 粗灰在上、值 14 塊內、複製鈕塊右側），布爾欄渲染開關樣；垃圾桶條目動作改還原／永久刪除；密碼遮罩 →「顯示密碼」發 Get(Reveal)，明文只存 `revealed` 訊號、離開詳情即清；TOTP 按鈕發 Use:TotpCode＋倒數細进度條（≤5 秒轉 warning）；附件列＝檔名＋大小＋下載／刪除，節尾內聯上傳編輯器 |
 | `attach.rs` | 附件視圖層純函數：大小格式化、32MiB 本地閘、org 上傳擋附、單飛行狀態機、上傳讀檔／下載落地路徑（`~/Downloads/bitward-attachment-*`，0600 防蓋檔）；往返在 `state.rs` 附件命令，收斂靠事件幫浦 |
@@ -97,7 +113,7 @@ access token 壽命約 2 小時；daemon 自 4c 起**自動續期**（401 出口
 | `passgen.rs` | 產生器純狀態機：長度夾取（8–64、預設 20）、字元集開關、policy JSON（`Use:GeneratePassword` 欄名契約）；隨機數在 daemon |
 | `import.rs` | 官方 JSON 匯入器：本地解析吃官方未加密匯出與本 App 匯出兩形態（預覽計數純函數、加密檔擋下），執行走單交易 `VaultCall:Import`（全收或全拒，上限 500） |
 | `export.rs` | 未加密 JSON 匯出：逐筆 Get(Reveal) → `~/Downloads/bitward-export-<UTC>.json`（0600） |
-| `theme.rs` | 設計 tokens：官方淺色皮（白底、#175DDC 藍、6px 小圓角）、語意色、文字三級、密度常量（三欄寬/列高/字級/留白）、dark 色板保留（`dark` 子模組，下批切換）；視圖層唯一顏色與尺寸真相源，禁散落 hex／魔數 |
+| `theme.rs` | 設計 tokens：視圖層唯一顏色與尺寸真相源，禁散落 hex／魔數。**雙槽色板**（light＝官方淺色皮：白底、#175DDC 藍、6px 小圓角；dark＝藍紫暗色皮），語意色、文字三級、密度常量（三欄寬/列高/字級/留白/開關幾何）；外觀由 `set_color_scheme` 三態驅動、樣式閉包即時翻轉 |
 | `ui.rs` | 共用小元件：按鈕（primary 藍實色/ghost/destructive）、型別磚（單色字形，monogram 退役）、徽章、表單欄、下拉列、模態殼（absolute 鋪滿 + 置中白卡）、確認/改密模態、複製鈕 |
 | `shots.rs` | `NSH_GUI_SHOTS` 自我截圖器（AppKit `cacheDisplayInRect` 路徑，不需 TCC；objc2 經 `nsh_platform_macos` 再匯取）；`NSH_GUI_SHOTS_DRAIN` 徽章收斂時間軸 |
 
