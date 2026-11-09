@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use nsh_core::prelude::*;
 
-use crate::state::{AppCore, Cmd};
+use crate::state::{AppCore, Cmd, FieldDraft};
 
 /// 在 AppKit main thread 上執行 `f`（macOS 限定；其餘平台直接跑）。
 #[cfg(target_os = "macos")]
@@ -222,7 +222,9 @@ fn find_view(core: &AppCore, name: &str) -> Option<bw_proto::ItemView> {
 /// 開窗後依序跑完整驗收流：列表全量（密度證據）→ 搜尋 → 詳情遮罩 → revealed → 新增表單
 /// 模態 → 提交新增 → 編輯改名 → 刪除確認（先取消斷言、再確認）→
 /// 匯出確認 → 鎖態頁/解鎖 → 選取態 → 垃圾桶（列表/還原動作/還原後列表）→
-/// 產生器面板 → TOTP 倒數三段（真取碼後偽造時間源示 30/10/5 秒比例），
+/// 產生器面板 → TOTP 倒數三段（真取碼後偽造時間源示 30/10/5 秒比例）→
+/// 資料夾樹歸屬過濾 → SecureNote 模態 → 自訂欄位編輯列 →
+/// 匯入模態（預覽/真跑/結果列），
 /// 各步存一張 shot-N-*.png 後結束行程。時序裕量對齊
 /// spike（Background
 /// session 無 vsync 可等，固定 sleep；本地 daemon 往返 <50ms）。
@@ -453,7 +455,112 @@ pub fn script(dir: PathBuf, core: AppCore) {
     });
     let d = dir.clone();
     at(38000, move || capture(&d, "shot-23-totp-5s.png"));
-    at(38600, quit);
+
+    // —— 資料夾樹：把「GitHub 測試」歸入工作資料夾 → 過濾態 ——
+    let c = core.clone();
+    at(39000, move || {
+        if let Some(id) = find_id(&c, "GitHub 測試") {
+            c.send(Cmd::OpenEdit(id));
+        }
+    });
+    let c = core.clone();
+    at(39800, move || {
+        let fid = folder_id_by_name(&c, "工作資料夾");
+        if !fid.is_empty() {
+            c.form.folder_id.set(fid);
+            c.send(Cmd::SubmitForm);
+        }
+    });
+    let c = core.clone();
+    at(41000, move || {
+        let fid = folder_id_by_name(&c, "工作資料夾");
+        if !fid.is_empty() {
+            c.send(Cmd::ChooseFolder(Some(fid)));
+        }
+    });
+    let d = dir.clone();
+    at(41800, move || capture(&d, "shot-26-folder-tree.png"));
+
+    // —— SecureNote 模態：帳密收合、備註大欄 ——
+    let c = core.clone();
+    at(42200, move || c.send(Cmd::OpenCreate));
+    let c = core.clone();
+    at(42600, move || {
+        c.form.kind.set(bw_proto::ItemKind::SecureNote);
+        c.form.name.set("2b 筆記範例".into());
+        c.form.notes.set("加密筆記內文：明文只進 Outgoing 幀。".into());
+    });
+    let d = dir.clone();
+    at(43200, move || capture(&d, "shot-27-securenote-modal.png"));
+
+    // —— 自訂欄位編輯列：切回登入、加一文字一隱藏欄 ——
+    let c = core.clone();
+    at(43600, move || {
+        c.form.kind.set(bw_proto::ItemKind::Login);
+        c.form.fields.set(std::sync::Arc::new(vec![
+            FieldDraft {
+                key: 1,
+                name: "API Key".into(),
+                value: "sk-demo-42".into(),
+                hidden: false,
+            },
+            FieldDraft {
+                key: 2,
+                name: "復原碼".into(),
+                value: "rc-7788".into(),
+                hidden: true,
+            },
+        ]));
+    });
+    let d = dir.clone();
+    at(44200, move || capture(&d, "shot-28-custom-fields.png"));
+    let c = core.clone();
+    at(44600, move || c.send(Cmd::SubmitForm));
+
+    // —— 匯入模態：fixture 預覽 → 真跑 → 結果列 ——
+    let fixture = std::env::temp_dir().join("bitward-gui-import-sample.json");
+    let _ = std::fs::write(
+        &fixture,
+        r#"[{"name":"匯入示範 A","username":"ia@example.com","password":"imp-a-1","uri":"https://imp-a.test","tags":["e2e"]},{"name":"匯入示範 B","username":"ib@example.com","password":null,"uri":null,"tags":[]},{"name":"","username":"skipme"}]"#,
+    );
+    let c = core.clone();
+    at(45800, move || c.send(Cmd::OpenImport));
+    let c = core.clone();
+    let fx = fixture.display().to_string();
+    at(46200, move || {
+        c.import_path.set(fx);
+        c.send(Cmd::ImportPreview);
+    });
+    let d = dir.clone();
+    at(47000, move || capture(&d, "shot-29-import-modal.png"));
+    let c = core.clone();
+    at(47400, move || c.send(Cmd::ImportRun));
+    let c = core.clone();
+    at(49000, move || {
+        let n = c.notice.get().unwrap_or_default();
+        println!("bitward-gui: import result = {n}");
+        assert!(n.contains("已匯入 2 筆"), "匯入執行結果列應為已匯入 2 筆：{n}");
+    });
+    let c = core.clone();
+    at(49200, move || c.send(Cmd::ChooseFolder(None)));
+    let c = core.clone();
+    at(49400, move || {
+        c.query.set("匯入示範".into());
+        c.send(Cmd::RefetchList);
+    });
+    let d = dir.clone();
+    at(50200, move || capture(&d, "shot-30-import-result.png"));
+    at(50800, quit);
+}
+
+/// 由資料夾鏡像找名字的 id（找不到回空字串）。
+fn folder_id_by_name(core: &AppCore, name: &str) -> String {
+    core.folders
+        .get()
+        .iter()
+        .find(|f| f.name.as_deref() == Some(name))
+        .map(|f| f.id.clone())
+        .unwrap_or_default()
 }
 
 /// 由目前列表訊號找名字完全相符的項目 id。

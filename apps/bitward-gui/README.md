@@ -33,7 +33,7 @@ cd apps/bitward-gui
 BITWARD_GUI_SOCK=<repo>/dev/e2e/demo/s NSH_GUI_SHOTS=$PWD nsh run --target macos
 ```
 
-依指令序列跑完整驗收流並寫 `shot-1..23-*.png` 後退出：列表全量（三欄骨架、
+依指令序列跑完整驗收流並寫 `shot-1..23、26..30-*.png`（24/25 見下）後退出：列表全量（三欄骨架、
 型別磚、未同步膠囊，右欄空態為「選取一個項目」佔位）→ 搜尋 "GitHub" →
 詳情遮罩 → 詳情 revealed → 新增表單模態 → 真送新增（Create+AddTag）
 → TOTP 拒絕路徑（無 seed → 錯誤橫條）→ 排序下拉 → 標籤 chips 選取 →
@@ -42,7 +42,11 @@ BITWARD_GUI_SOCK=<repo>/dev/e2e/demo/s NSH_GUI_SHOTS=$PWD nsh run --target macos
 選取態（清搜尋、開詳情；選中列淡藍底＋左 3px 藍條）→
 垃圾桶（軟刪條目＋刪除時間）→ 垃圾桶詳情（還原／永久刪除動作）→ 還原後回列表 →
 產生器面板展開（真送 Use:GeneratePassword 取草稿）→
-TOTP 倒數三段（真取碼後偽造時間源示 30/10/5 秒比例，5 秒段轉 warning 色）。
+TOTP 倒數三段（真取碼後偽造時間源示 30/10/5 秒比例，5 秒段轉 warning 色）→
+資料夾樹（把「GitHub 測試」歸入工作資料夾後過濾，側欄節點選中態）→
+SecureNote 模態（帳密收合、備註大欄、Card/Identity 佔位灰）→
+自訂欄位編輯列（文字＋隱藏兩列）→ 匯入模態（貼路徑→預覽計數）→
+匯入執行後結果列（已匯入 N／跳過 M，列內含匯入產物）。
 
 ### 徽章無感收斂證據（`NSH_GUI_SHOTS_DRAIN`）
 
@@ -58,9 +62,11 @@ BITWARD_GUI_SOCK=<drain-daemon.sock> NSH_GUI_SHOTS=$PWD NSH_GUI_SHOTS_DRAIN=1 \
   nsh run --target macos
 ```
 
-注意：垃圾桶需要 daemon 支援 `Query.deleted` 三態與 `ItemMeta.deleted_at`
-（批次 2a 資料面，DataModel 交付）；產生器的 `Use:GeneratePassword` 為既有呼叫面。
-跑前把 demo daemon 重啟為新構成品並 `bitward unlock`。
+注意：垃圾桶與資料夾需要 daemon 支援 `Query.deleted`／`Query.folder` 三態與
+`ListFolders`／`Vault:Restore`／`Vault:Purge`（主線三件套已落地）；產生器的
+`Use:GeneratePassword` 為既有呼叫面。匯入無 daemon 端點，走 GUI 本地解析＋
+逐筆 `Vault:Create` 兜底。跑前把 demo daemon 重啟為新構成品並 `bitward unlock`，
+且側欄「工作資料夾」需已存在（`bitward folder create 工作資料夾`）。
 
 注意：流裡會真寫 demo vault（建一筆 "E2E 驗證項目"、改名、軟刪；
 詳情目標是種子項目「GitHub 測試」，找不到退回第一筆）。跑前用
@@ -73,11 +79,12 @@ BITWARD_GUI_SOCK=<drain-daemon.sock> NSH_GUI_SHOTS=$PWD NSH_GUI_SHOTS_DRAIN=1 \
 |---|---|
 | `btp.rs` | BTP 精簡同步 client：u32 LE 長度前綴 + JSON 幀、`Hello{Enroll pair_code:null}`→`Welcome`→`Invoke`/`Reply`；鎖撤銷（A6）自動重連重 Enroll 一次；`listen` 事件監聽連線（wants 訂閱，OutboxDrained/VaultChanged 交 state 幫浦） |
 | `state.rs` | 應用狀態機：`AppCore`（訊號集）+ `Cmd` 命令佇列 + 唯一 `reduce`；UI handler 只投遞命令，worker 執行緒只回傳命令，訊號全在引擎執行緒寫入；`watch_events` 事件幫浦（斷線 1s 重連） |
-| `lib.rs` | 根元件 `App`：命令幫浦（`set_interval` 50ms + `batch`）、TOTP 心跳（1s 引擎計時器）、頂部列（置中搜尋＋新增項目）、左側欄（我的密碼庫/已共享佔位/垃圾桶/同步列/匯出/改密）、錯誤橫條、Phase×Route 三欄版面與鎖態頁 |
+| `lib.rs` | 根元件 `App`：命令幫浦（`set_interval` 50ms + `batch`）、TOTP 心跳（1s 引擎計時器）、頂部列（置中搜尋＋新增項目）、左側欄（我的密碼庫＋資料夾樹／已共享佔位／垃圾桶／同步列／匯出/匯入/改密）、錯誤橫條、Phase×Route 三欄版面與鎖態頁 |
 | `list.rs` | 置中搜尋框（Query.text 交 daemon FTS；掛頂部列）、標籤 chips 行＋排序/重新整理（中欄工具列）、排序選單、44px 列（型別磚單色字形、選中列淡藍底＋藍指示條）、未同步膠囊、垃圾桶條目顯示刪除時間、`virtual_list` |
 | `detail.rs` | 右欄詳情面板：官方表單感——大名稱＋型別磚，分節與官方同序（帳密／驗證碼／備註／自訂欄位／資訊），欄位為淺灰圓角值塊（label 12 粗灰在上、值 14 塊內、複製鈕塊右側）；垃圾桶條目動作改還原／永久刪除；密碼遮罩 →「顯示密碼」發 Get(Reveal)，明文只存 `revealed` 訊號、離開詳情即清；TOTP 按鈕發 Use:TotpCode＋倒數細进度條（≤5 秒轉 warning） |
-| `form.rs` | 新增/編輯模態（elevated 卡＋背板點擊取消；name/username/password/uri/tags）；密碼欄附產生器面板（長度滑桿、字元集開關、草稿套用） |
+| `form.rs` | 新增/編輯模態（elevated 卡＋背板點擊取消）：型別切換（登入/加密筆記可選，Card/Identity 佔位）、資料夾下拉（ListFolders）、name/username/password/uri/tags/notes/自訂欄位編輯列；密碼欄附產生器面板 |
 | `passgen.rs` | 產生器純狀態機：長度夾取（8–64、預設 20）、字元集開關、policy JSON（`Use:GeneratePassword` 欄名契約）；隨機數在 daemon |
+| `import.rs` | 官方 JSON 匯入器（本地兜底）：吃官方未加密匯出與本 App 匯出兩形態、解析計數純函數、逐筆 `Vault:Create`＋tags；加密檔擋下 |
 | `export.rs` | 未加密 JSON 匯出：逐筆 Get(Reveal) → `~/Downloads/bitward-export-<UTC>.json`（0600） |
 | `theme.rs` | 設計 tokens：官方淺色皮（白底、#175DDC 藍、6px 小圓角）、語意色、文字三級、密度常量（三欄寬/列高/字級/留白）、dark 色板保留（`dark` 子模組，下批切換）；視圖層唯一顏色與尺寸真相源，禁散落 hex／魔數 |
 | `ui.rs` | 共用小元件：按鈕（primary 藍實色/ghost/destructive）、型別磚（單色字形，monogram 退役）、徽章、表單欄、下拉列、模態殼（absolute 鋪滿 + 置中白卡）、確認/改密模態、複製鈕 |
