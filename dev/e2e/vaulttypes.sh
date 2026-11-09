@@ -128,6 +128,87 @@ A_REVEAL=$(A reveal "$LID" --json)
 [[ "$(jq -r '.fields[1].value' <<<"$A_REVEAL")" == "$HIDDEN" ]] || fail "欄位級：hidden 欄未存活"
 pass "欄位級合併（改 fields[0] 值，name 與另一端改動雙存活）"
 
+# 6b) 原子批次匯入：50 筆單交易全收 → drain 全推 → REST 抽驗兩筆
+python3 - "$DA/imp50.json" <<'PY'
+import json, sys
+items = []
+for i in range(50):
+    if i % 3 == 0:
+        items.append({"type": 1, "name": f"imp{i}", "login": {"username": f"u{i}"},
+                      "uris": [{"uri": f"https://i{i}.test"}], "tags": ["bulk"]})
+    else:
+        items.append({"type": 2, "name": f"imp{i}", "notes": f"n{i}", "fields": []})
+json.dump({"encrypted": False, "items": items}, open(sys.argv[1], "w"))
+PY
+IMP=$(A import "$DA/imp50.json")
+[[ "$(jq -r .imported <<<"$IMP")" == "50" ]] || fail "Import 未全收（got $(jq -r .imported <<<"$IMP")）"
+drained A 90 || fail "Import 50 筆未推完"
+[[ "$(A ls --json | jq 'length')" == "52" ]] || fail "Import 後計數 ≠ 52"
+# 抽驗 id 以收斂後鏡像為準（push_create 可能 remap 本地預生成 id）
+for pair in "imp0:1" "imp49:2"; do
+    nm=${pair%%:*}; want=${pair##*:}
+    IID=$(A ls --json | jq -r --arg n "$nm" '.[] | select(.meta.name==$n) | .meta.id')
+    IW=$(curl -fsS -H "Authorization: Bearer $TOK" "$SRV/api/ciphers/$IID")
+    [[ "$(jq -r .type <<<"$IW")" == "$want" ]] || fail "Import 抽驗 $nm type ≠ $want"
+done
+[[ "$(A ls --json | jq '[.[] | select((.meta.tags // []) | index("bulk"))] | length')" == "17" ]] \
+  || fail "Import tags 未落本地 overlay（應 17 筆 bulk）"
+pass "Import 50 筆單交易全收、drain 全推、REST 抽驗 type 正確"
+
+# 6c) 全收或全拒：一批夾一個壞件（非 UUID folder）→ 整批不落
+python3 - "$DA/impbad.json" <<'PY'
+import json, sys
+json.dump([{"name": "good1"}, {"name": "bad1", "folderId": "not-a-uuid"}],
+          open(sys.argv[1], "w"))
+PY
+if A import "$DA/impbad.json" >/dev/null 2>&1; then fail "壞件批次竟被接受（應整批拒）"; fi
+[[ "$(A ls --json | jq 'length')" == "52" ]] || fail "拒批後鏡像仍增加（未回滾）"
+[[ "$(A outbox --json | jq "$PENDING")" == "0" ]] \
+  || fail "拒批後 outbox 殘留未結算列"
+pass "Import 全收或全拒（壞件整批回滾，鏡像與 outbox 乾淨）"
+
+# 6d) boolean 自訂欄往返（type 2 線格式）＋ hidden 洩漏掃描
+# 欄序紀律：--field（text）→ --field!（hidden）→ --field?（boolean）附加序。
+HIDDEN2="shh-§42"
+A new --name boolf --field? flag=true --field! shh="$HIDDEN2" >/dev/null
+drained A 40 || fail "boolean 欄項目未收斂"
+BID=$(A ls --json | jq -r '.[] | select(.meta.name=="boolf") | .meta.id')
+BW=$(curl -fsS -H "Authorization: Bearer $TOK" "$SRV/api/ciphers/$BID")
+[[ "$(jq -r '.fields[0].type' <<<"$BW")" == "1" ]] || fail "hidden 欄線格式 type ≠ 1"
+[[ "$(jq -r '.fields[1].type' <<<"$BW")" == "2" ]] || fail "boolean 欄線格式 type ≠ 2"
+jq -r '.fields[1].value' <<<"$BW" | grep -q '^2\.' || fail "boolean 欄值非信封"
+[[ "$(A reveal "$BID" --json | jq -r '.fields[1].value')" == "true" ]] || fail "boolean 值往返失敗"
+[[ "$(A reveal "$BID" | grep -c 'field\[boolean\]: flag = true')" == "1" ]] || fail "詳情缺 boolean 列"
+[[ "$(A get "$BID" --view masked --json | jq -r '.fields[0].value')" == "null" ]] \
+  || fail "hidden 欄值 Masked 外洩"
+pass "boolean 欄往返（type 2、值 true/false）＋hidden 值 Masked 缺席"
+
+# 6e) type 改動 × 同欄值改動 → 同欄衝突收件匣（批次 3 裁定語意）
+docker stop "$VW" >/dev/null
+A edit "$LID" --set-type 0=hidden >/dev/null       # A 離線改 fields[0] 型別
+docker start "$VW" >/dev/null
+drained A 40 || fail "A type 改動未收斂"
+B edit "$LID" --set field.0.value=late-by-b >/dev/null  # B 鏡像留舊 rev（通知不回放）
+CONFC=0
+for _ in $(seq 1 60); do
+    CONFC=$(B conflicts --json | jq 'length')
+    [[ "$CONFC" -ge 1 ]] && break
+    sleep 1
+done
+[[ "$CONFC" -ge 1 ]] || fail "同欄 type×值改動未進衝突收件匣"
+[[ "$(B conflicts --json | jq -r '.[0].fields[]' | grep -c 'field\.0\.type')" == "1" ]] \
+  || fail "衝突欄位未含 field.0.type"
+RID=$(B conflicts --json | jq -r '.[0].id')
+B resolve "$RID" --ours >/dev/null
+for _ in $(seq 1 30); do
+    [[ "$(B outbox --json | jq "$PENDING")" == "0" ]] && break
+    sleep 1
+done
+A sync >/dev/null
+[[ "$(A reveal "$LID" --json | jq -r '.fields[0].value')" == "late-by-b" ]] \
+  || fail "--ours 裁決後 B 值未勝出"
+pass "同欄 type×值撞車進衝突佇列、裁決收斂（不靜默合併）"
+
 # 7) 垃圾桶三態＋硬刪（Main 裁定）
 A rm "$NID" >/dev/null
 drained A 40 || fail "軟刪未收斂"
@@ -157,7 +238,8 @@ drained A 40 || fail "folderId patch 未收斂"
 A folder delete "$FID" >/dev/null
 drained A 40 || fail "刪夾後項目 detach 未收斂"
 [[ "$(A --json folder ls | jq 'length')" == "0" ]] || fail "刪夾後鏡像仍列"
-[[ "$(A ls --folder "" --json | jq -r '.[0].meta.id')" == "$LID" ]] || fail "刪夾後項目未變未歸屬"
+[[ "$(A ls --folder "" --json | jq --arg l "$LID" '[.[] | select(.meta.id==$l)] | length')" == "1" ]] \
+  || fail "刪夾後項目未變未歸屬"
 LOGIN_W2=$(curl -fsS -H "Authorization: Bearer $TOK" "$SRV/api/ciphers/$LID")
 [[ "$(jq -r .folderId <<<"$LOGIN_W2")" == "null" ]] || fail "REST folderId 未清 NULL"
 FW=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOK" "$SRV/api/folders/$FID")
@@ -168,6 +250,7 @@ pass "刪除資料夾：夾內項目 folderId 清 NULL（官方語意）"
 
 # 9) 盤上明文紀律：hidden 欄值不得進明文索引（欄名可以）
 grep -a "$HIDDEN" "$DA/vault.db" && fail "hidden 欄值洩盤（明文索引）" || true
+grep -a "$HIDDEN2" "$DA/vault.db" && fail "boolean 批次的 hidden 欄值洩盤" || true
 grep -a "$NOTE_BODY" "$DA/vault.db" >/dev/null || true  # notes 是 Reveal 出口，不落索引＝可接受缺席
 pass "hidden 欄值未進明文索引"
 
