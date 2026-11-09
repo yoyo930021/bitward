@@ -1,6 +1,6 @@
-//! 新增/編輯模態：name/username/password/uri/tags → Vault:Create / Vault:Patch。
+//! 新增/編輯右欄 inline 表單：name/username/password/uri/tags → Vault:Create / Vault:Patch。
 //! 表單明文（密碼欄）只進訊號與送出時的 `Zeroizing` 副本，加密前不落盤；
-//! 送出與差異計算在 `state::submit_form`。背板點擊＝取消（回列表）。
+//! 送出與差異計算在 `state::submit_form`，髒退出閘在 `state::form_dirty`（確認框攔截）。
 //! 密碼欄附產生器：「產生」展開面板，隨機數走 daemon `Use:GeneratePassword`。
 
 use std::rc::Rc;
@@ -21,14 +21,15 @@ pub fn shows_credentials(kind: ItemKind) -> bool {
     kind != ItemKind::SecureNote
 }
 
-pub fn overlay(core: AppCore) -> View {
+/// 右欄 inline 編輯器（新增／編輯共用，詳情 view↔edit 態翻轉）：
+/// 標題列＋取消/儲存、本體滾動表單；刪除/改密/匯入維持模態（紀律 2）。
+pub fn pane(core: AppCore) -> View {
     let (title, is_create) = match core.route.get() {
         Route::Create => ("新增項目", true),
         Route::Edit(_) => ("編輯項目", false),
         _ => return view().flex_1(),
     };
-    let back = core.clone();
-    let back2 = core.clone();
+    let cancel = core.clone();
     let save = core.clone();
     let err_core = core.clone();
     let name = core.form.name;
@@ -37,68 +38,82 @@ pub fn overlay(core: AppCore) -> View {
     let cred_build = core.clone();
     let note_cond = core.clone();
     let note_build = core.clone();
-    ui::modal_shell(
-        520.0,
-        move || back.send(Cmd::OpenList),
-        view()
-            .flex_col()
-            .gap(px(theme::FORM_GAP))
-            .child(
-                text(title)
-                    .text_size(px(17.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme::TEXT_PRIMARY),
-            )
-            .child(type_switcher(core.clone(), is_create))
-            .child(ui::form_field("名稱", "例：GitHub", name, false, move |v| {
-                name.set(v)
-            }))
-            .child(folder_dropdown(core.clone()))
-            .child(when(
-                move || shows_credentials(cred_cond.form.kind.get()),
-                move || credentials_block(cred_build.clone()),
-            ))
-            .child(when(
-                move || !shows_credentials(note_cond.form.kind.get()),
-                move || {
-                    let notes = note_build.form.notes;
-                    ui::form_field(
-                        "備註",
-                        "筆記內容（明文進入 Outgoing 幀）",
-                        notes,
-                        false,
-                        move |v| notes.set(v),
-                    )
-                },
-            ))
-            .child(custom_fields_editor(core.clone()))
-            .child(ui::form_field(
-                "標籤",
-                "逗號分隔，例：dev, 工作",
-                tags,
-                false,
-                move |v| tags.set(v),
-            ))
-            .child(
-                text(move || err_core.form.error.get().unwrap_or_default())
-                    .text_size(px(12.5))
-                    .line_height(px(18.0))
-                    .text_color(theme::DESTRUCTIVE),
-            )
-            .child(
-                view()
-                    .flex_row()
-                    .items_center()
-                    .justify_end()
-                    .gap_2()
-                    .child(ui::button("取消", ui::Btn::Ghost, move || {
-                        back2.send(Cmd::OpenList)
-                    }))
-                    .child(ui::button("儲存", ui::Btn::Primary, move || {
-                        save.send(Cmd::SubmitForm)
-                    })),
-            ),
-    )
+    view()
+        .flex_col()
+        .flex_1()
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .px_8()
+                .py_4()
+                .child(
+                    text(title)
+                        .text_size(px(theme::TEXT_IDENTITY))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::TEXT_PRIMARY),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(ui::button("取消", ui::Btn::Ghost, move || {
+                            cancel.send(Cmd::RequestCloseForm)
+                        }))
+                        .child(ui::button("儲存", ui::Btn::Primary, move || {
+                            save.send(Cmd::SubmitForm)
+                        })),
+                ),
+        )
+        .child(view().h(px(1.0)).mx_8().bg(theme::HAIRLINE))
+        .child(scroll().flex_1().child(
+            view()
+                .flex_col()
+                .gap(px(theme::FORM_GAP))
+                .px_8()
+                .py_4()
+                .w_full()
+                .max_w(px(680.0))
+                .child(type_switcher(core.clone(), is_create))
+                .child(ui::form_field("名稱", "例：GitHub", name, false, move |v| {
+                    name.set(v)
+                }))
+                .child(folder_dropdown(core.clone()))
+                .child(when(
+                    move || shows_credentials(cred_cond.form.kind.get()),
+                    move || credentials_block(cred_build.clone()),
+                ))
+                .child(when(
+                    move || !shows_credentials(note_cond.form.kind.get()),
+                    move || {
+                        let notes = note_build.form.notes;
+                        ui::form_field(
+                            "備註",
+                            "筆記內容（明文進入 Outgoing 幀）",
+                            notes,
+                            false,
+                            move |v| notes.set(v),
+                        )
+                    },
+                ))
+                .child(custom_fields_editor(core.clone()))
+                .child(ui::form_field(
+                    "標籤",
+                    "逗號分隔，例：dev, 工作",
+                    tags,
+                    false,
+                    move |v| tags.set(v),
+                ))
+                .child(
+                    text(move || err_core.form.error.get().unwrap_or_default())
+                        .text_size(px(12.5))
+                        .line_height(px(18.0))
+                        .text_color(theme::DESTRUCTIVE),
+                ),
+        ))
 }
 
 /// 密碼欄提示（依 Route）；抽出以保持 `when` 閉包單純。

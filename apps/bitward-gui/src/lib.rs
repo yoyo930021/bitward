@@ -146,7 +146,7 @@ pub fn App() -> impl IntoElement {
     });
     on_key("escape", {
         let core = core.clone();
-        move |_| core.send(Cmd::OpenList)
+        move |_| core.send(Cmd::RequestCloseForm)
     });
     // TOTP 倒數心跳：引擎計時器（非背景任務）。只在詳情有碼時重繪 tick，
     // 視窗過期即重發既有取碼命令，週期沿用 daemon 的 valid_for_secs。
@@ -190,8 +190,6 @@ pub fn App() -> impl IntoElement {
     let pw_modal_build = core.clone();
     let import_cond = core.clone();
     let import_build = core.clone();
-    let form_cond = core.clone();
-    let form_build = core.clone();
     view()
         .flex_col()
         .flex_1()
@@ -210,10 +208,6 @@ pub fn App() -> impl IntoElement {
         .child(when(
             move || ready_cond.phase.get() == Phase::Ready,
             move || router(ready_build.clone()),
-        ))
-        .child(when(
-            move || matches!(form_cond.route.get(), Route::Create | Route::Edit(_)),
-            move || form::overlay(form_build.clone()),
         ))
         .child(when(
             move || modal_cond.confirm.get().is_some(),
@@ -693,6 +687,7 @@ fn split(core: AppCore) -> View {
     let detail_build = core.clone();
     let route_cond = core.clone();
     let approvals_build = core.clone();
+    let form_build = core.clone();
     view()
         .flex_row()
         .flex_1()
@@ -715,6 +710,16 @@ fn split(core: AppCore) -> View {
                 .child(dynamic(move || {
                     match route_cond.route.get() {
                         Route::Approvals => approvals::pane(approvals_build.clone()),
+                        Route::Create => form::pane(form_build.clone()),
+                        Route::Edit(_) => {
+                            // 編輯基準（EditPrefilled）到齊前走載入態，
+                            // 避免閃空表單再回填。
+                            if form_build.form.original.get().is_some() {
+                                form::pane(form_build.clone())
+                            } else {
+                                detail::loading()
+                            }
+                        }
                         Route::Detail(_) => {
                             if detail_cond.detail.get().is_some() {
                                 detail::pane(detail_build.clone())

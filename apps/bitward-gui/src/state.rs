@@ -126,6 +126,10 @@ pub enum Cmd {
     OpenDetail(ItemId),
     OpenCreate,
     OpenEdit(ItemId),
+    /// 離開編輯器（取消/返回/Esc）：髒（相對基準有變更）時先走放棄確認框。
+    RequestCloseForm,
+    /// 確認框「放棄編輯」後的導航重投：跳過髒閘一次，避免自我鎖死。
+    NavForced(Box<Cmd>),
     RequestReveal,
     RequestTotp,
     /// 產生器「產生/重新產生」：policy 由 reduce 讀 `form.gen_panel` 現算。
@@ -595,6 +599,27 @@ impl AppCore {
 
 /// 唯一狀態轉移函數：所有 `Cmd` 在此落地（表格化分派，避免散落的 if）。
 pub fn reduce(core: &AppCore, cmd: Cmd) {
+    // Inline 編輯器髒閘：會打斷編輯的導航先攔下走放棄確認框；
+    // NavForced＝確認後的重投，跳過閘一次避免自我鎖死。
+    let mut cmd = cmd;
+    let forced = matches!(cmd, Cmd::NavForced(_));
+    if let Cmd::NavForced(inner) = cmd {
+        cmd = *inner;
+    }
+    if !forced
+        && matches!(core.route.get(), Route::Create | Route::Edit(_))
+        && nav_interrupts(&cmd)
+        && form_dirty(core)
+    {
+        core.confirm.set(Some(Arc::new(Confirm {
+            title: "放棄未儲存的編輯？".into(),
+            description: "編輯器中的變更尚未儲存，離開後將遺失。".into(),
+            confirm_label: "放棄編輯".into(),
+            destructive: true,
+            on_confirm: Cmd::NavForced(Box::new(cmd.clone())),
+        })));
+        return;
+    }
     match cmd {
         Cmd::Boot => {
             core.phase.set(Phase::Connecting);
@@ -640,6 +665,25 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             if seq == core.list_gen.get() {
                 core.items.set(rows);
                 core.error_text.set(None);
+            }
+        }
+        // NavForced 已在入口剝殼；走到這裡＝巢狀 Box（不預期），靜默吞掉。
+        Cmd::NavForced(_) => {}
+        Cmd::RequestCloseForm => {
+            let back = match core.route.get() {
+                Route::Edit(id) => Cmd::OpenDetail(id),
+                _ => Cmd::OpenList,
+            };
+            if matches!(core.route.get(), Route::Create | Route::Edit(_)) && form_dirty(core) {
+                core.confirm.set(Some(Arc::new(Confirm {
+                    title: "放棄未儲存的編輯？".into(),
+                    description: "編輯器中的變更尚未儲存，離開後將遺失。".into(),
+                    confirm_label: "放棄編輯".into(),
+                    destructive: true,
+                    on_confirm: Cmd::NavForced(Box::new(back)),
+                })));
+            } else {
+                reduce(core, back);
             }
         }
         Cmd::OpenList => {
@@ -1448,52 +1492,19 @@ fn submit_form(core: &AppCore) {
                 core.form.error.set(Some("尚未載入完成，請稍後再試".into()));
                 return;
             };
-            let mut leaf: Vec<FieldEdit> = Vec::new();
-            if name != orig.name {
-                leaf.push(FieldEdit::Set {
-                    path: "name".into(),
-                    value: Some(name.clone()),
-                });
-            }
-            if username != orig.username {
-                leaf.push(FieldEdit::Set {
-                    path: "username".into(),
-                    value: username.clone(),
-                });
-            }
-            if uri != orig.uri {
-                leaf.push(FieldEdit::Set {
-                    path: "uri.0".into(),
-                    value: uri.clone(),
-                });
-            }
-            // 編輯不覆寫既有密碼：只有輸入新值才送 password（清空欄位＝不動）。
-            if password.is_some() {
-                leaf.push(FieldEdit::Set {
-                    path: "password".into(),
-                    value: password.clone(),
-                });
-            }
-            if notes != orig.notes {
-                leaf.push(FieldEdit::Set {
-                    path: "notes".into(),
-                    value: notes.clone(),
-                });
-            }
-            if folder_id != orig.folder_id {
-                leaf.push(FieldEdit::Set {
-                    path: "folderId".into(),
-                    value: folder_id.clone(),
-                });
-            }
-            // 自訂欄位：key 對齊做 diff，拆成 leaf（Set）與結構（SetType/
-            // Append/Remove）兩批——同欄 type×值改動會被 daemon 判同欄衝突，
-            // 分兩批送即迴避（先值後結構）。
-            let (field_leaf, field_struct) = field_edits(&orig.fields, &drafts);
-            leaf.extend(field_leaf);
-            let (add, remove) = diff_tags(&orig.tags, &tags);
-            if leaf.is_empty() && field_struct.is_empty() && add.is_empty() && remove.is_empty()
-            {
+            // 差異集全在 edit_delta（與髒閘共用單一真相源，紀律 1 零複製）。
+            let input = FormInput {
+                name: &name,
+                username,
+                password,
+                uri,
+                notes,
+                folder_id,
+                tags: &tags,
+                drafts: &drafts,
+            };
+            let (leaf, field_struct, add, remove) = edit_delta(&orig, &input);
+            if leaf.is_empty() && field_struct.is_empty() && add.is_empty() && remove.is_empty() {
                 core.send(Cmd::OpenDetail(id));
                 return;
             }
@@ -1644,6 +1655,154 @@ pub fn parse_pending(rows: &[serde_json::Value]) -> Vec<PendingRow> {
         .collect()
 }
 
+/// 表單現值（`edit_delta`／`form_is_dirty` 統一輸入形態；正規化在呼叫端）。
+pub struct FormInput<'a> {
+    pub name: &'a str,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub uri: Option<String>,
+    pub notes: Option<String>,
+    pub folder_id: Option<String>,
+    pub tags: &'a [String],
+    pub drafts: &'a [FieldDraft],
+}
+
+/// 編輯表單的完整差異集（提交與髒閘的單一真相源，紀律 1 零複製）：
+/// leaf 值批、結構批、標籤增/刪。密碼語意沿用編輯規則——空值＝不動基準。
+pub fn edit_delta(
+    orig: &FormOriginal,
+    f: &FormInput<'_>,
+) -> (Vec<FieldEdit>, Vec<FieldEdit>, Vec<String>, Vec<String>) {
+    let mut leaf: Vec<FieldEdit> = Vec::new();
+    if f.name != orig.name {
+        leaf.push(FieldEdit::Set {
+            path: "name".into(),
+            value: Some(f.name.to_owned()),
+        });
+    }
+    if f.username != orig.username {
+        leaf.push(FieldEdit::Set {
+            path: "username".into(),
+            value: f.username.clone(),
+        });
+    }
+    if f.uri != orig.uri {
+        leaf.push(FieldEdit::Set {
+            path: "uri.0".into(),
+            value: f.uri.clone(),
+        });
+    }
+    if f.password.is_some() {
+        leaf.push(FieldEdit::Set {
+            path: "password".into(),
+            value: f.password.clone(),
+        });
+    }
+    if f.notes != orig.notes {
+        leaf.push(FieldEdit::Set {
+            path: "notes".into(),
+            value: f.notes.clone(),
+        });
+    }
+    if f.folder_id != orig.folder_id {
+        leaf.push(FieldEdit::Set {
+            path: "folderId".into(),
+            value: f.folder_id.clone(),
+        });
+    }
+    // 自訂欄位：key 對齊做 diff，拆成 leaf（Set）與結構（SetType/
+    // Append/Remove）兩批——同欄 type×值改動會被 daemon 判同欄衝突，
+    // 分兩批送即迴避（先值後結構）。
+    let (field_leaf, field_struct) = field_edits(&orig.fields, f.drafts);
+    leaf.extend(field_leaf);
+    let (add, remove) = diff_tags(&orig.tags, f.tags);
+    (leaf, field_struct, add, remove)
+}
+
+/// 表單是否「髒」（純函數，單測點）：正規化與 `submit_form` 完全一致
+/// （trim／nonblank／parse_tags），空白抖動不误報；有基準走 edit_delta
+/// 空判，無基準（新增）＝任一輸入非空／切過型別／有非空欄位行。
+#[allow(clippy::too_many_arguments)]
+pub fn form_is_dirty(
+    orig: Option<&FormOriginal>,
+    name: &str,
+    username: &str,
+    password: &str,
+    uri: &str,
+    tags: &str,
+    notes: &str,
+    folder_id: &str,
+    kind: ItemKind,
+    drafts: &[FieldDraft],
+) -> bool {
+    let name = name.trim().to_owned();
+    let username = nonblank(username);
+    let password = nonblank(password);
+    let uri = nonblank(uri.trim());
+    let tag_list = parse_tags(tags);
+    let notes = nonblank(notes);
+    let folder = nonblank(folder_id);
+    match orig {
+        Some(o) => {
+            let input = FormInput {
+                name: &name,
+                username,
+                password,
+                uri,
+                notes,
+                folder_id: folder,
+                tags: &tag_list,
+                drafts,
+            };
+            let (leaf, field_struct, add, remove) = edit_delta(o, &input);
+            !(leaf.is_empty() && field_struct.is_empty() && add.is_empty() && remove.is_empty())
+        }
+        None => {
+            !name.is_empty()
+                || username.is_some()
+                || password.is_some()
+                || uri.is_some()
+                || notes.is_some()
+                || folder.is_some()
+                || !tag_list.is_empty()
+                || kind != ItemKind::Login
+                || drafts
+                    .iter()
+                    .any(|f| !f.name.trim().is_empty() || !f.value.trim().is_empty())
+        }
+    }
+}
+
+/// 讀訊號版髒判定（reduce 閘與 RequestCloseForm 共用）。
+pub fn form_dirty(core: &AppCore) -> bool {
+    form_is_dirty(
+        core.form.original.get().as_deref(),
+        &core.form.name.get(),
+        &core.form.username.get(),
+        &core.form.password.get(),
+        &core.form.uri.get(),
+        &core.form.tags.get(),
+        &core.form.notes.get(),
+        &core.form.folder_id.get(),
+        core.form.kind.get(),
+        &core.form.fields.get(),
+    )
+}
+
+/// 會打斷編輯器的導航命令（髒閘攔截清單）；編輯器自身命令與
+/// 背景回包不列入（那些是編輯流程的一部分）。
+fn nav_interrupts(cmd: &Cmd) -> bool {
+    matches!(
+        cmd,
+        Cmd::OpenList
+            | Cmd::OpenDetail(_)
+            | Cmd::OpenCreate
+            | Cmd::OpenEdit(_)
+            | Cmd::ChooseFolder(_)
+            | Cmd::ToggleTrash
+    )
+}
+
 /// 自訂欄位 diff（純函數，可單測）：以 `key` 對齊基準／現況，回
 /// `(leaf, structural)` 兩批。leaf＝`field.<i>.name/value`（i 為基準陣列
 /// 位置）；structural＝SetType（基準位置）→ RemoveField（基準位置，
@@ -1745,6 +1904,77 @@ pub fn is_unlocked(st: &Option<UnlockStateView>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn form_dirty_edit_baseline_matches_submit_semantics() {
+        let orig = FormOriginal {
+            name: "GitHub".into(),
+            username: Some("octo".into()),
+            uri: Some("https://github.com".into()),
+            tags: vec!["dev".into()],
+            notes: None,
+            folder_id: None,
+            fields: vec![],
+        };
+        // 基準原值＝不髒；空白抖動與「空密碼＝不動」也不髒（同 submit 正規化）。
+        assert!(!form_is_dirty(
+            Some(&orig), "GitHub", "octo", "", "https://github.com", "dev", "", "",
+            ItemKind::Login, &[]
+        ));
+        assert!(!form_is_dirty(
+            Some(&orig), "  GitHub ", "octo", "   ", "https://github.com", " dev ", " ", "",
+            ItemKind::Login, &[]
+        ));
+        // 改名字、換密碼、清空網址、動標籤＝髒。
+        assert!(form_is_dirty(
+            Some(&orig), "GitHub2", "octo", "", "https://github.com", "dev", "", "",
+            ItemKind::Login, &[]
+        ));
+        assert!(form_is_dirty(
+            Some(&orig), "GitHub", "octo", "newpw", "https://github.com", "dev", "", "",
+            ItemKind::Login, &[]
+        ));
+        assert!(form_is_dirty(
+            Some(&orig), "GitHub", "octo", "", "", "dev", "", "",
+            ItemKind::Login, &[]
+        ));
+        assert!(form_is_dirty(
+            Some(&orig), "GitHub", "octo", "", "https://github.com", "dev, 工作", "", "",
+            ItemKind::Login, &[]
+        ));
+    }
+
+    #[test]
+    fn form_dirty_create_treats_any_input_as_dirty() {
+        // 無基準＝新增：全空乾淨；任一欄位、型別切換、非空欄列＝髒。
+        assert!(!form_is_dirty(
+            None, "", "", "", "", "", "", "", ItemKind::Login, &[]
+        ));
+        assert!(form_is_dirty(
+            None, "x", "", "", "", "", "", "", ItemKind::Login, &[]
+        ));
+        assert!(form_is_dirty(
+            None, "", "", "", "", "", "", "", ItemKind::SecureNote, &[]
+        ));
+        let row = FieldDraft {
+            key: 1,
+            name: "API Key".into(),
+            value: String::new(),
+            kind: CipherFieldKind::Text,
+        };
+        assert!(form_is_dirty(
+            None, "", "", "", "", "", "", "", ItemKind::Login, &[row]
+        ));
+        let blank = FieldDraft {
+            key: 2,
+            name: " ".into(),
+            value: String::new(),
+            kind: CipherFieldKind::Text,
+        };
+        assert!(!form_is_dirty(
+            None, "", "", "", "", "", "", "", ItemKind::Login, &[blank]
+        ));
+    }
 
     #[test]
     fn parse_tags_splits_dedups_and_trims() {
