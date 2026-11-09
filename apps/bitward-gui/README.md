@@ -86,9 +86,9 @@ BITWARD_GUI_SOCK=<drain-daemon.sock> NSH_GUI_SHOTS=$PWD NSH_GUI_SHOTS_DRAIN=1 \
 | `lib.rs` | 根元件 `App`：命令幫浦（`set_interval` 50ms + `batch`）、TOTP 心跳（1s 引擎計時器）、頂部列（置中搜尋＋新增項目）、左側欄（我的密碼庫＋資料夾樹／已共享佔位／垃圾桶／同步列／匯出/匯入/改密）、錯誤橫條、Phase×Route 三欄版面與鎖態頁 |
 | `list.rs` | 置中搜尋框（Query.text 交 daemon FTS；掛頂部列）、標籤 chips 行＋排序/重新整理（中欄工具列）、排序選單、44px 列（型別磚單色字形、選中列淡藍底＋藍指示條）、未同步膠囊、垃圾桶條目顯示刪除時間、`virtual_list` |
 | `detail.rs` | 右欄詳情面板：官方表單感——大名稱＋型別磚，分節與官方同序（帳密／驗證碼／備註／自訂欄位／資訊），欄位為淺灰圓角值塊（label 12 粗灰在上、值 14 塊內、複製鈕塊右側）；垃圾桶條目動作改還原／永久刪除；密碼遮罩 →「顯示密碼」發 Get(Reveal)，明文只存 `revealed` 訊號、離開詳情即清；TOTP 按鈕發 Use:TotpCode＋倒數細进度條（≤5 秒轉 warning） |
-| `form.rs` | 新增/編輯模態（elevated 卡＋背板點擊取消）：型別切換（登入/加密筆記可選，Card/Identity 佔位）、資料夾下拉（ListFolders）、name/username/password/uri/tags/notes/自訂欄位編輯列；密碼欄附產生器面板 |
+| `form.rs` | 新增/編輯模態（elevated 卡＋背板點擊取消）：型別切換（登入/加密筆記可選，Card/Identity 佔位；項目型別建立後不可更改——與官方一致，community FR 1148 十年未開）、資料夾下拉（ListFolders）、name/username/password/uri/tags/notes/自訂欄位編輯列；密碼欄附產生器面板 |
 | `passgen.rs` | 產生器純狀態機：長度夾取（8–64、預設 20）、字元集開關、policy JSON（`Use:GeneratePassword` 欄名契約）；隨機數在 daemon |
-| `import.rs` | 官方 JSON 匯入器（本地兜底）：吃官方未加密匯出與本 App 匯出兩形態、解析計數純函數、逐筆 `Vault:Create`＋tags；加密檔擋下 |
+| `import.rs` | 官方 JSON 匯入器：本地解析吃官方未加密匯出與本 App 匯出兩形態（預覽計數純函數、加密檔擋下），執行走單交易 `VaultCall:Import`（全收或全拒，上限 500） |
 | `export.rs` | 未加密 JSON 匯出：逐筆 Get(Reveal) → `~/Downloads/bitward-export-<UTC>.json`（0600） |
 | `theme.rs` | 設計 tokens：官方淺色皮（白底、#175DDC 藍、6px 小圓角）、語意色、文字三級、密度常量（三欄寬/列高/字級/留白）、dark 色板保留（`dark` 子模組，下批切換）；視圖層唯一顏色與尺寸真相源，禁散落 hex／魔數 |
 | `ui.rs` | 共用小元件：按鈕（primary 藍實色/ghost/destructive）、型別磚（單色字形，monogram 退役）、徽章、表單欄、下拉列、模態殼（absolute 鋪滿 + 置中白卡）、確認/改密模態、複製鈕 |

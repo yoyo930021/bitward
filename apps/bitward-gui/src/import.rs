@@ -1,11 +1,12 @@
-//! 官方 JSON 匯入器（本地兜底：daemon 目前沒有 import 呼叫面，2b 實查）。
-//! 吃兩種形態——本 App 匯出（陣列 `[{name,username,password,uri,tags}]`）
-//! 與官方 Bitwarden 未加密匯出（`{encrypted:false, items:[{type,name,login,
-//! notes,folderId,fields,...}]}`）。解析與計數全在本地純函數；落地走既有
-//! `Vault:Create`（＋tags overlay），零新 daemon 依賴。
+//! 官方 JSON 匯入器。吃兩種形態——官方 Bitwarden 未加密匯出
+//! （`{encrypted:false, items:[{type,name,login,notes,folderId,fields,...}]}`）
+//! 與本 App 匯出（陣列 `[{name,username,password,uri,tags}]`）。解析與計數
+//! 全在本地純函數（預覽只回計數、不回明文）；執行走 daemon 批次 3 的
+//! 單交易 `VaultCall:Import`（全收或全拒，tags 直落 overlay）。
+//! 加密匯出（`encrypted:true`）擋下並給可懂錯誤。
 //!
-//! 明文紀律：匯入是匯出的鏡像入口——明文只在 worker 區域與 `Zeroizing`
-//! 副本短暫存在，進 Outgoing 幀即出棧；預覽只回計數，不回明文。
+//! 明文紀律：匯入是匯出的鏡像入口——明文只在 worker 區域短暫存在，
+//! 進 Outgoing 幀即出棧；預覽只回計數，不回明文。
 
 use bw_proto::{
     Call, CipherDraft, CipherField, ImportItem, ItemKind, Response, VaultCall,
