@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		08838AE5ACE4D50267FDD337 /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = 46B0ED1018D7F845003625C0 /* AppIcon.icns */; };
 		1665726F5AC7E72E07DB2B56 /* BitwardApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF3FDF1E8E8CE270ACE6F11B /* BitwardApp.swift */; };
 		16B99B4DBDE865995E96A3FC /* PasskeyUV.swift in Sources */ = {isa = PBXBuildFile; fileRef = D731879FB0F011FD1E555FB1 /* PasskeyUV.swift */; };
 		27C961CEFA953F7DDA28D5B2 /* BitwardGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E75116995D1D6A3D6ECC3E3 /* BitwardGroup.swift */; };
@@ -45,14 +46,12 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		026B6FD5C76861C096C6DE8F /* io.bitward.dev.daemon.direct.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = io.bitward.dev.daemon.direct.plist; sourceTree = "<group>"; };
 		0A7B5F02CAB65867EBC45312 /* Bitward.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Bitward.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		0E75116995D1D6A3D6ECC3E3 /* BitwardGroup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BitwardGroup.swift; sourceTree = "<group>"; };
 		25C3BDA637D74D9057065DED /* BTPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BTPClient.swift; sourceTree = "<group>"; };
-		389B287D9AED19867AF93398 /* BitwardDaemon-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "BitwardDaemon-Info.plist"; sourceTree = "<group>"; };
 		3CA69D3C2193516C15EEA3F9 /* SEPasskeyKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SEPasskeyKey.swift; sourceTree = "<group>"; };
+		46B0ED1018D7F845003625C0 /* AppIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIcon.icns; sourceTree = "<group>"; };
 		974EF14296AB1177D31C53AD /* ProviderViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderViewController.swift; sourceTree = "<group>"; };
-		B84397E49386EDC747BDF3CC /* io.bitward.dev.daemon.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = io.bitward.dev.daemon.plist; sourceTree = "<group>"; };
 		BF3FDF1E8E8CE270ACE6F11B /* BitwardApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BitwardApp.swift; sourceTree = "<group>"; };
 		D731879FB0F011FD1E555FB1 /* PasskeyUV.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasskeyUV.swift; sourceTree = "<group>"; };
 		EBAA0AE3E2826BF329591F74 /* BitwardProvider.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = BitwardProvider.appex; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -81,9 +80,7 @@
 		68BFA7F36DC6C9C553A93773 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
-				389B287D9AED19867AF93398 /* BitwardDaemon-Info.plist */,
-				026B6FD5C76861C096C6DE8F /* io.bitward.dev.daemon.direct.plist */,
-				B84397E49386EDC747BDF3CC /* io.bitward.dev.daemon.plist */,
+				46B0ED1018D7F845003625C0 /* AppIcon.icns */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -158,6 +155,7 @@
 			buildPhases = (
 				BD606DC7845B367143C5D1CC /* Sources */,
 				66309E0ADCC9C3469A08A102 /* Stage bitwarderd */,
+				132FE464EFC532494134DAA3 /* Resources */,
 				9547A3339CFA64A5A35A3975 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
@@ -210,6 +208,17 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		132FE464EFC532494134DAA3 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				08838AE5ACE4D50267FDD337 /* AppIcon.icns in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
 		66309E0ADCC9C3469A08A102 /* Stage bitwarderd */ = {

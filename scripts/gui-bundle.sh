@@ -46,6 +46,8 @@ cat > "$APP/Contents/Info.plist" <<EOF
 	<string>BitwardGUI</string>
 	<key>CFBundleIdentifier</key>
 	<string>io.bitward.dev.gui</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
@@ -67,6 +69,11 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </dict>
 </plist>
 EOF
+# Dock 入口是這顆巢狀 bundle：icon 與外層 App 同源（gen-icons.sh 生成制，產物不入庫）
+ICNS=platforms/macos/Bitward/Resources/AppIcon.icns
+[ -f "$ICNS" ] || { echo "FATAL: 缺 $ICNS——先跑 scripts/gen-icons.sh"; exit 1; }
+mkdir -p "$APP/Contents/Resources"
+cp -f "$ICNS" "$APP/Contents/Resources/AppIcon.icns"
 find "$APP" -name '._*' -delete
 # 無 entitlements：2026-11-08 實測 hardened runtime 不擋 group container sock
 # 連線與 ~/Downloads 匯出寫入（非沙盒＋Developer ID 直讀直寫），最小形態即可。

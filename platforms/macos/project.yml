@@ -22,8 +22,13 @@ targets:
     platform: macOS
     sources:
       - Bitward/Sources
+      # Resources 走 resources 階段只為帶 AppIcon.icns（gen-icons.sh 生成，不入庫）；
+      # daemon plist 們維持 buildPhase:none 的既有事實——它們由 staging／script
+      # phase 搬到專屬落點（LaunchAgents），不該進 Contents/Resources。
       - path: Bitward/Resources
-        buildPhase: none
+        buildPhase: resources
+        excludes:
+          - "*.plist"
       - Shared
     settings:
       base:

@@ -57,6 +57,9 @@ echo "==> 簽章形態：${ID_NAME:-$IDENTITY}／form=$FORM"
 # 直接斷言＋BTM 實驗。
 if [ "$EXPERIMENT_ONLY" = 0 ]; then
 
+echo "==> app icons（gen-icons.sh；xcodebuild 的 resources 階段吃生成物）"
+bash scripts/gen-icons.sh
+
 echo "==> cargo release (bitwarderd, bitward)"
 cargo build --release -q -p bitwarderd -p bitward
 

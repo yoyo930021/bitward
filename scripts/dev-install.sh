@@ -10,6 +10,9 @@ BUNDLE=~/Library/Developer/Xcode/DerivedData/Bitward-essisnxmmachgpfgzkzjfqzduuc
 IDENTITY=BFA4593FB215C51771B6988EBFADE08E7A3F8DE0   # Mac Developer: Created via API (team 8V5224A99M)
 GROUP=group.8V5224A99M.io.bitward.dev
 
+echo "==> app icons（gen-icons.sh；xcodebuild 的 resources 階段吃生成物）"
+bash scripts/gen-icons.sh
+
 echo "==> cargo release (bitwarderd, bitward)"
 cargo build --release -q -p bitwarderd -p bitward
 
