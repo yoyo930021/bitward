@@ -193,6 +193,9 @@ fi
 echo "    $PKG"
 
 echo "==> notarize（BW_NOTARIZE=${BW_NOTARIZE:-0}）"
+# 紀律（2026-11-09 實錄）：公證單綁的是「送件當下那份 pkg」。若送單後又重跑管線
+# 覆蓋 dist/*.pkg，stapler 會補到未公證的新產物上（error 65）。正解＝功能收斂後
+# 一次性 build→submit→staple→install，中途重建別送單。
 if [ "${BW_NOTARIZE:-0}" = 1 ]; then
   : "${BW_APPLE_API_KEY:?BW_NOTARIZE=1 需 BW_APPLE_API_KEY（ASC API key id）}"
   : "${BW_APPLE_API_ISSUER:?BW_NOTARIZE=1 需 BW_APPLE_API_ISSUER}"
