@@ -47,9 +47,9 @@ cd apps/bitward-gui
 BITWARD_GUI_SOCK=<repo>/dev/e2e/demo/s NSH_GUI_SHOTS=$PWD nsh run --target macos
 ```
 
-依指令序列跑完整驗收流並寫 `shot-1..23、26..42-*.png`（24/25 見下）後退出：列表全量（三欄骨架、
+依指令序列跑完整驗收流並寫 `shot-1..23、26..43-*.png`（24/25 見下）後退出：列表全量（三欄骨架、
 型別磚、未同步膠囊，右欄空態為「選取一個項目」佔位）→ 搜尋 "GitHub" →
-詳情遮罩 → 詳情 revealed → 新增表單模態 → 真送新增（Create+AddTag）
+詳情遮罩 → 詳情 revealed → 新增編輯器（右欄 inline）→ 真送新增（Create+AddTag）
 → TOTP 拒絕路徑（無 seed → 錯誤橫條）→ 排序下拉 → 標籤 chips 選取 →
 編輯改名（Patch）→ 刪除確認框 → 取消不刪斷言 → 刪除後空列表 →
 鎖態頁（已鎖定+解鎖鈕）→ 解鎖 → 匯出確認框（未加密提醒）→ 匯出完成提示列 →
@@ -58,7 +58,7 @@ BITWARD_GUI_SOCK=<repo>/dev/e2e/demo/s NSH_GUI_SHOTS=$PWD nsh run --target macos
 產生器面板展開（真送 Use:GeneratePassword 取草稿）→
 TOTP 倒數三段（真取碼後偽造時間源示 30/10/5 秒比例，5 秒段轉 warning 色）→
 資料夾樹（把「GitHub 測試」歸入工作資料夾後過濾，側欄節點選中態）→
-SecureNote 模態（帳密收合、備註大欄、Card/Identity 佔位灰）→
+SecureNote 編輯器（帳密收合、備註大欄、Card/Identity 佔位灰）→
 自訂欄位編輯列（文字＋隱藏兩列）→ 匯入模態（貼路徑→預覽計數）→
 編輯模式欄位解鎖（text→boolean 開關拍板 shot-31、增／刪列 shot-32、
 存檔後詳情頁布爾欄開關樣 shot-33）→ 匯入執行後結果列
@@ -68,7 +68,8 @@ SecureNote 模態（帳密收合、備註大欄、Card/Identity 佔位灰）→
 批准佇列：gated device session（`agent open --grant 'reveal:secret all approve'`）造一筆
 真 pending，右欄佇列有筆＋側欄計數徽章（shot-41，並斷言 `requested_at_ms` 為近 5 分鐘
 合理 epoch）→ 單鍵批准後佇列清空、徽章消失（shot-42）→
-暗色皮自查三張（shot-38 列表／39 詳情／40 模態：`SetTheme(Dark)` 即時翻轉不重建視窗，
+批准髒退出閘：編輯器弄髒後導航被確認框攔下（shot-43），拒絕留 edit、放棄完成重投導航 →
+暗色皮自查三張（shot-38 列表／39 詳情／40 新增器：`SetTheme(Dark)` 即時翻轉不重建視窗，
 收尾復原跟隨系統預設）。
 
 ### 徽章無感收斂證據（`NSH_GUI_SHOTS_DRAIN`）
@@ -115,7 +116,7 @@ access token 壽命約 2 小時；daemon 自 4c 起**自動續期**（401 出口
 | `list.rs` | 置中搜尋框（Query.text 交 daemon FTS；掛頂部列）、標籤 chips 行＋排序/重新整理（中欄工具列）、排序選單、44px 列（型別磚單色字形、選中列淡藍底＋藍指示條）、未同步膠囊、垃圾桶條目顯示刪除時間、`virtual_list` |
 | `detail.rs` | 右欄詳情面板：官方表單感——大名稱＋型別磚，分節與官方同序（帳密／驗證碼／備註／自訂欄位／附件／資訊），欄位為淺灰圓角值塊（label 12 粗灰在上、值 14 塊內、複製鈕塊右側），布爾欄渲染開關樣；垃圾桶條目動作改還原／永久刪除；密碼遮罩 →「顯示密碼」發 Get(Reveal)，明文只存 `revealed` 訊號、離開詳情即清；TOTP 按鈕發 Use:TotpCode＋倒數細进度條（≤5 秒轉 warning）；附件列＝檔名＋大小＋下載／刪除，節尾內聯上傳編輯器 |
 | `attach.rs` | 附件視圖層純函數：大小格式化、32MiB 本地閘、org 上傳擋附、單飛行狀態機、上傳讀檔／下載落地路徑（`~/Downloads/bitward-attachment-*`，0600 防蓋檔）；往返在 `state.rs` 附件命令，收斂靠事件幫浦 |
-| `form.rs` | 新增/編輯模態（elevated 卡＋背板點擊取消）：型別切換（登入/加密筆記可選，Card/Identity 佔位；項目型別建立後不可更改——與官方一致，community FR 1148 十年未開）、資料夾下拉（ListFolders）、name/username/password/uri/tags/notes/自訂欄位編輯列；密碼欄附產生器面板 |
+| `form.rs` | 新增/編輯右欄 inline 編輯器（詳情 view↔edit 態翻轉；表頭取消/儲存，髒退出走確認框）：型別切換（登入/加密筆記可選，Card/Identity 佔位；項目型別建立後不可更改——與官方一致，community FR 1148 十年未開）、資料夾下拉（ListFolders）、name/username/password/uri/tags/notes/自訂欄位編輯列；密碼欄附產生器面板 |
 | `passgen.rs` | 產生器純狀態機：長度夾取（8–64、預設 20）、字元集開關、policy JSON（`Use:GeneratePassword` 欄名契約）；隨機數在 daemon |
 | `import.rs` | 官方 JSON 匯入器：本地解析吃官方未加密匯出與本 App 匯出兩形態（預覽計數純函數、加密檔擋下），執行走單交易 `VaultCall:Import`（全收或全拒，上限 500） |
 | `export.rs` | 未加密 JSON 匯出：逐筆 Get(Reveal) → `~/Downloads/bitward-export-<UTC>.json`（0600） |

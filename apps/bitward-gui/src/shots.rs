@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use nsh_core::prelude::*;
 
-use crate::state::{AppCore, Cmd, FieldDraft};
+use crate::state::{AppCore, Cmd, FieldDraft, Route};
 
 /// 在 AppKit main thread 上執行 `f`（macOS 限定；其餘平台直接跑）。
 #[cfg(target_os = "macos")]
@@ -227,7 +227,8 @@ fn find_view(core: &AppCore, name: &str) -> Option<bw_proto::ItemView> {
 /// 匯入模態（預覽/真跑/結果列）→ 編輯欄位解鎖（text→boolean、增刪列、
 /// 開關樣落地）→ 附件生命週期（上傳確認/收斂在列/下載落地/刪除確認）→
 /// 批准佇列（gated session 造真 pending：41 佇列有筆＋時間欄斷言、42 批准後
-/// 清空＋徽章消失）→ 暗色皮自查三張（列表/詳情/模態，SetTheme(Dark) 即時翻轉不重建視窗），
+/// 清空＋徽章消失）→ 髒退出閘（編輯器弄髒被導航攔下走確認框，shot-43，
+/// 拒絕留 edit、確認放棄完成重投）→ 暗色皮自查三張（列表/詳情/新增器，SetTheme(Dark) 即時翻轉不重建視窗），
 /// 各步存一張 shot-N-*.png 後結束行程。時序裕量對齊
 /// spike（Background
 /// session 無 vsync 可等，固定 sleep；本地 daemon 往返 <50ms）。
@@ -639,9 +640,48 @@ pub fn script(dir: PathBuf, core: AppCore) {
         let n = c.notice.get().unwrap_or_default();
         assert!(n.contains("已排隊上傳"), "上傳回執應為排隊語意：{n}");
     });
+    // —— 髒退出閘（批次 7）：編輯器弄髒 → 導航被攔 → 確認框 → 留/edit、棄/nav ——
+    let c = core.clone();
+    at(57600, move || {
+        if let Some(id) = find_id(&c, "GitHub") {
+            c.send(Cmd::OpenEdit(id));
+        }
+    });
+    let c = core.clone();
+    at(58600, move || {
+        c.form.name.update(|n| n.push_str(" 髒"));
+        c.send(Cmd::OpenList);
+    });
+    let c = core.clone();
+    at(59200, move || {
+        assert!(c.confirm.get().is_some(), "髒表單的導航應被確認框攔下");
+        assert!(matches!(c.route.get(), Route::Edit(_)), "攔截後應仍留在編輯器");
+    });
+    let d = dir.clone();
+    at(59600, move || capture(&d, "shot-43-dirty-guard.png"));
+    let c = core.clone();
+    at(60000, move || c.send(Cmd::ConfirmNo));
+    let c = core.clone();
+    at(60300, move || {
+        assert!(
+            c.confirm.get().is_none() && matches!(c.route.get(), Route::Edit(_)),
+            "拒絕後應關框並留在編輯器"
+        );
+    });
+    let c = core.clone();
+    at(60600, move || c.send(Cmd::OpenList));
+    let c = core.clone();
+    at(60900, move || c.send(Cmd::ConfirmYes));
+    let c = core.clone();
+    at(61200, move || {
+        assert!(matches!(c.route.get(), Route::List), "放棄編輯應完成被攔的導航");
+        if let Some(id) = find_id(&c, "2b 筆記範例") {
+            c.send(Cmd::OpenDetail(id));
+        }
+    });
     // 附件列要等背景推送收斂（drain tick 5s＋推送＋VaultChanged 重取），
     // 用輪詢取代死時間：出現即拍，40 秒未現即斷言失敗。
-    poll_attachment_row(dir, core, 58000);
+    poll_attachment_row(dir, core, 63600);
 }
 
 /// 輪詢詳情附件列收斂；出現後串接下載→刪除確認→收尾。
