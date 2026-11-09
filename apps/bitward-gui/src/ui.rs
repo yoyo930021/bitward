@@ -374,6 +374,30 @@ pub fn badge(label: &'static str, fg: AdaptiveColor, bg: AdaptiveColor) -> View 
         )
 }
 
+/// tooltip 內容卡（nsh 的 tooltip 收元素，浮層自帶底與描邊）。
+pub fn tooltip_card(msg: &str) -> View {
+    view()
+        .px_2p5()
+        .py_1p5()
+        .rounded(px(theme::RADIUS_CONTROL))
+        .border(px(1.0))
+        .border_color(theme::HAIRLINE)
+        .bg(theme::ELEVATED)
+        .shadow(vec![BoxShadow {
+            offset_x: px(0.0),
+            offset_y: px(4.0),
+            blur: px(12.0),
+            spread: px(-2.0),
+            color: black().opacity(0.18).into(),
+            inset: false,
+        }])
+        .child(
+            text(msg.to_owned())
+                .text_size(px(12.0))
+                .text_color(theme::TEXT_SECONDARY),
+        )
+}
+
 /// 節標題：12px 粗灰（官方詳情分節）。
 pub fn section_title(label: &'static str) -> Text {
     text(label)

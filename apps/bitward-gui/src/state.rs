@@ -55,6 +55,10 @@ pub struct FormOriginal {
     pub username: Option<String>,
     pub uri: Option<String>,
     pub tags: Vec<String>,
+    pub notes: Option<String>,
+    pub folder_id: Option<String>,
+    /// 既有自訂欄位基準（編輯模式逐欄 diff；增刪不在此批）。
+    pub fields: Vec<FieldDraft>,
 }
 
 /// 寫入完成後的落點。
@@ -192,16 +196,59 @@ pub enum Cmd {
     },
 }
 
+/// 自訂欄位編輯草稿。建立模式可增刪＋隱藏開關；編輯模式只改
+/// name/value（daemon FieldEdit 文法無整陣列增刪路徑，與 uri.<n> 同紀律）。
+#[derive(Clone, Debug)]
+pub struct FieldDraft {
+    /// 列身份（每次編輯列唯一；不参与相等比較，只穩住 each 的 key）。
+    pub key: u32,
+    pub name: String,
+    pub value: String,
+    pub hidden: bool,
+}
+
+impl PartialEq for FieldDraft {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.value == other.value && self.hidden == other.hidden
+    }
+}
+
+impl Eq for FieldDraft {}
+
+impl Default for FieldDraft {
+    fn default() -> Self {
+        Self {
+            key: rand_key(),
+            name: String::new(),
+            value: String::new(),
+            hidden: false,
+        }
+    }
+}
+
+/// 編輯列身份：uuid 前 4 bytes → u32（免拉 rand 依賴）。
+fn rand_key() -> u32 {
+    let id = uuid::Uuid::new_v4();
+    u32::from_le_bytes(id.as_bytes()[..4].try_into().unwrap_or([0; 4]))
+}
+
 /// 表單欄位（新增/編輯共用一組；`Route` 決定語意）。
 #[derive(Clone)]
 pub struct FormFields {
     pub name: Signal<String>,
     pub username: Signal<String>,
     /// 明文只在這個訊號與送出時的 `Zeroizing` 副本裡存在（契約 §2.7 規則 6：
-    /// UI 與核心同語言，明文不進 JS、不落盤）。
+    /// UI 純介面零業務邏輯，明文不進 JS、不落盤）。
     pub password: Signal<String>,
     pub uri: Signal<String>,
     pub tags: Signal<String>,
+    /// 型別切換：本批僅 Login/SecureNote 可選，Card/Identity 佔位 disabled。
+    pub kind: Signal<ItemKind>,
+    /// 資料夾歸屬：""＝未歸屬；否則 ListFolders 的 id。
+    pub folder_id: Signal<String>,
+    pub notes: Signal<String>,
+    /// 自訂欄位編輯列（順序即送出順序）。
+    pub fields: Signal<Arc<Vec<FieldDraft>>>,
     pub error: Signal<Option<String>>,
     pub original: Signal<Option<Arc<FormOriginal>>>,
     /// 產生器面板狀態（開合／長度／字元集開關）。
@@ -219,6 +266,10 @@ impl FormFields {
         self.tags.set(String::new());
         self.error.set(None);
         self.original.set(original);
+        self.kind.set(ItemKind::Login);
+        self.folder_id.set(String::new());
+        self.notes.set(String::new());
+        self.fields.set(Arc::new(Vec::new()));
         self.gen_panel.set(GenState::default());
         self.gen_draft.set(None);
     }
@@ -345,6 +396,10 @@ impl AppCore {
                 password: signal(String::new()),
                 uri: signal(String::new()),
                 tags: signal(String::new()),
+                kind: signal(ItemKind::Login),
+                folder_id: signal(String::new()),
+                notes: signal(String::new()),
+                fields: signal(Arc::new(Vec::new())),
                 error: signal(None),
                 original: signal_with(None, SignalEquals::Never),
                 gen_panel: signal(GenState::default()),
@@ -523,11 +578,30 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 .uri
                 .set(row.meta.uris.first().cloned().unwrap_or_default());
             core.form.tags.set(row.meta.tags.join(", "));
+            core.form.kind.set(row.meta.kind);
+            core.form
+                .folder_id
+                .set(row.meta.folder_id.map(|f| f.to_string()).unwrap_or_default());
+            core.form.notes.set(row.notes.clone().unwrap_or_default());
+            let drafts: Vec<FieldDraft> = row
+                .fields
+                .iter()
+                .map(|f| FieldDraft {
+                    key: rand_key(),
+                    name: f.name.clone(),
+                    value: f.value.clone().unwrap_or_default(),
+                    hidden: f.hidden,
+                })
+                .collect();
+            core.form.fields.set(Arc::new(drafts.clone()));
             core.form.original.set(Some(Arc::new(FormOriginal {
                 name: row.meta.name.clone().unwrap_or_default(),
                 username: row.username.clone(),
                 uri: row.meta.uris.first().cloned(),
                 tags: row.meta.tags.clone(),
+                notes: row.notes.clone(),
+                folder_id: row.meta.folder_id.map(|f| f.to_string()),
+                fields: drafts,
             })));
         }
         Cmd::RequestReveal => {
@@ -937,24 +1011,37 @@ fn submit_form(core: &AppCore) {
     let password = nonblank(&core.form.password.get());
     let uri = nonblank(core.form.uri.get().trim());
     let tags = parse_tags(&core.form.tags.get());
+    let kind = core.form.kind.get();
+    let folder_id = nonblank(&core.form.folder_id.get());
+    let notes = nonblank(&core.form.notes.get());
+    let drafts = core.form.fields.get();
     match route {
         Route::Create => {
+            let fields: Vec<bw_proto::CipherField> = drafts
+                .iter()
+                .filter(|f| !f.name.trim().is_empty() || !f.value.trim().is_empty())
+                .map(|f| bw_proto::CipherField {
+                    name: f.name.trim().to_owned(),
+                    value: nonblank(&f.value),
+                    hidden: f.hidden,
+                })
+                .collect();
             core.ipc(move |s| {
                 // Zeroize 點 ①：表單明文以 `Zeroizing` 持有，序列化進
                 // Outgoing 幀（加密在 daemon 的 with_keys 閉包）後本地即出棧清零；
                 // draft 內的最後一份拷貝隨幀寫出銷毀——GUI 不落地、不緩存。
                 let password = password.map(zeroize::Zeroizing::new);
                 let draft = CipherDraft {
-                    kind: ItemKind::Login,
+                    kind,
                     name: name.clone(),
                     username,
                     password: password.as_deref().map(|p| p.to_string()),
                     totp: None,
                     uris: uri.into_iter().collect(),
-                    notes: None,
+                    notes,
                     favorite: false,
-                    folder_id: None,
-                    fields: Vec::new(),
+                    folder_id,
+                    fields,
                 };
                 let err = match s.call(&Call::Vault(VaultCall::Create { draft })) {
                     Ok(Response::Ok) => {
@@ -1005,6 +1092,36 @@ fn submit_form(core: &AppCore) {
                     path: "password".into(),
                     value: password.clone(),
                 });
+            }
+            if notes != orig.notes {
+                edits.push(FieldEdit {
+                    path: "notes".into(),
+                    value: notes.clone(),
+                });
+            }
+            if folder_id != orig.folder_id {
+                edits.push(FieldEdit {
+                    path: "folderId".into(),
+                    value: folder_id.clone(),
+                });
+            }
+            // 既有欄位逐筆 diff name/value（編輯模式禁增刪，長度恆等）。
+            for (i, cur) in drafts.iter().enumerate() {
+                let Some(base) = orig.fields.get(i) else {
+                    continue;
+                };
+                if cur.name != base.name {
+                    edits.push(FieldEdit {
+                        path: format!("field.{i}.name"),
+                        value: Some(cur.name.clone()),
+                    });
+                }
+                if cur.value != base.value {
+                    edits.push(FieldEdit {
+                        path: format!("field.{i}.value"),
+                        value: nonblank(&cur.value),
+                    });
+                }
             }
             let (add, remove) = diff_tags(&orig.tags, &tags);
             if edits.is_empty() && add.is_empty() && remove.is_empty() {

@@ -450,7 +450,7 @@ fn side_item(
             }
         });
     let row = if disabled {
-        row.tooltip(tooltip_card(tip.unwrap_or("即將推出")))
+        row.tooltip(ui::tooltip_card(tip.unwrap_or("即將推出")))
     } else {
         row.on_press(on_press).hover(|s| s.bg(theme::SURFACE_RAISED))
     };
@@ -503,22 +503,6 @@ fn side_text_button(label: &'static str, on_press: impl Fn() + 'static) -> View 
         .child(
             text(label)
                 .text_size(px(13.0))
-                .text_color(theme::TEXT_SECONDARY),
-        )
-}
-
-/// tooltip 內容卡（nsh 的 tooltip 收元素，浮層自帶底與描邊）。
-fn tooltip_card(msg: &str) -> View {
-    view()
-        .px_2p5()
-        .py_1p5()
-        .rounded(px(theme::RADIUS_CONTROL))
-        .border(px(1.0))
-        .border_color(theme::HAIRLINE)
-        .bg(theme::ELEVATED)
-        .child(
-            text(msg.to_owned())
-                .text_size(px(12.0))
                 .text_color(theme::TEXT_SECONDARY),
         )
 }
