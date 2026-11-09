@@ -1,88 +1,67 @@
 //! 設計 tokens：視圖層唯一的顏色與尺寸真相源。所有新外觀只从这里取值，
 //! 散落 hex 視為代碼壞味道。語意命名（base/surface/elevated…），
-//! 不跟 nsh theme() 的 shadcn 語意混用。本批發官方桌面版**淺色**皮
-//! （白底、#175DDC 藍、小圓角）；dark 色板保留為 `DARK_*` 常量，
-//! 外觀切換能力留給下批。每個 token 的 light/dark 兩槽同值，
-//! 系統外觀切換不影響截圖一致性。
+//! 不跟 nsh theme() 的 shadcn 語意混用。**雙槽色板**（批次 5）：
+//! light 槽＝官方淺色皮（白底、#175DDC 藍、小圓角），dark 槽＝保留的
+//! 暗色皮；外觀由 `set_color_scheme`（跟隨系統／淺／暗三態）驅動，
+//! 樣式閉包讀取時即時翻轉，不重建視窗。
 
 use nsh_core::prelude::AdaptiveColor;
 
-/// 兩槽同值的常色（皮是設計目標，不是 appearance 的附屬品）。
-const fn solid(hex: u32) -> AdaptiveColor {
-    AdaptiveColor::rgb(hex, hex)
+/// 兩槽各自定色（light, dark）。
+const fn solid2(light: u32, dark: u32) -> AdaptiveColor {
+    AdaptiveColor::rgb(light, dark)
 }
 
-/// 兩槽同值的半透明黑（淺色皮的分隔線、背板）。
-const fn black_alpha(a: f32) -> AdaptiveColor {
+/// 兩槽半透明黑。
+const fn black2(la: f32, da: f32) -> AdaptiveColor {
     AdaptiveColor {
-        light: nsh_core::prelude::hsla(0.0, 0.0, 0.0, a),
-        dark: nsh_core::prelude::hsla(0.0, 0.0, 0.0, a),
+        light: nsh_core::prelude::hsla(0.0, 0.0, 0.0, la),
+        dark: nsh_core::prelude::hsla(0.0, 0.0, 0.0, da),
     }
 }
 
-// —— 背景層（官方淺色骨架） ——
+// —— 背景層 ——
 
-/// 視窗／列表中柱底（純白）。
-pub const BASE: AdaptiveColor = solid(0xFFFFFF);
-/// 左側欄底（官方 sidebar 淡灰白）。
-pub const SIDEBAR: AdaptiveColor = solid(0xF4F6F8);
+/// 視窗／列表中柱底。
+pub const BASE: AdaptiveColor = solid2(0xFFFFFF, 0x0E1116);
+/// 左側欄底。
+pub const SIDEBAR: AdaptiveColor = solid2(0xF4F6F8, 0x12171F);
 /// 值塊、輸入框、型別磚的內層底。
-pub const SURFACE: AdaptiveColor = solid(0xF7F8F9);
+pub const SURFACE: AdaptiveColor = solid2(0xF7F8F9, 0x161B22);
 /// hover／中性選中提亮一階。
-pub const SURFACE_RAISED: AdaptiveColor = solid(0xEFF1F4);
-/// 模態、下拉面板等浮層（白卡＋hairline 描邊）。
-pub const ELEVATED: AdaptiveColor = solid(0xFFFFFF);
-/// 1px 分隔線／描邊。
-pub const HAIRLINE: AdaptiveColor = black_alpha(0.10);
-/// 浮層頂部 1px 線（淺色皮的高光改成極淡陰影線）。
-pub const HIGHLIGHT: AdaptiveColor = black_alpha(0.04);
+pub const SURFACE_RAISED: AdaptiveColor = solid2(0xEFF1F4, 0x1D242E);
+/// 模態、下拉面板等浮層。
+pub const ELEVATED: AdaptiveColor = solid2(0xFFFFFF, 0x1C2330);
+/// 1px 分隔線／描邊（淺底黑 10%、暗底白 8%）。
+pub const HAIRLINE: AdaptiveColor = black2(0.10, 0.08);
+/// 浮層頂部 1px 線。
+pub const HIGHLIGHT: AdaptiveColor = black2(0.04, 0.10);
 /// 模態背板壓暗。
-pub const SCRIM: AdaptiveColor = black_alpha(0.45);
+pub const SCRIM: AdaptiveColor = black2(0.45, 0.60);
 
 // —— 語意色 ——
 
-/// 主色（Bitwarden 藍；按鈕實色不漸變、聚焦／選中／連結同色）。
-pub const ACCENT: AdaptiveColor = solid(0x175DDC);
-/// 主按鈕 hover（壓深一階）。
-pub const ACCENT_HOVER: AdaptiveColor = solid(0x124CB4);
+/// 主色（淺槽 Bitwarden 藍、暗槽保留藍紫；聚焦／選中／連結同色）。
+pub const ACCENT: AdaptiveColor = solid2(0x175DDC, 0x5B6CF9);
+/// 主按鈕 hover（淺色壓深、暗色提亮）。
+pub const ACCENT_HOVER: AdaptiveColor = solid2(0x124CB4, 0x7B8AFF);
 /// accent 底上的文字。
-pub const TEXT_ON_ACCENT: AdaptiveColor = solid(0xFFFFFF);
+pub const TEXT_ON_ACCENT: AdaptiveColor = solid2(0xFFFFFF, 0xFFFFFF);
 /// 成功（複製完成、提示列）。
-pub const SUCCESS: AdaptiveColor = solid(0x118846);
+pub const SUCCESS: AdaptiveColor = solid2(0x118846, 0x2EA36B);
 /// 警告（TOTP 到期前）。
-pub const WARNING: AdaptiveColor = solid(0xB45309);
+pub const WARNING: AdaptiveColor = solid2(0xB45309, 0xD9831A);
 /// 危險（刪除）。
-pub const DESTRUCTIVE: AdaptiveColor = solid(0xC0392B);
+pub const DESTRUCTIVE: AdaptiveColor = solid2(0xC0392B, 0xE5484D);
 
 // —— 文字三級 ——
 
-/// 主文字（近黑）。
-pub const TEXT_PRIMARY: AdaptiveColor = solid(0x1F242C);
+/// 主文字。
+pub const TEXT_PRIMARY: AdaptiveColor = solid2(0x1F242C, 0xE9ECF1);
 /// 次級文字。
-pub const TEXT_SECONDARY: AdaptiveColor = solid(0x6B7280);
-/// 弱化文字／節標題／欄位 label。
-pub const TEXT_MUTED: AdaptiveColor = solid(0x9CA3AF);
-
-// —— dark 色板（保留給下批外觀切換；本批不發） ——
-
-/// 舊暗色皮：值不動，下批接 appearance 切換。
-#[allow(dead_code)]
-pub mod dark {
-    use super::AdaptiveColor;
-
-    const fn solid(hex: u32) -> AdaptiveColor {
-        super::solid(hex)
-    }
-
-    pub const BASE: AdaptiveColor = solid(0x0E1116);
-    pub const SURFACE: AdaptiveColor = solid(0x161B22);
-    pub const SURFACE_RAISED: AdaptiveColor = solid(0x1D242E);
-    pub const ELEVATED: AdaptiveColor = solid(0x1C2330);
-    pub const ACCENT: AdaptiveColor = solid(0x5B6CF9);
-    pub const SUCCESS: AdaptiveColor = solid(0x2EA36B);
-    pub const WARNING: AdaptiveColor = solid(0xD9831A);
-    pub const DESTRUCTIVE: AdaptiveColor = solid(0xE5484D);
-}
+pub const TEXT_SECONDARY: AdaptiveColor = solid2(0x6B7280, 0x9AA4B2);
+/// 弱化文字／節標題辅助。
+pub const TEXT_MUTED: AdaptiveColor = solid2(0x9CA3AF, 0x6E7784);
 
 // —— 圓角（官方小圓角語彙） ——
 
@@ -167,9 +146,18 @@ mod tests {
         )
     }
 
+    fn rgb255_dark(c: AdaptiveColor) -> (u32, u32, u32) {
+        let rgb = c.dark.to_rgb();
+        (
+            (rgb.r * 255.0).round() as u32,
+            (rgb.g * 255.0).round() as u32,
+            (rgb.b * 255.0).round() as u32,
+        )
+    }
+
     #[test]
     fn light_palette_is_official_light() {
-        // 白底近黑字、Bitwarden 藍實色（本批設計語言的錨點）。
+        // 白底近黑字、Bitwarden 藍實色（設計語言的錨點）。
         assert_eq!(rgb255(BASE), (255, 255, 255));
         assert_eq!(rgb255(TEXT_PRIMARY), (0x1F, 0x24, 0x2C));
         assert_eq!(rgb255(ACCENT), (0x17, 0x5D, 0xDC));
@@ -178,10 +166,13 @@ mod tests {
     }
 
     #[test]
-    fn dark_palette_reserved_for_next_batch() {
-        // dark 色板保留：值仍是舊暗色系，切換能力不丟。
-        assert_eq!(rgb255(dark::BASE), (0x0E, 0x11, 0x16));
-        assert_eq!(rgb255(dark::ACCENT), (0x5B, 0x6C, 0xF9));
+    fn dark_slots_carry_the_retained_night_skin() {
+        // 雙槽：dark 槽仍是舊暗色系，set_color_scheme(Dark) 即翻轉。
+        assert_eq!(rgb255_dark(BASE), (0x0E, 0x11, 0x16));
+        assert_eq!(rgb255_dark(ACCENT), (0x5B, 0x6C, 0xF9));
+        assert_eq!(rgb255_dark(TEXT_PRIMARY), (0xE9, 0xEC, 0xF1));
+        // 暗槽 hover 反向提亮。
+        assert!(rgb255_dark(ACCENT_HOVER).2 > rgb255_dark(ACCENT).2);
     }
 
     #[test]

@@ -23,7 +23,7 @@ pub fn search(core: AppCore) -> View {
             input()
                 .value(move || query.get())
                 .placeholder("搜尋名稱、網址或標籤")
-                .placeholder_color(move || theme::TEXT_MUTED.light)
+                .placeholder_color(move || color(theme::TEXT_MUTED))
                 .on_change(move |text: &str| {
                     // 輸入回聲直接寫訊號；重抓走命令佇列（下一個
                     // tick 合批，連續打字只發一次 List）。

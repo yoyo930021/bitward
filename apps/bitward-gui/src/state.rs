@@ -170,6 +170,9 @@ pub enum Cmd {
         id: ItemId,
         row: Option<Arc<ItemView>>,
     },
+    /// 主題三態（跟隨系統／淺／暗）：App 的 effect 監 `theme_mode` 套
+    /// `set_color_scheme`（元件上下文才准 act），這裡只記訊號＋落盤。
+    SetTheme(Appearance),
     /// 垃圾桶切換（側欄列；None 視角＝一般列表）。
     ToggleTrash,
     /// 側欄資料夾節點：None＝全部項目、Some("")＝未歸屬、Some(id)＝該夾。
@@ -417,6 +420,8 @@ pub struct AppCore {
     pub att_upload_path: Signal<String>,
     pub att_upload_open: Signal<bool>,
     pub att_state: Signal<crate::attach::AttState>,
+    /// 外觀選擇（持久化到 `<datadir>/bitward/theme.txt`）。
+    pub theme_mode: Signal<Appearance>,
 }
 
 impl AppCore {
@@ -461,6 +466,7 @@ impl AppCore {
             att_upload_path: signal(String::new()),
             att_upload_open: signal(false),
             att_state: signal(crate::attach::AttState::default()),
+            theme_mode: signal(Appearance::System),
             form: FormFields {
                 name: signal(String::new()),
                 username: signal(String::new()),
@@ -1132,6 +1138,10 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             {
                 core.detail.set(Some(row));
             }
+        }
+        Cmd::SetTheme(mode) => {
+            core.theme_mode.set(mode);
+            crate::save_theme_mode(mode);
         }
         Cmd::ConfirmYes => {
             let Some(c) = core.confirm.get() else {

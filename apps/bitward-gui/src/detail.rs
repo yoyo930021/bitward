@@ -499,7 +499,7 @@ fn upload_editor(core: AppCore, item_id: bw_proto::ItemId, is_org: bool) -> View
                                 input()
                                     .value(move || p.get())
                                     .placeholder("貼上檔案路徑，例：~/Downloads/bill.pdf")
-                                    .placeholder_color(move || theme::TEXT_MUTED.light)
+                                    .placeholder_color(move || color(theme::TEXT_MUTED))
                                     .on_change(move |t: &str| p.set(t.to_owned()))
                                     .h(px(theme::INPUT_H))
                                     .px_3()

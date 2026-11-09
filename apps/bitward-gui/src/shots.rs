@@ -225,7 +225,8 @@ fn find_view(core: &AppCore, name: &str) -> Option<bw_proto::ItemView> {
 /// 產生器面板 → TOTP 倒數三段（真取碼後偽造時間源示 30/10/5 秒比例）→
 /// 資料夾樹歸屬過濾 → SecureNote 模態 → 自訂欄位編輯列 →
 /// 匯入模態（預覽/真跑/結果列）→ 編輯欄位解鎖（text→boolean、增刪列、
-/// 開關樣落地）→ 附件生命週期（上傳確認/收斂在列/下載落地/刪除確認），
+/// 開關樣落地）→ 附件生命週期（上傳確認/收斂在列/下載落地/刪除確認）→
+/// 暗色皮自查三張（列表/詳情/模態，SetTheme(Dark) 即時翻轉不重建視窗），
 /// 各步存一張 shot-N-*.png 後結束行程。時序裕量對齊
 /// spike（Background
 /// session 無 vsync 可等，固定 sleep；本地 daemon 往返 <50ms）。
@@ -681,7 +682,20 @@ fn poll_attachment_row(dir: PathBuf, core: AppCore, ms: u64) {
         at(ms + 3000, move || capture(&d3, "shot-37-attachment-delete-confirm.png"));
         let c4 = core.clone();
         at(ms + 3400, move || c4.send(Cmd::ConfirmYes));
-        at(ms + 4900, quit);
+        // —— 暗色皮自查三張（列表／詳情／模態）；收尾復原 system 預設 ——
+        let c5 = core.clone();
+        at(ms + 4200, move || c5.send(Cmd::SetTheme(Appearance::Dark)));
+        let d4 = dir.clone();
+        at(ms + 4800, move || capture(&d4, "shot-38-dark-list.png"));
+        let d5 = dir.clone();
+        at(ms + 5200, move || capture(&d5, "shot-39-dark-detail.png"));
+        let c6 = core.clone();
+        at(ms + 5400, move || c6.send(Cmd::OpenCreate));
+        let d6 = dir.clone();
+        at(ms + 6000, move || capture(&d6, "shot-40-dark-modal.png"));
+        let c7 = core.clone();
+        at(ms + 6300, move || c7.send(Cmd::SetTheme(Appearance::System)));
+        at(ms + 6700, quit);
     });
 }
 

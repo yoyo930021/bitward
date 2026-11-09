@@ -79,6 +79,38 @@ fn native(registry: &mut Registry) {
     registry.register::<App>();
 }
 
+/// 主題持久化：`<平台資料目錄>/bitward/theme.txt`（GUI 側小檔，重啟記住）。
+/// 取捨：nsh 沒暴露 UserDefaults 綁定，小檔最貼近 `sock_path` 的既有慣例；
+/// 跟隨系統不需要輪詢——nsh 的 `dark()` env 由平台推送，`Appearance::System`
+/// 即官方「自動」語意（查證 nsh-core ambient.rs：set_color_scheme/dark）。
+pub(crate) fn theme_file() -> PathBuf {
+    platform_data_dir().join("bitward").join("theme.txt")
+}
+
+pub(crate) fn load_theme_mode() -> Appearance {
+    match std::fs::read_to_string(theme_file()) {
+        Ok(s) => match s.trim() {
+            "light" => Appearance::Light,
+            "dark" => Appearance::Dark,
+            _ => Appearance::System,
+        },
+        Err(_) => Appearance::System,
+    }
+}
+
+pub(crate) fn save_theme_mode(mode: Appearance) {
+    let name = match mode {
+        Appearance::System => "system",
+        Appearance::Light => "light",
+        Appearance::Dark => "dark",
+    };
+    let path = theme_file();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, name);
+}
+
 /// 根元件：建立 AppCore、掛命令幫浦、分派主從式畫面與模態。
 #[component]
 pub fn App() -> impl IntoElement {
@@ -103,6 +135,14 @@ pub fn App() -> impl IntoElement {
     });
     core.send(Cmd::Boot);
     core.watch_events();
+    // 外觀套用：effect 讀 theme_mode → set_color_scheme。effect 跑在
+    // App 的元件上下文（act 合法），且跟隨系統時由平台 env 自動翻轉，
+    // 不需任何輪詢；切主題只翻樣式閉包，不重建視窗。
+    core.theme_mode.set(load_theme_mode());
+    let theme_watch = core.clone();
+    effect(move || {
+        set_color_scheme(theme_watch.theme_mode.get());
+    });
     on_key("escape", {
         let core = core.clone();
         move |_| core.send(Cmd::OpenList)
@@ -414,7 +454,8 @@ fn sidebar(core: AppCore) -> View {
                         let c = pw_build.clone();
                         side_text_button("變更主密碼", move || c.send(Cmd::OpenChangePassword))
                     },
-                )),
+                ))
+                .child(theme_picker(core.clone())),
         )
 }
 
@@ -516,6 +557,74 @@ fn side_text_button(label: &'static str, on_press: impl Fn() + 'static) -> View 
             text(label)
                 .text_size(px(13.0))
                 .text_color(theme::TEXT_SECONDARY),
+        )
+}
+
+/// 主題三態選擇（官方桌面同款；預設跟隨系統）。
+fn theme_picker(core: AppCore) -> View {
+    let sys = core.clone();
+    let light = core.clone();
+    let dark = core.clone();
+    view()
+        .flex_col()
+        .gap_1()
+        .px_2()
+        .pt_1p5()
+        .child(
+            text("主題")
+                .text_size(px(11.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::TEXT_MUTED),
+        )
+        .child(
+            view()
+                .flex_row()
+                .gap_1p5()
+                .child(theme_chip("跟隨系統", Appearance::System, sys))
+                .child(theme_chip("淺色", Appearance::Light, light))
+                .child(theme_chip("暗色", Appearance::Dark, dark)),
+        )
+}
+
+fn theme_chip(label: &'static str, want: Appearance, core: AppCore) -> View {
+    let mode = core.theme_mode;
+    view()
+        .h(px(theme::CHIP_H - 4.0))
+        .px_2()
+        .rounded(px(theme::RADIUS_CONTROL))
+        .flex_row()
+        .items_center()
+        .cursor_pointer()
+        .transition_colors()
+        .duration(120.0)
+        .border(px(1.0))
+        .border_color(move || {
+            if mode.get() == want {
+                theme::ACCENT
+            } else {
+                theme::HAIRLINE
+            }
+        })
+        .bg(move || {
+            if mode.get() == want {
+                theme::ACCENT.opacity(0.12)
+            } else {
+                theme::BASE
+            }
+        })
+        .active(|s| s.opacity(0.7))
+        .on_press(move || core.send(Cmd::SetTheme(want)))
+        .child(
+            text(label)
+                .text_size(px(11.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(move || {
+                    if mode.get() == want {
+                        theme::TEXT_PRIMARY
+                    } else {
+                        theme::TEXT_SECONDARY
+                    }
+                }),
         )
 }
 

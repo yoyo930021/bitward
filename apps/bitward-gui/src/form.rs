@@ -405,7 +405,7 @@ fn field_row(fields: Signal<Arc<Vec<FieldDraft>>>, key: u32) -> View {
                         .unwrap_or_default()
                 })
                 .placeholder("欄名")
-                .placeholder_color(move || theme::TEXT_MUTED.light)
+                .placeholder_color(move || color(theme::TEXT_MUTED))
                 .on_change(move |t: &str| {
                     name_sig.update(|v| {
                         if let Some(f) = Arc::make_mut(v).iter_mut().find(|f| f.key == key) {
@@ -431,7 +431,7 @@ fn field_row(fields: Signal<Arc<Vec<FieldDraft>>>, key: u32) -> View {
                         edit.get().iter().find(|f| f.key == key).map(|f| f.value.clone()).unwrap_or_default()
                     })
                     .placeholder("值")
-                    .placeholder_color(move || theme::TEXT_MUTED.light)
+                    .placeholder_color(move || color(theme::TEXT_MUTED))
                     .on_change(move |t: &str| {
                         edit.update(|v| {
                             if let Some(f) = Arc::make_mut(v).iter_mut().find(|f| f.key == key) {
