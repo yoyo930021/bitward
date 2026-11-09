@@ -421,6 +421,13 @@ impl UnlockMachine {
         self.broadcast(UnlockEvent::NeedsReauth);
     }
 
+    /// 自動續期成功（4c）：解除 needs_reauth 標記。不發事件——
+    /// 事件紀律屬失效側（`note_token_rejected` 已覆蓋）；康復由
+    /// status 投影自然反映（needs_reauth 讀值即真態）。
+    pub fn note_token_renewed(&self) {
+        self.needs_reauth.store(false, Ordering::SeqCst);
+    }
+
     /// 使用者活動：重置 idle deadline（hard deadline 不動）。
     pub fn record_activity(&self) {
         let policy = *self.policy.lock().unwrap();

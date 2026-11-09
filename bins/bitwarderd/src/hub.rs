@@ -165,6 +165,37 @@ impl Hub {
             if let Some(t) = a.access_token.clone() {
                 client.set_access_token(&t).await;
             }
+            // 4c：重啟還原也要帶續期憑證，否則 401 收口只能拋錯
+            client.set_refresh_token(a.refresh_token.as_deref()).await;
+            // 續期成功 → account.json 就地讀改寫（真態在磁碟；記憶體
+            // AccountRecord 的 token 欄僅供展示，容許短暫落後）＋解除
+            // needs_reauth。Weak 中樞引用：sink 掛在 client、client 住在 hub，
+            // 強引用會成環。
+            let weak = Arc::downgrade(&hub);
+            client.set_token_sink(std::sync::Arc::new(move |access, refresh| {
+                let Some(h) = weak.upgrade() else { return };
+                let path = h.data_dir.join("account.json");
+                if let Ok(bytes) = std::fs::read(&path)
+                    && let Ok(mut v) = serde_json::from_slice::<Value>(&bytes)
+                {
+                    v["access_token"] = json!(access);
+                    v["refresh_token"] = match refresh {
+                        Some(r) => json!(r),
+                        None => Value::Null,
+                    };
+                    if std::fs::write(&path, v.to_string()).is_ok() {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            let _ = std::fs::set_permissions(
+                                &path,
+                                std::fs::Permissions::from_mode(0o600),
+                            );
+                        }
+                    }
+                }
+                h.machine.note_token_renewed();
+            }));
             hub.server.write().await.replace(ServerHandle { client });
         }
         // 重啟不踢已配對裝置：從持久層重建活 session（§2.3，token 即 id）
@@ -240,7 +271,13 @@ impl Hub {
                 dead: d.dead,
                 total: d.total,
             },
-            needs_reauth: self.machine.needs_reauth(),
+            needs_reauth: {
+                let server = self.server.read().await;
+                self.machine.needs_reauth()
+                    || server
+                        .as_ref()
+                        .is_some_and(|h| h.client.needs_relogin())
+            },
             proto: PROTO_VERSION,
             orgs: self.store.org_count().unwrap_or(0),
         }

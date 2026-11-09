@@ -783,6 +783,10 @@ impl Hub {
                     continue;
                 }
             };
+            // 4c 主動續期：過 90 分鐘閘就在這順手換 token，避開
+            // 「第一個使用者請求撞 401」的尾巴延遲。失敗不擋連線嘗試
+            // （renew 內部已標 needs_relogin，下次 401 收口會再試並上拋）。
+            client.renew_if_stale().await;
             match client.notifications().await {
                 Ok(mut stream) => {
                     self.machine.set_egress(true);

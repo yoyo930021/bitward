@@ -45,11 +45,35 @@ pub use bw_proto::{ItemId, ServerKind, ServerProfile};
 
 use base64::Engine as _;
 use serde_json::{Value, json};
-use std::time::Duration;
-use tokio::sync::RwLock;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::{Mutex, RwLock};
 use url::Url;
 
 pub(crate) use json::get;
+
+/// 續期成功後回給宿主持久化（account.json 等）的鉤子；同步呼叫，
+/// 實作只做檔案級快操作（非阻塞安全）。
+pub type TokenSink = Arc<dyn Fn(&str, Option<&str>) + Send + Sync>;
+
+/// 主動續期閘：access token 取得超過此時長即該續。
+/// VW 1.37.2 實錄壽命 7200s（JWT nbf→exp，2026-11-09 probe）；90 分鐘留
+/// 4.5 小時緩衝，notify_loop tick 順手續，使用者請求撞不到 401 尾巴。
+pub const REFRESH_AFTER_MS: u64 = 90 * 60 * 1000;
+
+/// 純函數閘（單元測的对象）：`acquired_ms==0`（未記錄）視為未到期。
+#[must_use]
+pub fn token_due_for_refresh(acquired_ms: u64, now_ms: u64) -> bool {
+    acquired_ms != 0 && now_ms.saturating_sub(acquired_ms) >= REFRESH_AFTER_MS
+}
+
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// 每個請求都帶的固定資訊。`client_id` 用 desktop 是官方桌機/CLI 的既有做法
 /// （`docs/research/protocol.md` §1：password grant 的 scope 為 `api offline_access`）。
@@ -108,6 +132,13 @@ pub struct Client {
     http: reqwest::Client,
     options: ClientOptions,
     state: RwLock<State>,
+    /// 401 續期單飛閘（併發 401 只跑一次 refresh grant）
+    refresh_gate: Mutex<()>,
+    /// refresh grant 也遭拒＝憑證失效（需重新登入，非重新整理可救）
+    needs_relogin: AtomicBool,
+    /// 目前 access token 的取得時刻（unix ms；0＝未記錄）
+    token_acquired_ms: AtomicU64,
+    token_sink: std::sync::RwLock<Option<TokenSink>>,
 }
 
 impl std::fmt::Debug for Client {
@@ -181,6 +212,10 @@ impl Client {
             http,
             options,
             state: RwLock::new(State::default()),
+            refresh_gate: Mutex::new(()),
+            needs_relogin: AtomicBool::new(false),
+            token_acquired_ms: AtomicU64::new(0),
+            token_sink: std::sync::RwLock::new(None),
         })
     }
 
@@ -229,6 +264,63 @@ impl Client {
         let mut st = self.state.write().await;
         st.access_token = Some(token.to_owned());
         st.user_id = crate::jwt_claim_str(token, "sub");
+        // 重啟還原的 token 從此刻重新計閘（真實取得時刻未知，保守放現在；
+        // 401 收口兜底過期邊界）
+        self.token_acquired_ms.store(unix_ms(), Ordering::SeqCst);
+        self.needs_relogin.store(false, Ordering::SeqCst);
+    }
+
+    /// 宿主重啟還原時補上 refresh 憑證（沒有它 401 收口只能拋錯）。
+    pub async fn set_refresh_token(&self, token: Option<&str>) {
+        self.state.write().await.refresh_token = token.map(str::to_owned);
+    }
+
+    pub fn needs_relogin(&self) -> bool {
+        self.needs_relogin.load(Ordering::SeqCst)
+    }
+
+    /// 掛上續期成功鉤子（account.json 持久化等）；同一 Client 重複掛以最後為準。
+    pub fn set_token_sink(&self, sink: TokenSink) {
+        if let Ok(mut g) = self.token_sink.write() {
+            *g = Some(sink);
+        }
+    }
+
+    /// 401 收口＋主動續期的共同實作：單飛閘內跑 refresh grant。
+    /// `stale` 帶值時做世代檢查（併發任務已續過 → 直接視為成功讓呼叫端重試）。
+    /// 回 true＝token 已更新（或已被別人更新），呼叫端可重試原請求。
+    pub async fn renew_token(&self, stale: Option<&str>) -> bool {
+        let _g = self.refresh_gate.lock().await;
+        if let Some(s) = stale
+            && self.state.read().await.access_token.as_deref() != Some(s)
+        {
+            // 排隊期間已被別家續過：直接放行重試
+            return true;
+        }
+        let Some(rt) = self.state.read().await.refresh_token.clone() else {
+            // 無續期憑證（API key 登入等）：不標 needs_relogin，原錯上拋
+            return false;
+        };
+        let out = self.refresh_with(&rt).await;
+        match out {
+            // finish_token 已寫回狀態、清 needs_relogin、重計閘並觸發 sink
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!(err = %e, "refresh grant 遭拒：憑證失效，需重新登入");
+                self.needs_relogin.store(true, Ordering::SeqCst);
+                false
+            }
+        }
+    }
+
+    /// 主動續期（notify_loop tick 掛點）：過 `REFRESH_AFTER_MS` 閘才續。
+    /// 回 true＝本輪做了續期動作（成敗看 needs_relogin）。
+    pub async fn renew_if_stale(&self) -> bool {
+        let acquired = self.token_acquired_ms.load(Ordering::SeqCst);
+        if !token_due_for_refresh(acquired, unix_ms()) {
+            return false;
+        }
+        self.renew_token(None).await
     }
 
     pub async fn access_token(&self) -> Option<String> {
@@ -259,6 +351,9 @@ impl Client {
         st.access_token = None;
         st.refresh_token = None;
         st.user_id = None;
+        drop(st);
+        self.token_acquired_ms.store(0, Ordering::SeqCst);
+        self.needs_relogin.store(false, Ordering::SeqCst);
     }
 
     // —— token ——
@@ -346,16 +441,16 @@ impl Client {
         self.refresh_with(&token).await
     }
 
+    /// 用（並發安全於 `renew_token` 的單飛閘後）指定的 refresh token 換新對。
+    /// **不走 `send` 收口**：refresh grant 自己的 401/400 不得再觸發續期
+    /// （遞迴在型別層消失；死憑證的裁決權在呼叫端 `renew_token`）。
     pub async fn refresh_with(&self, refresh_token: &str) -> Result<TokenBundle, ServerError> {
         let form = auth::refresh_form(refresh_token, &self.options);
         let identity = self.url("identity").await;
-        let (status, body) = self
-            .send(
-                self.http
-                    .post(format!("{identity}/connect/token"))
-                    .form(&form),
-            )
-            .await?;
+        let url = format!("{identity}/connect/token");
+        let resp = self.http.post(&url).form(&form).send().await?;
+        let status = u16::from(resp.status());
+        let body = resp.text().await?;
         let value = self
             .parse_ok(status, &body)
             .map_err(|e| e.into_server_error())?;
@@ -364,13 +459,25 @@ impl Client {
 
     async fn finish_token(&self, value: Value) -> Result<TokenBundle, ServerError> {
         let bundle = auth::parse_token_bundle(&value)?;
-        let mut st = self.state.write().await;
-        st.access_token = Some(bundle.access_token.clone());
-        st.user_id = crate::jwt_claim_str(&bundle.access_token, "sub");
-        if let Some(r) = bundle.refresh_token.clone() {
-            st.refresh_token = Some(r);
+        {
+            let mut st = self.state.write().await;
+            st.access_token = Some(bundle.access_token.clone());
+            st.user_id = crate::jwt_claim_str(&bundle.access_token, "sub");
+            if let Some(r) = bundle.refresh_token.clone() {
+                st.refresh_token = Some(r);
+            }
         }
-        drop(st);
+        // 續期生命週期錨點：重計閘、清失效標記、通知宿主持久化
+        self.token_acquired_ms.store(unix_ms(), Ordering::SeqCst);
+        self.needs_relogin.store(false, Ordering::SeqCst);
+        let sink = self
+            .token_sink
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or(None);
+        if let Some(sink) = sink {
+            sink(&bundle.access_token, bundle.refresh_token.as_deref());
+        }
         if let Some(keys) = &bundle.keys {
             self.record_quirks(keys.quirks()).await;
         } else {
@@ -569,14 +676,51 @@ impl Client {
 
     // —— HTTP 基底 ——
 
+    /// HTTP 出口統一收口（批次 4c）：任一請求吃 401 → 單飛續期 → 帶新 token
+    /// 重試原請求一次。冪等安全：GET/sync 直接重放；POST/PUT 帶 body 者由
+    /// `try_clone` 支援重放（json/form/multipart 皆可複製），複製不了
+    /// （串流體）或續期失敗時原錯上拋——outbox push 自有 drain 重試紀律，
+    /// 不在呼叫點硬重放第二輪。`refreshing` 旗讓 refresh grant 自己的
+    /// 401 直接上拋（不遞迴）。
     pub(crate) async fn send(
         &self,
         req: reqwest::RequestBuilder,
     ) -> Result<(u16, String), ServerError> {
+        let retryable = req.try_clone();
+        let sent_with = self.state.read().await.access_token.clone();
         let resp = req.send().await?;
         let status = u16::from(resp.status());
-        let text = resp.text().await?;
-        Ok((status, text))
+        let body = resp.text().await?;
+        if status == 401
+            && sent_with.is_some()
+            && self.renew_token(sent_with.as_deref()).await
+            // renew 成功且換到了新 token 才重放（舊 token 原樣重打必再 401）
+            && let (Some(retry_req), Some(fresh)) = (
+                retryable,
+                self.state
+                    .read()
+                    .await
+                    .access_token
+                    .clone()
+                    .filter(|t| Some(t.as_str()) != sent_with.as_deref()),
+            )
+        {
+            // 注意：reqwest 的 RequestBuilder::header 是 **append** 語意——
+            // 克隆體重帶的舊 bearer 不會被蓋掉（實錄：雙 Authorization 頭
+            // Rocket 取首個 → 續期後重試仍 401）。走 build→insert 置換。
+            let mut built = retry_req
+                .build()
+                .map_err(|e| ServerError::Rejected(e.to_string()))?;
+            built.headers_mut().insert(
+                reqwest::header::AUTHORIZATION,
+                reqwest::header::HeaderValue::from_str(&format!("Bearer {fresh}"))
+                    .map_err(|e| ServerError::Rejected(e.to_string()))?,
+            );
+            let resp = self.http.execute(built).await?;
+            let status = u16::from(resp.status());
+            return Ok((status, resp.text().await?));
+        }
+        Ok((status, body))
     }
 
     /// 2xx → JSON（解析失敗視為畸形回應）；其他 → 解析過的 [`ApiError`]。
