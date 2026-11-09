@@ -73,9 +73,10 @@ BITWARD_GUI_SOCK=<drain-daemon.sock> NSH_GUI_SHOTS=$PWD NSH_GUI_SHOTS_DRAIN=1 \
 為既有呼叫面。匯入執行走單交易 `VaultCall:Import`（全收或全拒），本地解析只做
 預覽計數與擋加密檔。跑前把 demo daemon 重啟為新構成品並 `bitward unlock`，
 且側欄「工作資料夾」需已存在（`bitward folder create 工作資料夾`）。VW 的
-access token 壽命約 2 小時而 daemon 現行不自動 refresh（4a 缺角，已報）：
-久放後跑 e2e 前先向 `/identity/connect/token` 走一次 `grant_type=refresh_token`
-把新 token 寫回 `account.json` 再重啟 daemon，否則推送/下載/刪除會 401。
+access token 壽命約 2 小時；daemon 自 4c 起**自動續期**（401 出口收口單飛續期
+＋90 分鐘主動閘，新 token/refresh 對落盤 `account.json`）——久放後直接跑 e2e
+即可，零人工。僅當 refresh 憑證也被拒（`status` 的 `needs_reauth=true`）才需
+重新登入。
 
 注意：流裡會真寫 demo vault（建一筆 "E2E 驗證項目"、改名、軟刪；
 詳情目標是種子項目「GitHub 測試」，找不到退回第一筆）。跑前用
