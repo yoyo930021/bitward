@@ -24,11 +24,36 @@ pub enum Merge {
     Conflict { fields: Vec<String> },
 }
 
+/// `field.<n>.type` 欄的詞彙表（merge 座標系的明文值域）：線格式 type 整數
+/// → 詞。未知整數回 None（值缺席＝讀不到，容忍漂移同信封解不開）。
+#[must_use]
+pub fn type_word(wire: i64) -> Option<&'static str> {
+    match wire {
+        0 => Some("text"),
+        1 => Some("hidden"),
+        2 => Some("boolean"),
+        _ => None,
+    }
+}
+
+/// 詞 → 線格式整數（apply_merged 寫回用）；未知詞回 None。
+#[must_use]
+pub fn wire_of_type_word(word: &str) -> Option<u8> {
+    match word {
+        "text" => Some(0),
+        "hidden" => Some(1),
+        "boolean" => Some(2),
+        _ => None,
+    }
+}
+
 /// 欄位級 3-way：ours vs base 的差異 × theirs vs base 的差異。
 /// 不相交自動合併（ ours 的改動套到 theirs 上 ）；相交且值不同 → 衝突。
 pub fn three_way(base: &FieldMap, ours: &FieldMap, theirs: &FieldMap) -> Merge {
     let mut push = FieldMap::new();
     let mut clashes = Vec::new();
+    let mut ours_changed: Vec<&String> = Vec::new();
+    let mut theirs_changed: Vec<&String> = Vec::new();
     let keys: BTreeMap<&String, ()> = base
         .keys()
         .chain(ours.keys())
@@ -39,9 +64,15 @@ pub fn three_way(base: &FieldMap, ours: &FieldMap, theirs: &FieldMap) -> Merge {
         let b = base.get(*key).cloned().flatten();
         let o = ours.get(*key).cloned().flatten();
         let t = theirs.get(*key).cloned().flatten();
-        let ours_changed = o != b;
-        let theirs_changed = t != b;
-        match (ours_changed, theirs_changed) {
+        let ours_changed_flag = o != b;
+        let theirs_changed_flag = t != b;
+        if ours_changed_flag {
+            ours_changed.push(key);
+        }
+        if theirs_changed_flag {
+            theirs_changed.push(key);
+        }
+        match (ours_changed_flag, theirs_changed_flag) {
             (false, _) => {}
             (true, false) => {
                 push.insert((*key).clone(), o.clone());
@@ -53,6 +84,23 @@ pub fn three_way(base: &FieldMap, ours: &FieldMap, theirs: &FieldMap) -> Merge {
             }
         }
     }
+    // 同欄 type×值撞車（批次 3 裁定）：官方改 fields[].type 連帶整欄重加密，
+    // 「一端改 field.<n>.type、另一端改同欄 name/value」物理上同欄相撞——
+    // 判同欄衝突進收件匣，不靜默合併。
+    if clashes.is_empty() {
+        for ko in &ours_changed {
+            for kt in &theirs_changed {
+                if let (Some((io, ty_o)), Some((it, ty_t))) = (field_slot(ko), field_slot(kt))
+                    && io == it
+                    && ty_o != ty_t
+                {
+                    clashes.push(format!("field.{io}.type"));
+                }
+            }
+        }
+        clashes.sort();
+        clashes.dedup();
+    }
     if !clashes.is_empty() {
         return Merge::Conflict { fields: clashes };
     }
@@ -61,6 +109,13 @@ pub fn three_way(base: &FieldMap, ours: &FieldMap, theirs: &FieldMap) -> Merge {
     } else {
         Merge::Push(push)
     }
+}
+
+/// `field.<n>.<leaf>` 路徑的欄槽解析：回 (index, 是否 type 欄)。
+fn field_slot(k: &str) -> Option<(u32, bool)> {
+    let rest = k.strip_prefix("field.")?;
+    let (id_s, leaf) = rest.rsplit_once('.')?;
+    Some((id_s.parse::<u32>().ok()?, leaf == "type"))
 }
 
 /// 把（信封形態的）cipher JSON 攤平成明文 `FieldMap`。
@@ -113,7 +168,10 @@ pub fn flatten(cipher: &serde_json::Value, dec: &dyn Fn(&str) -> Option<String>)
     }
     // 自訂欄位（v5 三件套）：`field.<n>.name`／`field.<n>.value` 以 0 起索引
     // 定址（官方 fields[] 無 id；同 uri.<n> 紀律，陣列位移視為不同欄）。
+    // `field.<n>.type` 為明文詞（text|hidden|boolean）：官方改 type 连带整欄
+    // 重加密，three_way 據此把同欄 type×值改動判同欄衝突（批次 3 裁定）。
     if let Some(fields) = cipher.get("fields").and_then(serde_json::Value::as_array) {
+        let mut type_keys: Vec<(String, Option<String>)> = Vec::new();
         for (i, f) in fields.iter().enumerate() {
             put_enc(
                 &format!("field.{i}.name"),
@@ -123,6 +181,15 @@ pub fn flatten(cipher: &serde_json::Value, dec: &dyn Fn(&str) -> Option<String>)
                 &format!("field.{i}.value"),
                 f.get("value").and_then(serde_json::Value::as_str),
             );
+            if let Some(t) = f.get("type").and_then(serde_json::Value::as_i64) {
+                type_keys.push((
+                    format!("field.{i}.type"),
+                    type_word(t).map(str::to_owned),
+                ));
+            }
+        }
+        for (k, v) in type_keys {
+            m.insert(k, v);
         }
     }
     // folderId 是明文欄（同 favorite 直接轉字串）；null/缺欄＝未歸屬（鍵缺席）。
@@ -251,7 +318,7 @@ pub fn apply_merged(
                     } else if let Some(rest) = p.strip_prefix("field.")
                         && let Some((id_s, leaf)) = rest.rsplit_once('.')
                         && let Some(idx) = id_s.parse::<usize>().ok()
-                        && matches!(leaf, "name" | "value")
+                        && matches!(leaf, "name" | "value" | "type")
                     {
                         // fields[] 無 id（官方形態）：索引定址。索引越界＝跳過
                         // （陣列已被他端收縮，強插會造出缺 type/linkedId 的半套欄位；
@@ -269,12 +336,22 @@ pub fn apply_merged(
                         else {
                             continue;
                         };
-                        match value {
-                            Some(v) => {
-                                entry.insert(leaf.into(), serde_json::json!(enc_of(v)));
-                            }
-                            None => {
-                                entry.insert(leaf.into(), serde_json::Value::Null);
+                        if leaf == "type" {
+                            // 明文詞 → 線格式整數；未知詞/清空不動現態
+                            // （type 無「空」語意，None 收斂為 text）。
+                            let wire = value
+                                .as_deref()
+                                .and_then(wire_of_type_word)
+                                .unwrap_or(0);
+                            entry.insert(leaf.into(), serde_json::json!(wire));
+                        } else {
+                            match value {
+                                Some(v) => {
+                                    entry.insert(leaf.into(), serde_json::json!(enc_of(v)));
+                                }
+                                None => {
+                                    entry.insert(leaf.into(), serde_json::Value::Null);
+                                }
                             }
                         }
                     }
@@ -453,6 +530,66 @@ mod tests {
         let out = apply_merged(&theirs, &cleared, &enc);
         assert_eq!(out["folderId"], Value::Null);
         assert_eq!(out["fields"][0]["value"], Value::Null);
+    }
+
+    #[test]
+    fn field_type_edits_and_same_field_clash() {
+        let dec = |s: &str| s.strip_prefix("E.").map(str::to_owned);
+        let cipher = serde_json::json!({
+            "name": "E.n",
+            "fields": [{"name": "E.site", "value": "E.acme", "linkedId": null, "type": 0}]
+        });
+        let base = flatten(&cipher, &dec);
+        assert_eq!(base.get("field.0.type").unwrap().as_deref(), Some("text"));
+
+        // 一端改 type、另一端改同欄 value → 同欄衝突（type 改動連帶整欄重加密）
+        let mut ours = base.clone();
+        ours.insert("field.0.type".into(), Some("hidden".into()));
+        let mut theirs = base.clone();
+        theirs.insert("field.0.value".into(), Some("other".into()));
+        match three_way(&base, &ours, &theirs) {
+            Merge::Conflict { fields } => assert_eq!(fields, vec!["field.0.type".to_string()]),
+            other => panic!("expect same-field Conflict, got {other:?}"),
+        }
+        // 另一端改**別欄**的 type（同槽位但不同 index）→ 不相交可合併
+        let mut theirs2 = base.clone();
+        theirs2.insert("field.1.type".into(), Some("boolean".into()));
+        let mut ours2 = base.clone();
+        ours2.insert("field.0.type".into(), Some("hidden".into()));
+        assert!(matches!(three_way(&base, &ours2, &theirs2), Merge::Push(_)));
+        // 雙方把 type 改成同值 → 涵蓋不衝突
+        let mut theirs3 = base.clone();
+        theirs3.insert("field.0.type".into(), Some("hidden".into()));
+        match three_way(&base, &ours, &theirs3) {
+            Merge::Noop => {}
+            other => panic!("expect Noop, got {other:?}"),
+        }
+
+        // apply_merged 寫回線格式整數（明文詞不落盤）
+        let mut m = FieldMap::new();
+        m.insert("field.0.type".into(), Some("boolean".into()));
+        let out = apply_merged(&cipher, &m, &dec_and_reenc);
+        assert_eq!(out["fields"][0]["type"], json!(2));
+        assert_eq!(out["fields"][0]["name"], "E.site", "type 改動不碰信封欄");
+        // 未知詞收斂 text（0），不產生官方沒有的 type 值
+        let mut bad = FieldMap::new();
+        bad.insert("field.0.type".into(), Some("nope".into()));
+        let out = apply_merged(&cipher, &bad, &dec_and_reenc);
+        assert_eq!(out["fields"][0]["type"], json!(0));
+    }
+
+    fn dec_and_reenc(s: &str) -> String {
+        format!("E.{s}")
+    }
+
+    #[test]
+    fn type_word_vocabulary_roundtrips_wire() {
+        assert_eq!(type_word(0), Some("text"));
+        assert_eq!(type_word(1), Some("hidden"));
+        assert_eq!(type_word(2), Some("boolean"));
+        assert_eq!(type_word(3), None);
+        assert_eq!(wire_of_type_word("hidden"), Some(1));
+        assert_eq!(wire_of_type_word("weird"), None);
     }
 
     #[test]
