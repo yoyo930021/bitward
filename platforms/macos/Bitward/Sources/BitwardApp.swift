@@ -87,6 +87,36 @@ struct BitwardApp: App {
         .commands {
             BitwardMenu()
         }
+        // 狀態列入口（批次 5B）：LSUIElement 後主選單只在 App 前景時可見，
+        // 使用者實測「找不到地方」——狀態列常駐圖示才是穩定入口。盾牌 glyph
+        // 用 SF Symbol lock.shield（icon 素材只有彩色 icns，模板單色版未入庫；
+        // systemName 天然走模板渲染，深淺選單列都對）。
+        MenuBarExtra {
+            MenuBarContent()
+        } label: {
+            Image(systemName: "lock.shield")
+        }
+        .menuBarExtraStyle(.menu)
+    }
+}
+
+/// 狀態列選單：開啟密碼庫／批准中心／狀態（「啟用」常駐開關在該頁）／離開。
+private struct MenuBarContent: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("開啟密碼庫") { VaultGUI.open() }
+        Divider()
+        Button("批准中心⋯") {
+            openWindow(id: "approvals")
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        Button("狀態⋯") {
+            openWindow(id: "status")
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        Divider()
+        Button("離開") { NSApp.terminate(nil) }
     }
 }
 
