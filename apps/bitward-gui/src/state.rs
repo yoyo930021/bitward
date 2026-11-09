@@ -1338,7 +1338,9 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                     fetch_list(core);
                 }
                 Follow::Detail(id) => {
-                    core.send(Cmd::OpenDetail(id));
+                    // 寫入成功＝編輯狀態正式落幕：導航跳過髒閘一次
+                    // （表單訊號尚未重置，走普通 OpenDetail 會被自己攔下）。
+                    core.send(Cmd::NavForced(Box::new(Cmd::OpenDetail(id))));
                     fetch_list(core);
                 }
             }
@@ -1798,6 +1800,7 @@ fn nav_interrupts(cmd: &Cmd) -> bool {
             | Cmd::OpenDetail(_)
             | Cmd::OpenCreate
             | Cmd::OpenEdit(_)
+            | Cmd::OpenApprovals
             | Cmd::ChooseFolder(_)
             | Cmd::ToggleTrash
     )
