@@ -107,4 +107,35 @@ ERR=$(grep -c 'ERROR' "$DATA/daemon.log" || true)
 [[ "$ERR" == "0" ]] || fail "VW 停啟窗口出現 ERROR 洪流（$ERR 行）"
 pass "退避紀律：deferred warn ≤1 輪、無死信、無 ERROR"
 
+# —— 4c access token 自動續期：偽造過期 token（account.json 灌垃圾後重啟
+#    daemon 注入記憶體態）→ 第一次同步走 401 收口自癒 → 新對落盤。
+#    舊 workaround「手動 refresh grant 再重啟」自此退役：重啟只是注入手段，
+#    收斂本身無需人工。
+kill "$PID" 2>/dev/null || true
+wait "$PID" 2>/dev/null || true
+python3 - "$DATA/account.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+acc = json.load(open(p))
+acc["access_token"] = "expired.garbage.token"
+json.dump(acc, open(p, "w"))
+PY
+OLD_REFRESH=$(jq -r .refresh_token "$DATA/account.json")
+BITWARD_DATA_DIR=$PWD/$DATA ./target/debug/bitwarderd --data-dir "$DATA" --sock "$DATA/s" >>"$DATA/daemon.log" 2>&1 &
+PID=$!
+rm -f "$DATA/cli_session"
+for _ in $(seq 1 20); do [[ -S "$DATA/s" ]] && break; sleep 0.2; done
+D unlock >/dev/null
+D sync >/dev/null || fail "過期 token 重啟後 sync 未自癒（401 收口失效？）"
+NEW_ACCESS=$(jq -r .access_token "$DATA/account.json")
+[[ "$NEW_ACCESS" != "expired.garbage.token" ]] || fail "自動續期未落盤 account.json"
+[[ "$(tr -cd '.' <<<"$NEW_ACCESS" | wc -c | tr -d ' ')" == 2 ]] || fail "新 token 非 JWT 三節形態"
+NEW_REFRESH=$(jq -r .refresh_token "$DATA/account.json")
+[[ -n "$NEW_REFRESH" && "$NEW_REFRESH" != "$OLD_REFRESH" ]] || fail "refresh 輪換值未持久化（VW 單次使用）"
+[[ "$(D status --json | jq -r .needs_reauth)" == "false" ]] || fail "續期後 needs_reauth 未回正"
+D reveal "$GID" >/dev/null || fail "續期後讀路徑未恢復"
+ERR2=$(grep -c 'ERROR' "$DATA/daemon.log" || true)
+[[ "$ERR2" == "$ERR" ]] || fail "續期窗口新增 ERROR 行"
+pass "4c 過期 token 自動續期：401 收口自癒、新對落盤、零人工"
+
 echo "AUTODRAIN E2E: ALL PASS"
