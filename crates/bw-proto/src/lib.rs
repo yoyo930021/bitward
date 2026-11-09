@@ -334,6 +334,16 @@ pub enum VaultCall {
     Purge {
         id: ItemId,
     },
+    /// 置尾（同上紀律）：**原子批次匯入**。語意＝本地佇列全收或全拒
+    /// （單交易寫鏡像＋outbox，任何一筆驗證失敗整批回滾），drain 逐筆推
+    /// VW（VW 無批次端點，推送失敗走既有 outbox 重試/衝突佇列，
+    /// 非分散式事務）。上限 500 筆防呆。
+    /// `format`：官方 `bw import` 的格式參數佔位；本批 true/false 語意相同
+    /// （明文集直入建立路徑，無第三方格式直譯），GUI 不需分支。
+    Import {
+        items: Vec<ImportItem>,
+        format: bool,
+    },
 }
 
 /// WebAuthn passkey 操作（macOS autofill 契約 §1）：金鑰與業務全在 daemon，
@@ -468,18 +478,47 @@ pub enum OverlayOpWire {
     Touch,
 }
 
-/// 自訂欄位（官方 `login.fields[]`：type 0=text、1=hidden）。
-/// boolean（type 2）本批不做：官方以 value "true"/"false" 承載，
-/// 需 UI 開關語意，留批次 2（GUI 功能包）一併處理。
+/// 自訂欄型別（官方 `login.fields[].type`：0=text、1=hidden、2=boolean）。
+/// boolean 與官方 jslib 同形：值存 "true"/"false" 字串（信封承載）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CipherFieldKind {
+    #[default]
+    Text,
+    Hidden,
+    Boolean,
+}
+
+impl CipherFieldKind {
+    /// 線格式 type 整數（VW/官方雲共同形態）。
+    pub fn wire(self) -> u8 {
+        match self {
+            CipherFieldKind::Text => 0,
+            CipherFieldKind::Hidden => 1,
+            CipherFieldKind::Boolean => 2,
+        }
+    }
+    /// 鏡像 type 整數 → 型別；未知值寬容歸 Text（raw 鏡像才是真相源）。
+    #[must_use]
+    pub fn from_wire(v: i64) -> Self {
+        match v {
+            1 => CipherFieldKind::Hidden,
+            2 => CipherFieldKind::Boolean,
+            _ => CipherFieldKind::Text,
+        }
+    }
+}
+
+/// 自訂欄位（官方 `login.fields[]` 的本地形態）。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CipherField {
     pub name: String,
     /// None ＝ 空值（官方允許 fields[].value 為 null）
     #[serde(default)]
     pub value: Option<String>,
-    /// true ＝ hidden 欄：線格式 type 1；Masked 視窗不帶值（A3 結構保證）
+    /// text／hidden／boolean（批次 3：取代舊 hidden 布林旗標）
     #[serde(default)]
-    pub hidden: bool,
+    pub kind: CipherFieldKind,
 }
 
 /// CLI 邊界的明文草稿；加密只發生在 daemon 的 `with_keys` 閉包。
@@ -502,16 +541,47 @@ pub struct CipherDraft {
     pub fields: Vec<CipherField>,
 }
 
-/// 欄位編輯。path 文法三處共用（bw-vault flatten、bw-sync build_put_body、daemon）：
+/// 批次匯入的一筆（`VaultCall::Import` 載體）。draft 是**明文欄位結構**：
+/// 與 `AuthCall::Login` 的 password 同級紀律——明文只走 UDS/TLS 本機線
+/// （A11：不落 argv），加密發生在 daemon `with_keys` 閉包。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ImportItem {
+    #[serde(default)]
+    pub draft: CipherDraft,
+    /// 本地 overlay 標籤（§2.4：協定無 tags 欄位，匯入時直落 overlay 表）
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// 欄位編輯。`Set` 的 path 文法三處共用（bw-vault flatten、bw-sync build_put_body、daemon）：
 /// `name`、`notes`、`username`、`password`、`totp`、`uri.<n>`、`favorite`、
 /// `folderId`（明文 UUID 字串；None＝移出資料夾）、
-/// `field.<n>.name`／`field.<n>.value`（`<n>` 為 0 起 `fields[]` 索引；
-/// 增刪欄位是整陣列替換，不在本路徑，同 `uri.<n>` 紀律）。
+/// `field.<n>.name`／`field.<n>.value`（`<n>` 為 0 起 `fields[]` 索引）、
+/// `field.<n>.type`（值域 `text|hidden|boolean`，見 `SetType`）。
+/// 增刪欄位走 `AppendField`／`RemoveField`（陣列形態變更，非 leaf 值編輯）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct FieldEdit {
-    pub path: String,
-    /// None ＝清空
-    pub value: Option<String>,
+pub enum FieldEdit {
+    /// leaf 值編輯（path 文法見模組文件）
+    Set {
+        path: String,
+        /// None ＝清空
+        value: Option<String>,
+    },
+    /// 改自訂欄型別（按 index 定位）。官方語意：type 改動连带整欄重加密，
+    /// 所以欄位級合併把「同欄 type 改 × 同欄 name/value 改」判**同欄衝突**
+    /// 進收件匣（principle：別靜默覆蓋），bw-vault::three_way 實現判定。
+    SetType {
+        index: u32,
+        kind: CipherFieldKind,
+    },
+    /// 附加自訂欄（落 `fields[]` 尾；name 必填）。
+    AppendField {
+        field: CipherField,
+    },
+    /// 移除自訂欄（按 index；越界回錯）。
+    RemoveField {
+        index: u32,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1132,6 +1202,83 @@ mod tests {
     }
 
     #[test]
+    fn field_edit_enum_and_import_roundtrip() {
+        let edits = vec![
+            FieldEdit::Set {
+                path: "name".into(),
+                value: Some("n".into()),
+            },
+            FieldEdit::Set {
+                path: "field.0.value".into(),
+                value: None,
+            },
+            FieldEdit::SetType {
+                index: 1,
+                kind: CipherFieldKind::Boolean,
+            },
+            FieldEdit::AppendField {
+                field: CipherField {
+                    name: "flag".into(),
+                    value: Some("true".into()),
+                    kind: CipherFieldKind::Boolean,
+                },
+            },
+            FieldEdit::RemoveField { index: 2 },
+        ];
+        let msg = ClientMsg::Invoke {
+            rid: 15,
+            call: Call::Vault(VaultCall::Patch {
+                id: ItemId::new_v4(),
+                edits: edits.clone(),
+            }),
+        };
+        let j = serde_json::to_vec(&msg).unwrap();
+        let back: ClientMsg = serde_json::from_slice(&j).unwrap();
+        match back {
+            ClientMsg::Invoke {
+                call: Call::Vault(VaultCall::Patch { edits, .. }),
+                ..
+            } => {
+                assert!(matches!(edits[2], FieldEdit::SetType { index: 1, .. }));
+                assert!(matches!(edits[4], FieldEdit::RemoveField { index: 2 }));
+            }
+            other => panic!("expect Patch, got {other:?}"),
+        }
+        let b = postcard::to_allocvec(&msg).unwrap();
+        assert_eq!(postcard::from_bytes::<ClientMsg>(&b).unwrap().rid(), 15);
+
+        let imp = VaultCall::Import {
+            items: vec![ImportItem {
+                draft: CipherDraft {
+                    kind: ItemKind::SecureNote,
+                    name: " imported".into(),
+                    notes: Some("n".into()),
+                    ..Default::default()
+                },
+                tags: vec!["bulk".into()],
+            }],
+            format: false,
+        };
+        let msg = ClientMsg::Invoke {
+            rid: 16,
+            call: Call::Vault(imp.clone()),
+        };
+        // 置尾紀律：Import 索引必須在 Purge（三件套批次末位）之後
+        let idx = |c: &VaultCall| postcard::to_allocvec(c).unwrap()[0];
+        assert!(idx(&imp) > idx(&VaultCall::Purge { id: ItemId::new_v4() }));
+        let j = serde_json::to_vec(&msg).unwrap();
+        assert_eq!(serde_json::from_slice::<ClientMsg>(&j).unwrap().rid(), 16);
+        let b = postcard::to_allocvec(&msg).unwrap();
+        assert_eq!(postcard::from_bytes::<ClientMsg>(&b).unwrap().rid(), 16);
+
+        // kind 線格式映射（官方 type 整數）
+        assert_eq!(CipherFieldKind::Text.wire(), 0);
+        assert_eq!(CipherFieldKind::Hidden.wire(), 1);
+        assert_eq!(CipherFieldKind::Boolean.wire(), 2);
+        assert_eq!(CipherFieldKind::from_wire(7), CipherFieldKind::Text);
+    }
+
+    #[test]
     fn folder_calls_and_draft_roundtrip() {
         let folder = Uuid::new_v4();
         for call in [
@@ -1172,12 +1319,12 @@ mod tests {
                 CipherField {
                     name: "PIN".into(),
                     value: Some("1234".into()),
-                    hidden: true,
+                    kind: CipherFieldKind::Hidden,
                 },
                 CipherField {
                     name: "會員".into(),
                     value: None,
-                    hidden: false,
+                    kind: CipherFieldKind::Text,
                 },
             ],
             ..Default::default()
@@ -1208,12 +1355,12 @@ mod tests {
                 vec![CipherField {
                     name: "PIN".into(),
                     value: None,
-                    hidden: true,
+                    kind: CipherFieldKind::Hidden,
                 }],
             );
         let j = serde_json::to_string(&v).unwrap();
         assert!(j.contains("\"notes\":\"筆記\""));
-        assert!(j.contains("\"hidden\":true"));
+        assert!(j.contains("\"kind\":\"hidden\""));
         assert!(!j.contains("\"password\":"));
         assert!(!j.contains("1234"));
         let back: ItemView = serde_json::from_str(&j).unwrap();

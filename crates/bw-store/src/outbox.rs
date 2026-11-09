@@ -119,6 +119,42 @@ impl Store {
         Ok(MutationId(id))
     }
 
+    /// 原子批次入列（`VaultCall::Import` 儲存端）：**單交易**寫全部鏡像＋
+    /// outbox 列，任何一筆失敗整批回滾（全收或全拒，本地佇列語意）。
+    /// drain 端逐筆推 VW（無批次端點），推送失敗走既有重試/衝突佇列。
+    /// 回傳各列 MutationId（順序同輸入）。
+    pub fn enqueue_batch(&self, drafts: &[MutationDraft<'_>]) -> StoreResult<Vec<MutationId>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.unchecked_transaction()?;
+        let mut ids = Vec::with_capacity(drafts.len());
+        let now = unix_ms() as i64;
+        for d in drafts {
+            if let Some(mirror) = d.mirror {
+                if mirror.get("id").and_then(Value::as_str).is_none() {
+                    return Err(StoreError::Invalid("mirror cipher missing `id`".into()));
+                }
+                write_cipher(&tx, d.item, mirror)?;
+            }
+            tx.execute(
+                "INSERT INTO outbox(item, base_rev, payload, state, origin, created_at)
+                 VALUES(?1,?2,?3,'queued',?4,?5)",
+                rusqlite::params![
+                    d.item.to_string(),
+                    d.base_rev,
+                    serde_json::to_vec(&d.payload)?,
+                    d.origin,
+                    now,
+                ],
+            )?;
+            ids.push(MutationId(tx.last_insert_rowid() as u64));
+        }
+        for d in drafts {
+            crate::ciphers::refresh_pending(&tx, Some(d.item))?;
+        }
+        tx.commit()?;
+        Ok(ids)
+    }
+
     pub fn take_due(&self, n: u32) -> StoreResult<Vec<Mutation>> {
         self.take_due_at(unix_ms(), n)
     }

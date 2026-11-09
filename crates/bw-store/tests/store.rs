@@ -1108,3 +1108,62 @@ fn trash_tristate_and_purge() {
     // 冪等：再 purge 不存在列回 0、不报错
     assert_eq!(store.purge(Uuid::parse_str(&gone).unwrap()).unwrap(), 0);
 }
+
+#[test]
+fn enqueue_batch_is_all_or_nothing() {
+    let (_d, path) = tmp_vault("batch");
+    let store = Store::open(&path).unwrap();
+    let a = Uuid::new_v4();
+    let b = Uuid::new_v4();
+    let ma = json!({"id": a.to_string(), "type": 1, "name": "2.x|y|z"});
+    let mb = json!({"id": b.to_string(), "type": 1, "name": "2.x|y|z"});
+    let ids = store
+        .enqueue_batch(&[
+            MutationDraft {
+                item: a,
+                payload: json!({"op": "create", "cipher": {"type": 1, "name": "2.x|y|z"}}),
+                base_rev: None,
+                origin: None,
+                mirror: Some(&ma),
+            },
+            MutationDraft {
+                item: b,
+                payload: json!({"op": "create", "cipher": {"type": 1, "name": "2.x|y|z"}}),
+                base_rev: None,
+                origin: None,
+                mirror: Some(&mb),
+            },
+        ])
+        .unwrap();
+    assert_eq!(ids.len(), 2);
+    assert!(store.item(a).unwrap().is_some() && store.item(b).unwrap().is_some());
+    assert_eq!(store.depth().unwrap().queued, 2);
+
+    // 第二筆缺 id → 整批回滾：鏡像與 outbox 都不留半套
+    let c = Uuid::new_v4();
+    let d = Uuid::new_v4();
+    let mc = json!({"id": c.to_string(), "type": 1, "name": "2.x|y|z"});
+    let md = json!({"type": 1});
+    let err = store
+        .enqueue_batch(&[
+            MutationDraft {
+                item: c,
+                payload: json!({"op": "create"}),
+                base_rev: None,
+                origin: None,
+                mirror: Some(&mc),
+            },
+            MutationDraft {
+                item: d,
+                payload: json!({"op": "create"}),
+                base_rev: None,
+                origin: None,
+                mirror: Some(&md),
+            },
+        ])
+        .expect_err("缺 id 應整批失敗");
+    assert!(matches!(err, StoreError::Invalid(_)));
+    assert!(store.item(c).unwrap().is_none(), "回滾後 c 不得留鏡像");
+    assert!(store.item(d).unwrap().is_none());
+    assert_eq!(store.depth().unwrap().queued, 2, "回滾不得增列");
+}
