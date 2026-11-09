@@ -74,12 +74,9 @@ struct BitwardApp: App {
     @NSApplicationDelegateAdaptor(PushAppDelegate.self) private var pushDelegate
 
     var body: some Scene {
-        // 殼轉背景（LSUIElement）：批准中心與狀態頁不再自動開窗，選單喚起；
-        // 首窗職責交給轉發的 BitwardGUI.app（見 VaultGUI）。
-        Window("批准中心", id: "approvals") {
-            ApprovalCenterView()
-        }
-        .defaultLaunchBehavior(.suppressed)
+        // 殼轉背景（LSUIElement）：批准中心 UI 已併入 BitwardGUI（批次 6），
+        // 殼只剩狀態頁（啟用開關）＋狀態列入口；批准輪詢＋identity store
+        // 同步是 provider 基礎設施，留在 App 層單例（與視窗無關）。
         Window("狀態", id: "status") {
             StatusView()
         }
@@ -100,17 +97,14 @@ struct BitwardApp: App {
     }
 }
 
-/// 狀態列選單：開啟密碼庫／批准中心／狀態（「啟用」常駐開關在該頁）／離開。
+/// 狀態列選單：開啟密碼庫／狀態（「啟用」常駐開關在該頁）／離開。
+/// 批准中心⋯已隨批次 6 移入 BitwardGUI 側欄「待批准」。
 private struct MenuBarContent: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Button("開啟密碼庫") { VaultGUI.open() }
         Divider()
-        Button("批准中心⋯") {
-            openWindow(id: "approvals")
-            NSApp.activate(ignoringOtherApps: true)
-        }
         Button("狀態⋯") {
             openWindow(id: "status")
             NSApp.activate(ignoringOtherApps: true)
@@ -125,10 +119,6 @@ private struct BitwardMenu: Commands {
 
     var body: some Commands {
         CommandGroup(after: .appInfo) {
-            Button("批准中心⋯") {
-                openWindow(id: "approvals")
-                NSApp.activate()
-            }
             Button("狀態⋯") {
                 openWindow(id: "status")
                 NSApp.activate()
@@ -192,39 +182,6 @@ extension PushAppDelegate: UNUserNotificationCenterDelegate {
     }
 }
 
-/// 批准中心：遠端 device 的受控請求（requires_approval grant）在 daemon 排隊，
-/// 這裡輪詢 ListPending 並由人批准或拒絕（Deny 立即釋放請求端）。
-private struct ApprovalCenterView: View {
-    @ObservedObject private var model = ApprovalModel.shared
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if model.pending.isEmpty {
-                Text(model.daemonReachable ? "目前沒有待批准的請求" : "連不到 daemon（bitwarderd 沒跑？）")
-                    .foregroundStyle(.secondary)
-                    .padding(.vertical, 24)
-            } else {
-                List {
-                    ForEach(model.pending) { item in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(item.summary).font(.system(.body, design: .monospaced))
-                                Text(item.id).font(.caption2).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Button("批准") { model.approve(id: item.id) }
-                                .disabled(model.busyIds.contains(item.id))
-                            Button("拒絕") { model.deny(id: item.id) }
-                                .disabled(model.busyIds.contains(item.id))
-                        }
-                    }
-                }
-            }
-        }
-        .padding()
-        .frame(minWidth: 560, minHeight: 340)
-    }
-}
 
 @MainActor
 private final class ApprovalModel: ObservableObject {
