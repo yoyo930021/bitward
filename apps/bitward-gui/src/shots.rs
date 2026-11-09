@@ -633,47 +633,56 @@ pub fn script(dir: PathBuf, core: AppCore) {
         let n = c.notice.get().unwrap_or_default();
         assert!(n.contains("已排隊上傳"), "上傳回執應為排隊語意：{n}");
     });
+    // 附件列要等背景推送收斂（drain tick 5s＋推送＋VaultChanged 重取），
+    // 用輪詢取代死時間：出現即拍，40 秒未現即斷言失敗。
+    poll_attachment_row(dir, core, 58000);
+}
+
+/// 輪詢詳情附件列收斂；出現後串接下載→刪除確認→收尾。
+fn poll_attachment_row(dir: PathBuf, core: AppCore, ms: u64) {
     let c = core.clone();
-    let d = dir.clone();
-    at(61000, move || {
-        let has = c
-            .detail
-            .get()
-            .is_some_and(|dv| !dv.attachments.is_empty());
-        assert!(has, "背景推送收斂後附件列應已出現（事件幫浦重取）");
-        capture(&d, "shot-35-attachment-row.png");
+    at(ms, move || {
+        let Some(dv) = c.detail.get() else {
+            return;
+        };
+        let Some(att) = dv.attachments.first().cloned() else {
+            if ms < 98000 {
+                poll_attachment_row(dir, core, ms + 2000);
+            } else {
+                panic!("背景推送收斂後附件列仍未出現（VaultChanged 事件重取失效？）");
+            }
+            return;
+        };
+        let id = dv.meta.id;
+        let att_dl = att.clone();
+        // 發現與截圖錯開一拍：讓 dynamic 分節完成重繪再拍。
+        let d1 = dir.clone();
+        at(ms + 600, move || capture(&d1, "shot-35-attachment-row.png"));
+        let c2 = core.clone();
+        at(ms + 800, move || {
+            c2.send(Cmd::DownloadAttachment {
+                item_id: id,
+                attachment_id: att_dl.id.clone(),
+                file_name: att_dl.file_name.clone(),
+            })
+        });
+        let d2 = dir.clone();
+        at(ms + 2000, move || capture(&d2, "shot-36-attachment-downloaded.png"));
+        let c3 = core.clone();
+        let att3 = att;
+        at(ms + 2400, move || {
+            c3.send(Cmd::AskDeleteAttachment {
+                item_id: id,
+                attachment_id: att3.id.clone(),
+                file_name: att3.file_name.clone(),
+            })
+        });
+        let d3 = dir.clone();
+        at(ms + 3000, move || capture(&d3, "shot-37-attachment-delete-confirm.png"));
+        let c4 = core.clone();
+        at(ms + 3400, move || c4.send(Cmd::ConfirmYes));
+        at(ms + 4900, quit);
     });
-    let c = core.clone();
-    at(61400, move || {
-        if let Some(dv) = c.detail.get()
-            && let Some(a) = dv.attachments.first()
-        {
-            c.send(Cmd::DownloadAttachment {
-                item_id: dv.meta.id,
-                attachment_id: a.id.clone(),
-                file_name: a.file_name.clone(),
-            });
-        }
-    });
-    let d = dir.clone();
-    at(62600, move || capture(&d, "shot-36-attachment-downloaded.png"));
-    let c = core.clone();
-    at(63000, move || {
-        if let Some(dv) = c.detail.get()
-            && let Some(a) = dv.attachments.first()
-        {
-            c.send(Cmd::AskDeleteAttachment {
-                item_id: dv.meta.id,
-                attachment_id: a.id.clone(),
-                file_name: a.file_name.clone(),
-            });
-        }
-    });
-    let d = dir.clone();
-    at(63600, move || capture(&d, "shot-37-attachment-delete-confirm.png"));
-    let c = core.clone();
-    at(64000, move || c.send(Cmd::ConfirmYes));
-    at(65500, quit);
 }
 
 /// 由資料夾鏡像找名字的 id（找不到回空字串）。

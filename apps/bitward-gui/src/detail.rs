@@ -38,7 +38,10 @@ pub fn pane(core: AppCore) -> View {
                 .child(section("驗證碼", totp_section(core.clone(), copied)))
                 .child(section("備註", notes_section(core.clone(), copied)))
                 .child(section("自訂欄位", custom_fields_section(core.clone(), copied)))
-                .child(section("附件", attachments_section(core.clone())))
+                .child(section_dyn("附件", {
+                    let ac = core.clone();
+                    move || attachments_rows(ac.clone())
+                }))
                 .child(section("資訊", info_section(core.clone(), copied))),
         ))
 }
@@ -107,6 +110,13 @@ fn section(title: &'static str, rows: Vec<View>) -> View {
         .gap_2()
         .child(ui::section_title(title))
         .child(body)
+}
+
+/// 動態分節：列内容由閉包現算——`detail` 訊號變動即重建。事件幫浦的
+/// `DetailRefreshed` 是 Some→Some 更新（不翻 `when`），附件列這種
+/// 「收斂後才出現」的資料必須走這條，不會卡在首次快照。
+fn section_dyn(title: &'static str, build: impl Fn() -> Vec<View> + 'static) -> AnyElement {
+    dynamic(move || section(title, build()))
 }
 
 /// 頂部 identity：大 monogram 退役，改型別磚＋大名稱＋網址連結＋動作群。
@@ -372,7 +382,7 @@ fn custom_fields_section(core: AppCore, copied: Signal<Option<&'static str>>) ->
 /// 節尾內聯「附加檔案」編輯器（路徑框＋檔名/大小預覽＋上傳確認）。
 /// 投影來源：Get(Masked) 的 `attachments`（空時鍵缺席）；上傳後附件列要等
 /// 背景推送收斂才出現（事件幫浦自動重取詳情），UI 不假裝立即完成。
-fn attachments_section(core: AppCore) -> Vec<View> {
+fn attachments_rows(core: AppCore) -> Vec<View> {
     let Some(d) = core.detail.get() else {
         return Vec::new();
     };
