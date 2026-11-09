@@ -1,5 +1,8 @@
 /target
 /dist
+/build
+# macOS icns＝管線生成物（scripts/gen-icons.sh）；Android res 產物相反，入 git
+platforms/macos/Bitward/Resources/AppIcon.icns
 dev/e2e/data*/
 dev/e2e/dbg*/
 .DS_Store
