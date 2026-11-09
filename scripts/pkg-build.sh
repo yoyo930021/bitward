@@ -227,10 +227,12 @@ elif ! sudo -n installer -pkg "$PKG" -target /; then
 fi
 
 echo "==> 斷言"
-# 殭屍檔清理（dev-install 形態殘留，見上註）：staging 沒有的 profile 即屬殭屍，
-# 刪除後外層 seal 需重封（--deep --force 先內後外一次到位，身分與 runtime 同管線）。
-find /Applications/Bitward.app -name embedded.provisionprofile \
-  ! -path "*/Bitward.app/Contents/embedded.provisionprofile" -delete 2>/dev/null || true
+# 殭屍檔清理（dev-install 形態殘留，見上註）：判定＝staging 沒有同路徑檔即屬殭屍。
+# 舊實作寫死排除外層路徑，把 BW_PROFILE_APPEX 合法的 appex profile 也誤刪
+# （appex CodeResources 缺檔→deep seal 紅，2026-11-09 實測）。
+find /Applications/Bitward.app -name embedded.provisionprofile 2>/dev/null | while read -r pf; do
+  [ -f "$STAGE/root/Bitward.app/${pf#/Applications/Bitward.app/}" ] || rm -f "$pf"
+done
 if [ ! -f /Applications/Bitward.app/Contents/embedded.provisionprofile ] \
    && [ -f "$STAGE/root/Bitward.app/Contents/embedded.provisionprofile" ]; then
   # installer 拒覆蓋改過的 bundle（殭屍在場時裝半套）→ admin 群組直接換裝整包
