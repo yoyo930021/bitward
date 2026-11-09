@@ -447,3 +447,15 @@ DER/hash 直簽修復生效）。本輪新增的實測坑：
   狀態頁（轉發 sock 行在位）；pluginkit `io.bitward.dev.provider` 註冊在、readpath
   全綠；spctl 直裝 bundle＝rejected（source=Unnotarized Developer ID，屬預期記錄）。
   `--experiment` 段改走「選單→狀態⋯」（TabView radio 已拆）。
+
+## 13. 狀態列入口批次（2026-11-09，批次 5B）
+- **形態**：`MenuBarExtra`（macOS 13+ API，本專案 target 14）＋SF Symbol `lock.shield`
+  模板圖示；選單＝開啟密碼庫／批准中心⋯／狀態⋯（「啟用」常駐開關在該頁）／離開。
+  圖示走 systemName 而非自繪模板圖：icon 素材目前只有彩色 icns，單色模板版未入庫。
+- **背景 session 實錄**：launchd Background session 裡 `open` 啟動的 App **不會**把
+  MenuBarExtra 掛進實體選單列（最小 MenuBarExtra 探測 app 同樣不可見，且
+  `AXExtrasMenuBar` 查無）——狀態列實拍只能在裝機後的使用者 Aqua session 取。
+  装機（direct 全管線 BW_NOTARIZE=0）後 `open -a Bitward`：menu bar 2 出現、
+  AX 讀得四項選單、展開選單與 Dock 新 icon 同屏證據見
+  `shot-menubar-menu.png` / `shot-menubar-dock.png`。
+- **管線重跑**：同 §12 參數再走一次全綠（receipt＋深簽鏈斷言不變）。
