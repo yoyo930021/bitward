@@ -33,7 +33,7 @@ cd apps/bitward-gui
 BITWARD_GUI_SOCK=<repo>/dev/e2e/demo/s NSH_GUI_SHOTS=$PWD nsh run --target macos
 ```
 
-依指令序列跑完整驗收流並寫 `shot-1..23、26..33-*.png`（24/25 見下）後退出：列表全量（三欄骨架、
+依指令序列跑完整驗收流並寫 `shot-1..23、26..37-*.png`（24/25 見下）後退出：列表全量（三欄骨架、
 型別磚、未同步膠囊，右欄空態為「選取一個項目」佔位）→ 搜尋 "GitHub" →
 詳情遮罩 → 詳情 revealed → 新增表單模態 → 真送新增（Create+AddTag）
 → TOTP 拒絕路徑（無 seed → 錯誤橫條）→ 排序下拉 → 標籤 chips 選取 →
@@ -48,7 +48,9 @@ SecureNote 模態（帳密收合、備註大欄、Card/Identity 佔位灰）→
 自訂欄位編輯列（文字＋隱藏兩列）→ 匯入模態（貼路徑→預覽計數）→
 編輯模式欄位解鎖（text→boolean 開關拍板 shot-31、增／刪列 shot-32、
 存檔後詳情頁布爾欄開關樣 shot-33）→ 匯入執行後結果列
-（已匯入 N／跳過 M，走單交易 `VaultCall:Import`，列內含匯入產物）。
+（已匯入 N／跳過 M，走單交易 `VaultCall:Import`，列內含匯入產物）→
+附件生命週期：上傳編輯器預覽（shot-34）→ 背景推送收斂後附件列在列（shot-35，
+靠 `VaultChanged` 事件自動重取詳情）→ 下載落地結果列（shot-36）→ 刪除確認模態（shot-37）。
 
 ### 徽章無感收斂證據（`NSH_GUI_SHOTS_DRAIN`）
 
@@ -69,8 +71,11 @@ BITWARD_GUI_SOCK=<drain-daemon.sock> NSH_GUI_SHOTS=$PWD NSH_GUI_SHOTS_DRAIN=1 \
 編輯欄位增刪改型與原子匯入需要 `FieldEdit::SetType/AppendField/RemoveField`
 與 `VaultCall:Import`（daemon 批次 3，e32e1d6 起）。產生器的 `Use:GeneratePassword`
 為既有呼叫面。匯入執行走單交易 `VaultCall:Import`（全收或全拒），本地解析只做
-預覽計數與加密檔擋下。跑前把 demo daemon 重啟為新構成品並 `bitward unlock`，
-且側欄「工作資料夾」需已存在（`bitward folder create 工作資料夾`）。
+預覽計數與擋加密檔。跑前把 demo daemon 重啟為新構成品並 `bitward unlock`，
+且側欄「工作資料夾」需已存在（`bitward folder create 工作資料夾`）。VW 的
+access token 壽命約 2 小時而 daemon 現行不自動 refresh（4a 缺角，已報）：
+久放後跑 e2e 前先向 `/identity/connect/token` 走一次 `grant_type=refresh_token`
+把新 token 寫回 `account.json` 再重啟 daemon，否則推送/下載/刪除會 401。
 
 注意：流裡會真寫 demo vault（建一筆 "E2E 驗證項目"、改名、軟刪；
 詳情目標是種子項目「GitHub 測試」，找不到退回第一筆）。跑前用
@@ -82,10 +87,11 @@ BITWARD_GUI_SOCK=<drain-daemon.sock> NSH_GUI_SHOTS=$PWD NSH_GUI_SHOTS_DRAIN=1 \
 | 檔 | 職責 |
 |---|---|
 | `btp.rs` | BTP 精簡同步 client：u32 LE 長度前綴 + JSON 幀、`Hello{Enroll pair_code:null}`→`Welcome`→`Invoke`/`Reply`；鎖撤銷（A6）自動重連重 Enroll 一次；`listen` 事件監聽連線（wants 訂閱，OutboxDrained/VaultChanged 交 state 幫浦） |
-| `state.rs` | 應用狀態機：`AppCore`（訊號集）+ `Cmd` 命令佇列 + 唯一 `reduce`；UI handler 只投遞命令，worker 執行緒只回傳命令，訊號全在引擎執行緒寫入；`watch_events` 事件幫浦（斷線 1s 重連） |
+| `state.rs` | 應用狀態機：`AppCore`（訊號集）+ `Cmd` 命令佇列 + 唯一 `reduce`；UI handler 只投遞命令，worker 執行緒只回傳命令，訊號全在引擎執行緒寫入；`watch_events` 事件幫浦（斷線 1s 重連；`EventsRefresh` 連詳情一起重取） |
 | `lib.rs` | 根元件 `App`：命令幫浦（`set_interval` 50ms + `batch`）、TOTP 心跳（1s 引擎計時器）、頂部列（置中搜尋＋新增項目）、左側欄（我的密碼庫＋資料夾樹／已共享佔位／垃圾桶／同步列／匯出/匯入/改密）、錯誤橫條、Phase×Route 三欄版面與鎖態頁 |
 | `list.rs` | 置中搜尋框（Query.text 交 daemon FTS；掛頂部列）、標籤 chips 行＋排序/重新整理（中欄工具列）、排序選單、44px 列（型別磚單色字形、選中列淡藍底＋藍指示條）、未同步膠囊、垃圾桶條目顯示刪除時間、`virtual_list` |
-| `detail.rs` | 右欄詳情面板：官方表單感——大名稱＋型別磚，分節與官方同序（帳密／驗證碼／備註／自訂欄位／資訊），欄位為淺灰圓角值塊（label 12 粗灰在上、值 14 塊內、複製鈕塊右側）；垃圾桶條目動作改還原／永久刪除；密碼遮罩 →「顯示密碼」發 Get(Reveal)，明文只存 `revealed` 訊號、離開詳情即清；TOTP 按鈕發 Use:TotpCode＋倒數細进度條（≤5 秒轉 warning） |
+| `detail.rs` | 右欄詳情面板：官方表單感——大名稱＋型別磚，分節與官方同序（帳密／驗證碼／備註／自訂欄位／附件／資訊），欄位為淺灰圓角值塊（label 12 粗灰在上、值 14 塊內、複製鈕塊右側），布爾欄渲染開關樣；垃圾桶條目動作改還原／永久刪除；密碼遮罩 →「顯示密碼」發 Get(Reveal)，明文只存 `revealed` 訊號、離開詳情即清；TOTP 按鈕發 Use:TotpCode＋倒數細进度條（≤5 秒轉 warning）；附件列＝檔名＋大小＋下載／刪除，節尾內聯上傳編輯器 |
+| `attach.rs` | 附件視圖層純函數：大小格式化、32MiB 本地閘、org 上傳擋附、單飛行狀態機、上傳讀檔／下載落地路徑（`~/Downloads/bitward-attachment-*`，0600 防蓋檔）；往返在 `state.rs` 附件命令，收斂靠事件幫浦 |
 | `form.rs` | 新增/編輯模態（elevated 卡＋背板點擊取消）：型別切換（登入/加密筆記可選，Card/Identity 佔位；項目型別建立後不可更改——與官方一致，community FR 1148 十年未開）、資料夾下拉（ListFolders）、name/username/password/uri/tags/notes/自訂欄位編輯列；密碼欄附產生器面板 |
 | `passgen.rs` | 產生器純狀態機：長度夾取（8–64、預設 20）、字元集開關、policy JSON（`Use:GeneratePassword` 欄名契約）；隨機數在 daemon |
 | `import.rs` | 官方 JSON 匯入器：本地解析吃官方未加密匯出與本 App 匯出兩形態（預覽計數純函數、加密檔擋下），執行走單交易 `VaultCall:Import`（全收或全拒，上限 500） |
