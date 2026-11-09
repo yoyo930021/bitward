@@ -47,7 +47,7 @@ cd apps/bitward-gui
 BITWARD_GUI_SOCK=<repo>/dev/e2e/demo/s NSH_GUI_SHOTS=$PWD nsh run --target macos
 ```
 
-依指令序列跑完整驗收流並寫 `shot-1..23、26..40-*.png`（24/25 見下）後退出：列表全量（三欄骨架、
+依指令序列跑完整驗收流並寫 `shot-1..23、26..42-*.png`（24/25 見下）後退出：列表全量（三欄骨架、
 型別磚、未同步膠囊，右欄空態為「選取一個項目」佔位）→ 搜尋 "GitHub" →
 詳情遮罩 → 詳情 revealed → 新增表單模態 → 真送新增（Create+AddTag）
 → TOTP 拒絕路徑（無 seed → 錯誤橫條）→ 排序下拉 → 標籤 chips 選取 →
@@ -65,6 +65,9 @@ SecureNote 模態（帳密收合、備註大欄、Card/Identity 佔位灰）→
 （已匯入 N／跳過 M，走單交易 `VaultCall:Import`，列內含匯入產物）→
 附件生命週期：上傳編輯器預覽（shot-34）→ 背景推送收斂後附件列在列（shot-35，
 靠 `VaultChanged` 事件自動重取詳情）→ 下載落地結果列（shot-36）→ 刪除確認模態（shot-37）→
+批准佇列：gated device session（`agent open --grant 'reveal:secret all approve'`）造一筆
+真 pending，右欄佇列有筆＋側欄計數徽章（shot-41，並斷言 `requested_at_ms` 為近 5 分鐘
+合理 epoch）→ 單鍵批准後佇列清空、徽章消失（shot-42）→
 暗色皮自查三張（shot-38 列表／39 詳情／40 模態：`SetTheme(Dark)` 即時翻轉不重建視窗，
 收尾復原跟隨系統預設）。
 
@@ -107,7 +110,8 @@ access token 壽命約 2 小時；daemon 自 4c 起**自動續期**（401 出口
 |---|---|
 | `btp.rs` | BTP 精簡同步 client：u32 LE 長度前綴 + JSON 幀、`Hello{Enroll pair_code:null}`→`Welcome`→`Invoke`/`Reply`；鎖撤銷（A6）自動重連重 Enroll 一次；`listen` 事件監聽連線（wants 訂閱，OutboxDrained/VaultChanged 交 state 幫浦） |
 | `state.rs` | 應用狀態機：`AppCore`（訊號集）+ `Cmd` 命令佇列 + 唯一 `reduce`；UI handler 只投遞命令，worker 執行緒只回傳命令，訊號全在引擎執行緒寫入；`watch_events` 事件幫浦（斷線 1s 重連；`EventsRefresh` 連詳情一起重取） |
-| `lib.rs` | 根元件 `App`：命令幫浦（`set_interval` 50ms + `batch`）、TOTP 心跳（1s 引擎計時器）、主題 effect（`theme_mode`→`set_color_scheme`，即時翻轉不重建視窗；`theme.txt` 持久化）、頂部列（置中搜尋＋新增項目）、左側欄（我的密碼庫＋資料夾樹／已共享佔位／垃圾桶／同步列／匯出/匯入/改密／主題三態選擇）、錯誤橫條、Phase×Route 三欄版面與鎖態頁 |
+| `lib.rs` | 根元件 `App`：命令幫浦（`set_interval` 50ms + `batch`）、TOTP 心跳（1s 引擎計時器）、批准佇列節拍（1.5s 輪詢，照殼節奏）、主題 effect（`theme_mode`→`set_color_scheme`，即時翻轉不重建視窗；`theme.txt` 持久化）、頂部列（置中搜尋＋新增項目）、左側欄（我的密碼庫＋資料夾樹／已共享佔位／垃圾桶／待批准＋計數徽章／同步列／匯出/匯入/改密／主題三態選擇）、錯誤橫條、Phase×Route 三欄版面與鎖態頁 |
+| `approvals.rs` | 批准佇列右欄視角（自殼批准中心併入）：每筆＝去敏 summary＋請求時間（`requested_at_ms`，daemon 補欄即顯示）＋單鍵批准/拒絕（官方語意無二次確認，按錯以拒絕補救）；空佇列佔位卡；epoch→UTC 時分純函數 |
 | `list.rs` | 置中搜尋框（Query.text 交 daemon FTS；掛頂部列）、標籤 chips 行＋排序/重新整理（中欄工具列）、排序選單、44px 列（型別磚單色字形、選中列淡藍底＋藍指示條）、未同步膠囊、垃圾桶條目顯示刪除時間、`virtual_list` |
 | `detail.rs` | 右欄詳情面板：官方表單感——大名稱＋型別磚，分節與官方同序（帳密／驗證碼／備註／自訂欄位／附件／資訊），欄位為淺灰圓角值塊（label 12 粗灰在上、值 14 塊內、複製鈕塊右側），布爾欄渲染開關樣；垃圾桶條目動作改還原／永久刪除；密碼遮罩 →「顯示密碼」發 Get(Reveal)，明文只存 `revealed` 訊號、離開詳情即清；TOTP 按鈕發 Use:TotpCode＋倒數細进度條（≤5 秒轉 warning）；附件列＝檔名＋大小＋下載／刪除，節尾內聯上傳編輯器 |
 | `attach.rs` | 附件視圖層純函數：大小格式化、32MiB 本地閘、org 上傳擋附、單飛行狀態機、上傳讀檔／下載落地路徑（`~/Downloads/bitward-attachment-*`，0600 防蓋檔）；往返在 `state.rs` 附件命令，收斂靠事件幫浦 |

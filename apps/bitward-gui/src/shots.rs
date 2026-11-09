@@ -226,7 +226,8 @@ fn find_view(core: &AppCore, name: &str) -> Option<bw_proto::ItemView> {
 /// 資料夾樹歸屬過濾 → SecureNote 模態 → 自訂欄位編輯列 →
 /// 匯入模態（預覽/真跑/結果列）→ 編輯欄位解鎖（text→boolean、增刪列、
 /// 開關樣落地）→ 附件生命週期（上傳確認/收斂在列/下載落地/刪除確認）→
-/// 暗色皮自查三張（列表/詳情/模態，SetTheme(Dark) 即時翻轉不重建視窗），
+/// 批准佇列（gated session 造真 pending：41 佇列有筆＋時間欄斷言、42 批准後
+/// 清空＋徽章消失）→ 暗色皮自查三張（列表/詳情/模態，SetTheme(Dark) 即時翻轉不重建視窗），
 /// 各步存一張 shot-N-*.png 後結束行程。時序裕量對齊
 /// spike（Background
 /// session 無 vsync 可等，固定 sleep；本地 daemon 往返 <50ms）。
@@ -686,21 +687,114 @@ fn poll_attachment_row(dir: PathBuf, core: AppCore, ms: u64) {
         at(ms + 3000, move || capture(&d3, "shot-37-attachment-delete-confirm.png"));
         let c4 = core.clone();
         at(ms + 3400, move || c4.send(Cmd::ConfirmYes));
-        // —— 暗色皮自查三張（列表／詳情／模態）；收尾復原 system 預設 ——
+        // —— 批准佇列（批次 6）：gated device session 造一筆真 pending ——
         let c5 = core.clone();
-        at(ms + 4200, move || c5.send(Cmd::SetTheme(Appearance::Dark)));
-        let d4 = dir.clone();
-        at(ms + 4800, move || capture(&d4, "shot-38-dark-list.png"));
-        let d5 = dir.clone();
-        at(ms + 5200, move || capture(&d5, "shot-39-dark-detail.png"));
+        at(ms + 4200, move || spawn_gated_pending(&c5));
         let c6 = core.clone();
-        at(ms + 5400, move || c6.send(Cmd::OpenCreate));
-        let d6 = dir.clone();
-        at(ms + 6000, move || capture(&d6, "shot-40-dark-modal.png"));
+        at(ms + 5400, move || c6.send(Cmd::OpenApprovals));
         let c7 = core.clone();
-        at(ms + 6300, move || c7.send(Cmd::SetTheme(Appearance::System)));
-        at(ms + 6700, quit);
+        let d1 = dir.clone();
+        at(ms + 6400, move || {
+            let p = c7.pending.get();
+            assert!(!p.is_empty(), "gated session 應造出一筆真 pending");
+            // 時間欄斷言（DataModel 補 requested_at_ms 後生效）：合理 epoch。
+            let t = p[0]
+                .requested_at_ms
+                .expect("pending 應帶 requested_at_ms");
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or_default();
+            assert!(
+                t <= now && now - t < 5 * 60 * 1000,
+                "請求時間應在近 5 分鐘內：{t}（now {now}）"
+            );
+            capture(&d1, "shot-41-approvals-queue.png");
+        });
+        let c8 = core.clone();
+        at(ms + 6800, move || {
+            if let Some(row) = c8.pending.get().first() {
+                let id = row.id.clone();
+                c8.send(Cmd::ApprovePending(id));
+            }
+        });
+        let c9 = core.clone();
+        let d2 = dir.clone();
+        at(ms + 8200, move || {
+            assert!(c9.pending.get().is_empty(), "批准後佇列應清空、徽章消失");
+            capture(&d2, "shot-42-approvals-cleared.png");
+        });
+        // —— 暗色皮自查三張（列表／詳情／模態）；收尾復原 system 預設 ——
+        let c10 = core.clone();
+        at(ms + 8800, move || c10.send(Cmd::SetTheme(Appearance::Dark)));
+        let d3 = dir.clone();
+        at(ms + 9400, move || capture(&d3, "shot-38-dark-list.png"));
+        let c11 = core.clone();
+        at(ms + 9600, move || {
+            if let Some(id) = find_id(&c11, "2b 筆記範例") {
+                c11.send(Cmd::OpenDetail(id));
+            }
+        });
+        let d4 = dir.clone();
+        at(ms + 10200, move || capture(&d4, "shot-39-dark-detail.png"));
+        let c12 = core.clone();
+        at(ms + 10400, move || c12.send(Cmd::OpenCreate));
+        let d5 = dir.clone();
+        at(ms + 11000, move || capture(&d5, "shot-40-dark-modal.png"));
+        let c13 = core.clone();
+        at(ms + 11300, move || c13.send(Cmd::SetTheme(Appearance::System)));
+        at(ms + 11700, quit);
     });
+}
+
+/// 造一筆真 pending：`agent open` 簽發 gated token（reveal:secret 需人工核准），
+/// 再用該 token 發 gated reveal——呼叫在 daemon 阻塞等批准，ListPending 即有筆
+/// （agentpath.sh 同源手法，改由截圖腳本 spawn CLI）。
+fn spawn_gated_pending(core: &AppCore) {
+    let Some(item) = find_id(core, "Local OTP") else {
+        eprintln!("bitward-gui: 找不到 Local OTP，跳過批准 e2e");
+        return;
+    };
+    let sock = core.session.path().display().to_string();
+    let Ok(out) = std::process::Command::new("../../target/debug/bitward")
+        .args([
+            "--sock",
+            &sock,
+            "agent",
+            "open",
+            "--name",
+            "gui-e2e-gated",
+            "--grant",
+            "reveal:secret all approve",
+            "--ttl",
+            "180",
+            "--json",
+        ])
+        .output()
+    else {
+        eprintln!("bitward-gui: agent open 失敗");
+        return;
+    };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        eprintln!(
+            "bitward-gui: agent open 回包解析失敗：{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    };
+    let Some(tok) = v.get("token").and_then(|t| t.as_str()) else {
+        eprintln!("bitward-gui: agent open 缺 token");
+        return;
+    };
+    let dir = std::env::temp_dir().join("bitward-gui-gated");
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join("cli_session"), tok);
+    // 背景阻塞至 GUI 批准；child 由系統回收（進程結尾一起走）。
+    let _ = std::process::Command::new("../../target/debug/bitward")
+        .env("BITWARD_DATA_DIR", &dir)
+        .args(["--sock", &sock, "reveal", &item.to_string()])
+        .stdout(std::process::Stdio::null())
+        .spawn();
 }
 
 /// 由資料夾鏡像找名字的 id（找不到回空字串）。
