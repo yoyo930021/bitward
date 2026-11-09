@@ -134,40 +134,71 @@ impl Hub {
         let row = self.store.item(id).map_err(denied)?;
         let base = row.ok_or(WtpError::NotFound)?.enc_cipher;
         // 三件套路徑預驗（入列前擋，不讓越界編輯靜默蒸發）：
-        // field.<n>.<leaf> 的 n 必須落在現有 fields[] 內；folderId 值為 UUID。
+        // field.<n>.<leaf> 的 n 必須落在現有 fields[] 內；folderId 值為 UUID；
+        // SetType/RemoveField 按 index 定位同紀律，AppendField 要欄名。
+        let n_fields = base
+            .get("fields")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0);
         for e in edits {
-            if let Some(rest) = e.path.strip_prefix("field.") {
-                let (id_s, leaf) = rest.rsplit_once('.').unwrap_or((rest, ""));
-                if !matches!(leaf, "name" | "value") {
-                    return Err(denied(format!(
-                        "欄位路徑需 field.<n>.name|value，got {:?}",
-                        e.path
-                    )));
+            match e {
+                FieldEdit::SetType { index, .. } | FieldEdit::RemoveField { index } => {
+                    if (*index as usize) >= n_fields {
+                        return Err(denied(format!(
+                            "field.{index} 越界：本項目只有 {n_fields} 個自訂欄位"
+                        )));
+                    }
                 }
-                let n = id_s
-                    .parse::<usize>()
-                    .map_err(|_| denied(format!("field 索引需為數字，got {id_s:?}")))?;
-                let len = base
-                    .get("fields")
-                    .and_then(Value::as_array)
-                    .map(Vec::len)
-                    .unwrap_or(0);
-                if n >= len {
-                    return Err(denied(format!(
-                        "field.{n} 越界：本項目只有 {len} 個自訂欄位"
-                    )));
+                FieldEdit::AppendField { field } => {
+                    if field.name.is_empty() {
+                        return Err(denied("AppendField 需要欄名"));
+                    }
                 }
-            }
-            if e.path == "folderId"
-                && let Some(v) = e.value.as_deref()
-                && Uuid::parse_str(v).is_err()
-            {
-                return Err(denied(format!("folderId 需為 UUID 字串，got {v:?}")));
+                FieldEdit::Set { path, value } => {
+                    if let Some(rest) = path.strip_prefix("field.") {
+                        let (id_s, leaf) = rest.rsplit_once('.').unwrap_or((rest, ""));
+                        if !matches!(leaf, "name" | "value" | "type") {
+                            return Err(denied(format!(
+                                "欄位路徑需 field.<n>.name|value|type，got {path:?}"
+                            )));
+                        }
+                        let n = id_s
+                            .parse::<usize>()
+                            .map_err(|_| denied(format!("field 索引需為數字，got {id_s:?}")))?;
+                        if n >= n_fields {
+                            return Err(denied(format!(
+                                "field.{n} 越界：本項目只有 {n_fields} 個自訂欄位"
+                            )));
+                        }
+                        if leaf == "type"
+                            && let Some(v) = value.as_deref()
+                            && bw_vault::wire_of_type_word(v).is_none()
+                        {
+                            return Err(denied(format!(
+                                "field type 值域 text|hidden|boolean，got {v:?}"
+                            )));
+                        }
+                    }
+                    if path == "folderId"
+                        && let Some(v) = value.as_deref()
+                        && Uuid::parse_str(v).is_err()
+                    {
+                        return Err(denied(format!("folderId 需為 UUID 字串，got {v:?}")));
+                    }
+                }
             }
         }
         let map: bw_vault::FieldMap = edits
             .iter()
-            .map(|e| (e.path.clone(), e.value.clone()))
+            .filter_map(|e| match e {
+                FieldEdit::Set { path, value } => Some((path.clone(), value.clone())),
+                FieldEdit::SetType { index, kind } => Some((
+                    format!("field.{index}.type"),
+                    Some(bw_vault::type_word(kind.wire() as i64)?.to_string()),
+                )),
+                _ => None,
+            })
             .collect();
         // 寫側金鑰＝cipher 歸屬：共享項目以 org 對稱金鑰重新加密（見
         // `Hub::cipher_write_key`）；org key 未派生時拒絕，不產生壞密文。
@@ -176,16 +207,43 @@ impl Hub {
             .machine
             .with_keys(|kb| -> Option<Value> {
                 let key = self.cipher_write_key(kb, &base, &org_keys)?;
-                Some(bw_vault::apply_merged(&base, &map, &|v| {
-                    bw_crypto::encrypt_bytes_key(key, v.as_bytes()).unwrap_or_default()
-                }))
+                let enc = |v: &str| bw_crypto::encrypt_bytes_key(key, v.as_bytes()).unwrap_or_default();
+                let ours = bw_vault::apply_merged(&base, &map, &enc);
+                // 陣列形態操作（Set 型 leaf 做不到的增刪）：先刪（索引由大而小，
+                // 免位移）後附加，全部落在 ours 副本上。
+                Some(apply_field_ops(
+                    ours,
+                    &edits
+                        .iter()
+                        .filter_map(|e| match e {
+                            FieldEdit::RemoveField { index } => Some(*index as usize),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                    &edits
+                        .iter()
+                        .filter_map(|e| match e {
+                            FieldEdit::AppendField { field } => Some(field),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                    &enc,
+                ))
             })
             .map_err(denied)?
             .ok_or_else(|| WtpError::Denied {
                 grant_gap: "共享項目寫入需所屬 org 對稱金鑰（akey 未解出，請 sync/重解鎖）"
                     .to_owned(),
             })?;
-        let touched: Vec<&str> = edits.iter().map(|e| e.path.as_str()).collect();
+        let touched: Vec<String> = edits
+            .iter()
+            .map(|e| match e {
+                FieldEdit::Set { path, .. } => path.clone(),
+                FieldEdit::SetType { index, .. } => format!("field.{index}.type"),
+                FieldEdit::AppendField { .. } => "field.append".to_string(),
+                FieldEdit::RemoveField { index } => format!("field.remove.{index}"),
+            })
+            .collect();
         let payload = json!({"op": "patch", "base": base, "ours": ours, "touched": touched});
         let raw = self.store.raw(id).map_err(denied)?;
         let rev = row_rev_of(&raw);
@@ -254,7 +312,11 @@ impl Hub {
         Ok(Response::Ok)
     }
 
-    fn encrypt_draft(&self, draft: &CipherDraft, id: Option<Uuid>) -> Result<Value, WtpError> {
+    pub(crate) fn encrypt_draft(
+        &self,
+        draft: &CipherDraft,
+        id: Option<Uuid>,
+    ) -> Result<Value, WtpError> {
         self.machine
             .with_keys(|kb| {
                 let uk = kb.user_key();
@@ -279,7 +341,8 @@ impl Hub {
                     c["notes"] = json!(enc(n));
                 }
                 // 自訂欄：官方 fields[] 形態 {name(信封), value(信封|null),
-                // linkedId, type}。hidden→type 1、text→type 0；boolean（2）留批次 2。
+                // linkedId, type}。type 0=text、1=hidden、2=boolean——boolean
+                // 值存 "true"/"false" 字串（jslib 同形，批次 3 落地）。
                 if !draft.fields.is_empty() {
                     let fields: Vec<Value> = draft
                         .fields
@@ -289,7 +352,7 @@ impl Hub {
                                 "name": enc(&f.name),
                                 "value": f.value.as_deref().map(enc),
                                 "linkedId": null,
-                                "type": if f.hidden { 1 } else { 0 },
+                                "type": f.kind.wire(),
                             })
                         })
                         .collect();
@@ -875,6 +938,42 @@ fn kind_wire(k: bw_proto::ItemKind) -> u8 {
     }
 }
 
+/// fields[] 陣列操作落點（write_patch 的 ours 構造端）：removes 索引由大而小
+/// 先刪（免位移），appends 再依序附加（官方 fields[] 形態：name/value 信封、
+/// linkedId null、type 整數）。兩組皆空＝原值不動（不憑空造 fields 鍵）。
+fn apply_field_ops(
+    mut ours: Value,
+    removes: &[usize],
+    appends: &[&bw_proto::CipherField],
+    enc: &dyn Fn(&str) -> String,
+) -> Value {
+    if removes.is_empty() && appends.is_empty() {
+        return ours;
+    }
+    let obj = ours.as_object_mut().expect("cipher must be object");
+    let fields = obj
+        .entry("fields")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !fields.is_array() {
+        *fields = Value::Array(Vec::new());
+    }
+    let arr = fields.as_array_mut().expect("fields must be array");
+    let mut dels: Vec<usize> = removes.iter().copied().filter(|i| *i < arr.len()).collect();
+    dels.sort_unstable_by(|a, b| b.cmp(a));
+    for i in dels {
+        arr.remove(i);
+    }
+    for f in appends {
+        arr.push(json!({
+            "name": enc(&f.name),
+            "value": f.value.as_deref().map(enc),
+            "linkedId": null,
+            "type": f.kind.wire(),
+        }));
+    }
+    ours
+}
+
 fn cipher_id(c: &Value) -> Option<ItemId> {
     c.get("id")
         .and_then(Value::as_str)
@@ -932,6 +1031,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 mod tests {
     use super::*;
     use crate::passkey::tests::unlocked_hub;
+    use bw_proto::Query;
 
     fn enc(key: &[u8], pt: &str) -> String {
         bw_crypto::encrypt_bytes_key(key, pt.as_bytes()).unwrap()
@@ -1011,7 +1111,7 @@ mod tests {
         hub.write_patch(
             "s",
             shared,
-            &[FieldEdit {
+            &[FieldEdit::Set {
                 path: "password".into(),
                 value: Some("new-pw".into()),
             }],
@@ -1057,7 +1157,7 @@ mod tests {
         hub.write_patch(
             "s",
             shared,
-            &[FieldEdit {
+            &[FieldEdit::Set {
                 path: "notes".into(),
                 value: Some("note-me".into()),
             }],
@@ -1079,7 +1179,7 @@ mod tests {
             .write_patch(
                 "s",
                 shared,
-                &[FieldEdit {
+                &[FieldEdit::Set {
                     path: "password".into(),
                     value: Some("x".into()),
                 }],
@@ -1127,7 +1227,7 @@ mod tests {
         hub.write_patch(
             "s",
             personal,
-            &[FieldEdit {
+            &[FieldEdit::Set {
                 path: "notes".into(),
                 value: Some("p-note".into()),
             }],
@@ -1218,12 +1318,12 @@ mod tests {
                 bw_proto::CipherField {
                     name: "PIN".into(),
                     value: Some("1234".into()),
-                    hidden: true,
+                    kind: bw_proto::CipherFieldKind::Hidden,
                 },
                 bw_proto::CipherField {
                     name: "網站".into(),
                     value: None,
-                    hidden: false,
+                    kind: bw_proto::CipherFieldKind::Text,
                 },
             ],
             username: Some("note 不該有 login".into()),
@@ -1276,5 +1376,152 @@ mod tests {
         };
         let err = hub.write_create("s", &draft).await.unwrap_err();
         assert!(matches!(err, WtpError::Denied { .. }), "{err:?}");
+    }
+
+    /// 批次 3 的陣列/型別操作：SetType 原位改 type 整數（不碰值信封）、
+    /// AppendField 尾附加（官方 fields[] 形態）、RemoveField 先刪免位移；
+    /// 越界 index 與空欄名在入列前拒。
+    #[tokio::test]
+    async fn patch_field_type_append_remove_ops() {
+        let (hub, _d) = unlocked_hub("fldops").await;
+        let user = hub
+            .machine
+            .with_keys(|kb| kb.user_key().as_bytes().to_vec())
+            .unwrap();
+        let id = Uuid::new_v4();
+        hub.store
+            .put_mirror(
+                id,
+                &json!({
+                    "id": id.to_string(), "type": 1, "name": enc(&user, "n"),
+                    "fields": [
+                        {"name": enc(&user, "a"), "value": enc(&user, "1"), "linkedId": null, "type": 0},
+                        {"name": enc(&user, "b"), "value": null, "linkedId": null, "type": 1}
+                    ]
+                }),
+            )
+            .unwrap();
+        hub.write_patch(
+            "s",
+            id,
+            &[
+                FieldEdit::SetType {
+                    index: 0,
+                    kind: bw_proto::CipherFieldKind::Hidden,
+                },
+                FieldEdit::AppendField {
+                    field: bw_proto::CipherField {
+                        name: "flag".into(),
+                        value: Some("true".into()),
+                        kind: bw_proto::CipherFieldKind::Boolean,
+                    },
+                },
+                FieldEdit::RemoveField { index: 1 },
+            ],
+        )
+        .await
+        .unwrap();
+        let m = hub.store.item(id).unwrap().unwrap().enc_cipher;
+        let fields = m["fields"].as_array().unwrap();
+        assert_eq!(fields.len(), 2, "刪 b 附加 flag");
+        assert_eq!(fields[0]["type"], json!(1), "SetType 原位改 type");
+        assert_eq!(
+            dec(&user, fields[0]["value"].as_str().unwrap()).as_deref(),
+            Some("1"),
+            "type 改動不碰值信封"
+        );
+        assert_eq!(fields[1]["type"], json!(2));
+        assert_eq!(
+            dec(&user, fields[1]["name"].as_str().unwrap()).as_deref(),
+            Some("flag")
+        );
+        assert_eq!(
+            dec(&user, fields[1]["value"].as_str().unwrap()).as_deref(),
+            Some("true"),
+            "boolean 值存 true/false 字串（jslib 同形）"
+        );
+        assert!(fields[1]["linkedId"].is_null());
+        // 預驗：越界 index 與空欄名擋在入列前
+        assert!(
+            hub.write_patch("s", id, &[FieldEdit::RemoveField { index: 9 }])
+                .await
+                .is_err()
+        );
+        assert!(
+            hub.write_patch(
+                "s",
+                id,
+                &[FieldEdit::AppendField {
+                    field: bw_proto::CipherField::default()
+                }]
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    /// Import：單交易全收（鏡像＋outbox＋tags 落本地 overlay）；
+    /// 壞件整批拒（鏡像與 outbox 不留半套）；>500 拒。
+    #[tokio::test]
+    async fn import_is_atomic_batch() {
+        let (hub, _d) = unlocked_hub("imp").await;
+        let items = vec![
+            bw_proto::ImportItem {
+                draft: CipherDraft {
+                    name: "i1".into(),
+                    ..Default::default()
+                },
+                tags: vec!["t".into()],
+            },
+            bw_proto::ImportItem {
+                draft: CipherDraft {
+                    kind: bw_proto::ItemKind::SecureNote,
+                    name: "i2".into(),
+                    notes: Some("n".into()),
+                    ..Default::default()
+                },
+                tags: vec![],
+            },
+        ];
+        let resp = hub.write_import("s", &items, false).await.unwrap();
+        let Response::Json(v) = resp else {
+            panic!("Import 應回 Json，got {resp:?}")
+        };
+        assert_eq!(v["imported"], json!(2));
+        assert_eq!(hub.store.query(&Query::default()).unwrap().len(), 2);
+        assert_eq!(hub.store.depth().unwrap().queued, 2);
+        let id0 = Uuid::parse_str(v["ids"][0].as_str().unwrap()).unwrap();
+        assert_eq!(hub.store.overlay_get(id0).unwrap().tags, vec!["t".to_string()]);
+        let id1 = Uuid::parse_str(v["ids"][1].as_str().unwrap()).unwrap();
+        let note1 = hub.store.item(id1).unwrap().unwrap().enc_cipher;
+        assert_eq!(note1["type"], json!(2), "SecureNote 走官方線格式");
+        assert!(note1.get("secureNote").is_some());
+        assert!(note1.get("login").is_none(), "type 2 不帶 login");
+
+        // 壞件（非 UUID folder）→ 全批拒，不留第一筆
+        let bad = vec![
+            bw_proto::ImportItem {
+                draft: CipherDraft {
+                    name: "ok".into(),
+                    ..Default::default()
+                },
+                tags: vec![],
+            },
+            bw_proto::ImportItem {
+                draft: CipherDraft {
+                    name: "bad".into(),
+                    folder_id: Some("nope".into()),
+                    ..Default::default()
+                },
+                tags: vec![],
+            },
+        ];
+        assert!(hub.write_import("s", &bad, false).await.is_err());
+        assert_eq!(hub.store.query(&Query::default()).unwrap().len(), 2);
+        assert_eq!(hub.store.depth().unwrap().queued, 2);
+
+        // 上限 500 防呆
+        let many = vec![bw_proto::ImportItem::default(); 501];
+        assert!(hub.write_import("s", &many, false).await.is_err());
     }
 }

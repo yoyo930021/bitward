@@ -254,7 +254,7 @@ impl Hub {
             self.write_patch(
                 session,
                 m.id,
-                &[bw_proto::FieldEdit {
+                &[bw_proto::FieldEdit::Set {
                     path: "folderId".into(),
                     value: None,
                 }],
@@ -297,5 +297,79 @@ impl Hub {
             json!({"id": id.to_string(), "op": "purge"}),
         );
         Ok(Response::Json(json!({"purged": id.to_string(), "mirror_rows": n})))
+    }
+
+    /// 原子批次匯入（`VaultCall::Import`；語意見 proto 端註解）：
+    /// 驗證全部条目（上限 500、名稱非空、folder_id 為 UUID）→ 全部加密
+    /// （`with_keys` 單閉包）→ **單交易**鏡像＋outbox 全收或全拒 →
+    /// 逐筆落本地明文索引＋overlay 標籤 → 觸發一次 drain（逐筆推 VW，
+    /// 失敗走既有 outbox 重試/衝突佇列，非分散式事務）。
+    /// `format` 為官方 import 格式參數佔位，本批不分支。
+    pub async fn write_import(
+        &self,
+        session: &str,
+        items: &[bw_proto::ImportItem],
+        _format: bool,
+    ) -> Result<Response, WtpError> {
+        self.require_unlocked()?;
+        if items.is_empty() {
+            return Ok(Response::Json(json!({"imported": 0, "ids": []})));
+        }
+        if items.len() > 500 {
+            return Err(denied(format!(
+                "單批上限 500 筆（got {}），請分批",
+                items.len()
+            )));
+        }
+        for (i, it) in items.iter().enumerate() {
+            if it.draft.name.trim().is_empty() {
+                return Err(denied(format!("第 {i} 筆缺名稱")));
+            }
+            if let Some(f) = &it.draft.folder_id {
+                Uuid::parse_str(f)
+                    .map_err(|_| denied(format!("第 {i} 筆 folder_id 需為 UUID，got {f:?}")))?;
+            }
+        }
+        // 全批加密（encrypt_draft 自持 with_keys 閉包，金鑰不出閉包）
+        let ids: Vec<Uuid> = items.iter().map(|_| Uuid::new_v4()).collect();
+        let mut ciphers = Vec::with_capacity(items.len());
+        for (id, it) in ids.iter().zip(items) {
+            ciphers.push(self.encrypt_draft(&it.draft, Some(*id))?);
+        }
+        let drafts: Vec<bw_store::MutationDraft<'_>> = ciphers
+            .iter()
+            .zip(&ids)
+            .map(|(cipher, id)| {
+                let mut body = cipher.clone();
+                if let Some(o) = body.as_object_mut() {
+                    o.remove("id");
+                }
+                bw_store::MutationDraft {
+                    item: *id,
+                    payload: json!({"op": "create", "cipher": body}),
+                    base_rev: None,
+                    origin: Some(session),
+                    mirror: Some(cipher),
+                }
+            })
+            .collect();
+        let mids = self.store.enqueue_batch(&drafts).map_err(denied)?;
+        for (i, it) in items.iter().enumerate() {
+            if !it.tags.is_empty() {
+                let mut tags = self.store.overlay_get(ids[i]).unwrap_or_default().tags;
+                for t in &it.tags {
+                    if !tags.contains(t) {
+                        tags.push(t.clone());
+                    }
+                }
+                let _ = self.store.overlay(ids[i], bw_store::OverlayOp::SetTags(tags));
+            }
+        }
+        self.reindex_many(&ids)?;
+        self.trigger_drain();
+        Ok(Response::Json(json!({
+            "imported": mids.len(),
+            "ids": ids.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+        })))
     }
 }

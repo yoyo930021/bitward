@@ -10,10 +10,10 @@ use uuid::Uuid;
 
 use bw_btp::{read_server, write_client};
 use bw_proto::{
-    AdminCall, AgentCall, Auth, AuthCall, Call, CipherDraft, CipherField, ClientMsg, FieldEdit,
-    FillCall, ItemId, ItemKind, ItemView, MutationId, OverlayOpWire, PROTO_VERSION, PasskeyCall,
-    ProtoVersion, Query, Resolution, Response, ServerMsg, SessionToken, SortKey, SyncCall, UseCall,
-    VaultCall, View, WtpError,
+    AdminCall, AgentCall, Auth, AuthCall, Call, CipherDraft, CipherField, CipherFieldKind,
+    ClientMsg, FieldEdit, FillCall, ImportItem, ItemId, ItemKind, ItemView, MutationId,
+    OverlayOpWire, PROTO_VERSION, PasskeyCall, ProtoVersion, Query, Resolution, Response,
+    ServerMsg, SessionToken, SortKey, SyncCall, UseCall, VaultCall, View, WtpError,
 };
 
 #[derive(Parser)]
@@ -128,6 +128,9 @@ enum Cmd {
         /// 自訂 hidden 欄 `k=v`，可重複（回程值以 ••• 代，reveal 才出）
         #[arg(long = "field!")]
         hidden_fields: Vec<String>,
+        /// 自訂 boolean 欄 `k=v`（v ∈ true|false），可重複
+        #[arg(long = "field?")]
+        bool_fields: Vec<String>,
     },
     /// 資料夾（官方 folders 語意：名稱 user key 加密）
     Folder {
@@ -140,15 +143,39 @@ enum Cmd {
     },
     Edit {
         id: String,
-        /// `path=value`，可重複。path ∈ name|notes|username|password|totp|uri.<n>|favorite|folderId|field.<n>.name|field.<n>.value
+        /// `path=value`，可重複。path ∈ name|notes|username|password|totp|uri.<n>|favorite|folderId|field.<n>.name|field.<n>.value|field.<n>.type
         #[arg(long = "set")]
         sets: Vec<String>,
+        /// 改自訂欄型別 `<index>=<text|hidden|boolean>`，可重複。
+        /// 官方語意 type 改動連帶整欄重加密：與另一端同欄的值改動判同欄衝突。
+        #[arg(long = "set-type")]
+        set_types: Vec<String>,
+        /// 附加自訂文字欄 `k=v`，可重複
+        #[arg(long = "append-field")]
+        appends: Vec<String>,
+        /// 附加 hidden 欄 `k=v`，可重複
+        #[arg(long = "append-field!")]
+        appends_hidden: Vec<String>,
+        /// 附加 boolean 欄 `k=true|false`，可重複
+        #[arg(long = "append-field?")]
+        appends_bool: Vec<String>,
+        /// 移除自訂欄（0 起 index），可重複
+        #[arg(long = "remove-field")]
+        removes: Vec<u32>,
         /// 清除欄位，可重複
         #[arg(long = "clear")]
         clears: Vec<String>,
         /// 密碼類新值改由 stdin 讀（搭配 --secret-stdin）
         #[arg(long)]
         secret_stdin: bool,
+    },
+    /// 批次匯入未加密 JSON（官方匯出形態或本 CLI 欄位形態；單交易全收或全拒）
+    Import {
+        /// 檔案路徑或 `-`＝stdin。明文欄位走 UDS/TLS 本機線（A11：不落 argv）
+        file: String,
+        /// 官方 `bw import` 格式參數佔位（本批 true/false 語意相同）
+        #[arg(long)]
+        format: bool,
     },
     Rm {
         id: String,
@@ -962,6 +989,7 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             folder,
             fields,
             hidden_fields,
+            bool_fields,
         } => {
             let password = if *password_stdin {
                 Some(read_line_stdin()?)
@@ -977,8 +1005,9 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                     ));
                 }
             };
-            let mut draft_fields = parse_field_pairs(fields, false)?;
-            draft_fields.extend(parse_field_pairs(hidden_fields, true)?);
+            let mut draft_fields = parse_field_pairs(fields, CipherFieldKind::Text)?;
+            draft_fields.extend(parse_field_pairs(hidden_fields, CipherFieldKind::Hidden)?);
+            draft_fields.extend(parse_field_pairs(bool_fields, CipherFieldKind::Boolean)?);
             Call::Vault(VaultCall::Create {
                 draft: CipherDraft {
                     kind,
@@ -1005,6 +1034,11 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
         Cmd::Edit {
             id,
             sets,
+            set_types,
+            appends,
+            appends_hidden,
+            appends_bool,
+            removes,
             clears,
             secret_stdin,
         } => {
@@ -1018,13 +1052,40 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                 } else {
                     value.to_owned()
                 };
-                edits.push(FieldEdit {
+                edits.push(FieldEdit::Set {
                     path: path.to_owned(),
                     value: Some(value),
                 });
             }
+            for s in set_types {
+                let (idx, kind) = s
+                    .split_once('=')
+                    .ok_or_else(|| format!("--set-type 需要 index=kind， got {s}"))?;
+                let index = idx
+                    .parse::<u32>()
+                    .map_err(|_| format!("--set-type index 需為數字，got {idx}"))?;
+                let kind = match kind {
+                    "text" => CipherFieldKind::Text,
+                    "hidden" => CipherFieldKind::Hidden,
+                    "boolean" => CipherFieldKind::Boolean,
+                    other => return Err(format!("--set-type 值域 text|hidden|boolean，got {other}")),
+                };
+                edits.push(FieldEdit::SetType { index, kind });
+            }
+            for (pairs, kind) in [
+                (appends, CipherFieldKind::Text),
+                (appends_hidden, CipherFieldKind::Hidden),
+                (appends_bool, CipherFieldKind::Boolean),
+            ] {
+                for f in parse_field_pairs(pairs, kind)? {
+                    edits.push(FieldEdit::AppendField { field: f });
+                }
+            }
+            for r in removes {
+                edits.push(FieldEdit::RemoveField { index: *r });
+            }
             for c in clears {
-                edits.push(FieldEdit {
+                edits.push(FieldEdit::Set {
                     path: c.clone(),
                     value: None,
                 });
@@ -1032,6 +1093,24 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             Call::Vault(VaultCall::Patch {
                 id: parse_id(id)?,
                 edits,
+            })
+        }
+        Cmd::Import { file, format } => {
+            let raw = if file == "-" {
+                let mut s = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut s)
+                    .map_err(|e| e.to_string())?;
+                s
+            } else {
+                std::fs::read_to_string(file).map_err(|e| format!("讀不到匯入檔：{e}"))?
+            };
+            let items = parse_import_items(&serde_json::from_str(&raw).map_err(|e| {
+                format!("匯入檔需為 JSON（官方未加密匯出或本 CLI 欄位形態）：{e}")
+            })?)?;
+            Call::Vault(VaultCall::Import {
+                items,
+                format: *format,
             })
         }
         Cmd::Rm { id } => Call::Vault(VaultCall::Delete {
@@ -1147,21 +1226,139 @@ fn parse_id(s: &str) -> Result<ItemId, String> {
     Uuid::parse_str(s).map_err(|e| format!("item id: {e}"))
 }
 
-/// `--field k=v` / `--field! k=v`：官方自訂欄（hidden 走 type 1 線格式）。
-fn parse_field_pairs(pairs: &[String], hidden: bool) -> Result<Vec<CipherField>, String> {
+/// `--field k=v` / `--field! k=v` / `--field? k=v`：官方自訂欄。
+/// boolean 欄值域 true|false（與 jslib 同形存字串）。
+fn parse_field_pairs(
+    pairs: &[String],
+    kind: CipherFieldKind,
+) -> Result<Vec<CipherField>, String> {
     pairs
         .iter()
         .map(|s| {
             let (k, v) = s
                 .split_once('=')
                 .ok_or_else(|| format!("--field 需要 k=v，got {s}"))?;
+            if kind == CipherFieldKind::Boolean && !matches!(v, "true" | "false") {
+                return Err(format!("boolean 欄值需 true|false，got {v:?}"));
+            }
             Ok(CipherField {
                 name: k.to_owned(),
                 value: Some(v.to_owned()),
-                hidden,
+                kind,
             })
         })
         .collect()
+}
+
+/// 匯入檔 → ImportItem 集。吃兩形態：官方未加密匯出（`{"items":[...]}`，
+/// login 子物件、type 整數、uris[{uri,match}]、fields[{name,value,type}]）
+/// 或本 CLI 扁平欄位形態。加密匯出（`{"encrypted":true}`）擋下。
+fn parse_import_items(v: &serde_json::Value) -> Result<Vec<ImportItem>, String> {
+    if v.get("encrypted").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Err("加密匯出檔不支援（需先用官方 App 解出未加密 JSON）".into());
+    }
+    let arr = v
+        .as_array()
+        .cloned()
+        .or_else(|| v.get("items").and_then(serde_json::Value::as_array).cloned())
+        .ok_or_else(|| "需要 JSON 陣列或 {\"items\":[...]}".to_string())?;
+    arr.iter().map(parse_import_item).collect()
+}
+
+fn parse_import_item(c: &serde_json::Value) -> Result<ImportItem, String> {
+    let name = c
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if name.is_empty() {
+        return Err("匯入項缺 name".into());
+    }
+    let kind = match c.get("type") {
+        Some(serde_json::Value::Number(n)) => match n.as_i64().unwrap_or(1) {
+            2 => ItemKind::SecureNote,
+            3 | 4 => return Err(format!("Card/Identity 型別本批不支援（type {}）", n)),
+            _ => ItemKind::Login,
+        },
+        Some(serde_json::Value::String(s)) => match s.as_str() {
+            "note" | "securenote" => ItemKind::SecureNote,
+            other => return Err(format!("未知 type {other:?}")),
+        },
+        _ => ItemKind::Login,
+    };
+    // 官方匯出把帳密放 login 子物件；扁平形態直接讀頂層欄
+    let login = c.get("login").cloned().unwrap_or_else(|| serde_json::json!({}));
+    let pick = |key: &str| -> Option<String> {
+        c.get(key)
+            .or_else(|| login.get(key))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    let uris = c
+        .get("uris")
+        .or(login.get("uris"))
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|u| match u {
+                    serde_json::Value::String(s) => Some(s.clone()),
+                    obj => obj
+                        .get("uri")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let fields = c
+        .get("fields")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|f| {
+                    let name = f.get("name").and_then(serde_json::Value::as_str)?;
+                    Some(CipherField {
+                        name: name.to_owned(),
+                        value: f.get("value").and_then(serde_json::Value::as_str).map(str::to_owned),
+                        kind: CipherFieldKind::from_wire(
+                            f.get("type").and_then(serde_json::Value::as_i64).unwrap_or(0),
+                        ),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let tags = c
+        .get("tags")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(ImportItem {
+        draft: CipherDraft {
+            kind,
+            name,
+            username: pick("username"),
+            password: pick("password"),
+            totp: pick("totp"),
+            uris,
+            notes: pick("notes"),
+            favorite: c
+                .get("favorite")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            folder_id: c
+                .get("folderId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            fields,
+        },
+        tags,
+    })
 }
 
 fn parse_approval(s: &str) -> Result<Uuid, String> {
@@ -1311,8 +1508,16 @@ fn format_item(v: &ItemView) -> String {
         out.push_str(&format!("notes: {n}\n"));
     }
     for f in &v.fields {
-        let val = f.value.clone().unwrap_or_else(|| "•••".into());
-        let tag = if f.hidden { "hidden" } else { "text" };
+        let val = match (&f.value, f.kind) {
+            (Some(x), _) => x.clone(),
+            (None, CipherFieldKind::Hidden) => "•••".into(),
+            (None, _) => String::new(),
+        };
+        let tag = match f.kind {
+            CipherFieldKind::Text => "text",
+            CipherFieldKind::Hidden => "hidden",
+            CipherFieldKind::Boolean => "boolean",
+        };
         out.push_str(&format!("field[{}]: {} = {val}\n", tag, f.name));
     }
     if let Some(t) = &v.meta.updated_at {

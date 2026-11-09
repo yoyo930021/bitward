@@ -239,6 +239,10 @@ impl Hub {
             Call::Vault(VaultCall::Purge { id }) => {
                 (Access::Mutate(MutateOp::Delete), Some(*id))
             }
+            // 批次匯入＝多筆 Create；item None（Target::All 級授權）
+            Call::Vault(VaultCall::Import { .. }) => {
+                (Access::Mutate(MutateOp::Create), None)
+            }
             // passkey 分級（契約 §4）：列表＝Metadata（Identity floor）；
             // Register/Assert 取用私鑰＝Use(UseKind::Passkey)（用而不讀，同 totp 級）
             Call::Passkey(PasskeyCall::GetPasskeys { .. }) => {

@@ -430,6 +430,9 @@ impl Hub {
                 self.delete_folder(session, *id).await
             }
             Call::Vault(VaultCall::Purge { id }) => self.purge_item(*id).await,
+            Call::Vault(VaultCall::Import { items, format }) => {
+                self.write_import(session, items, *format).await
+            }
             Call::Use(UseCall::TotpCode { id }) => self.totp(*id),
             Call::Use(UseCall::GeneratePassword { policy }) => {
                 let opts = bw_crypto::PasswordOptions {
@@ -993,14 +996,16 @@ impl Hub {
                 .get("notes")
                 .and_then(Value::as_str)
                 .and_then(&d);
-            // 自訂欄（v5 三件套）：欄名恒出（Identity）；text 欄值 Masked 即出、
-            // hidden 欄值僅 Reveal 出（A3：不可見時鍵缺席，非 null）。
+            // 自訂欄（v5 三件套）：欄名恒出（Identity）；text/boolean 欄值 Masked
+            // 即出、hidden 欄值僅 Reveal 出（A3：不可見時鍵缺席，非 null）。
             let fields = match row.enc_cipher.get("fields").and_then(Value::as_array) {
                 Some(arr) => arr
                     .iter()
                     .map(|f| {
-                        let hidden = f.get("type").and_then(Value::as_i64) == Some(1);
-                        let value_ok = !hidden || reveal;
+                        let kind = bw_proto::CipherFieldKind::from_wire(
+                            f.get("type").and_then(Value::as_i64).unwrap_or(0),
+                        );
+                        let value_ok = kind != bw_proto::CipherFieldKind::Hidden || reveal;
                         bw_proto::CipherField {
                             name: f
                                 .get("name")
@@ -1012,7 +1017,7 @@ impl Hub {
                             } else {
                                 None
                             },
-                            hidden,
+                            kind,
                         }
                     })
                     .collect(),
@@ -1293,6 +1298,7 @@ fn action_tag(c: &Call) -> String {
         Call::Vault(VaultCall::ListFolders) => "Vault.ListFolders",
         Call::Vault(VaultCall::DeleteFolder { .. }) => "Vault.DeleteFolder",
         Call::Vault(VaultCall::Purge { .. }) => "Vault.Purge",
+        Call::Vault(VaultCall::Import { .. }) => "Vault.Import",
         Call::Passkey(PasskeyCall::GetPasskeys { .. }) => "Passkey.GetPasskeys",
         Call::Passkey(PasskeyCall::RegisterPasskey { .. }) => "Passkey.RegisterPasskey",
         Call::Passkey(PasskeyCall::AssertPasskey { .. }) => "Passkey.AssertPasskey",
@@ -1361,7 +1367,8 @@ fn sensitivity_of_call(c: &Call, resp: Option<&Response>) -> bw_proto::Sensitivi
         | Call::Vault(VaultCall::CreateFolder { .. })
         | Call::Vault(VaultCall::ListFolders)
         | Call::Vault(VaultCall::DeleteFolder { .. })
-        | Call::Vault(VaultCall::Purge { .. }) => Identity,
+        | Call::Vault(VaultCall::Purge { .. })
+        | Call::Vault(VaultCall::Import { .. }) => Identity,
         Call::Use(UseCall::TotpCode { .. })
         | Call::Use(UseCall::Run { .. })
         | Call::Use(UseCall::ResolveRef { .. })
