@@ -1366,7 +1366,7 @@ fn sensitivity_of_call(c: &Call, resp: Option<&Response>) -> bw_proto::Sensitivi
     use bw_proto::Sensitivity::*;
     // 回應帶明文（Secret/Reveal 出口）一律 Secret 級，優先於呼叫形態
     let secret_out = match resp {
-        Some(Response::Secret(_)) => true,
+        Some(Response::Secret(_)) | Some(Response::AttachmentBytes(_)) => true,
         Some(Response::Item(Some(v))) => {
             v.password.is_some()
                 || v.notes.is_some()

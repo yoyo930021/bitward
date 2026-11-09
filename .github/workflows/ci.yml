@@ -65,6 +65,24 @@ jobs:
       - run: cargo build -q -p bitwarderd -p bitward
       - run: ./dev/e2e/writepath.sh
 
+  vaulttypes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -q -p bitwarderd -p bitward
+      - run: ./dev/e2e/vaulttypes.sh
+
+  attachments:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -q -p bitwarderd -p bitward
+      - run: ./dev/e2e/attachments.sh
+
   autodrain:
     runs-on: ubuntu-latest
     steps:
