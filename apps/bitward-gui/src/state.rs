@@ -64,6 +64,38 @@ pub enum Follow {
     Detail(ItemId),
 }
 
+/// 側欄視角（官方左欄語意）：資料夾三態與垃圾桶**互斥**。
+/// `folder`：None＝全部項目；`Some("")`＝未歸屬；`Some(id)`＝該資料夾。
+/// 純狀態機：所有转移由方法承擔（單測），reduce 只調用。
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct VaultFilter {
+    pub folder: Option<String>,
+    pub trash: bool,
+}
+
+impl VaultFilter {
+    /// 選資料夾（含未歸屬）：自動退出垃圾桶。`pick_folder(None)`＝回全部項目。
+    pub fn pick_folder(&mut self, folder: Option<String>) {
+        self.folder = folder;
+        self.trash = false;
+    }
+
+    /// 垃圾桶切換：進入時退出資料夾（回「全部項目」）。
+    pub fn toggle_trash(&mut self) {
+        self.trash = !self.trash;
+        if self.trash {
+            self.folder = None;
+        }
+    }
+}
+
+/// 資料夾鏡像列（ListFolders 投影）：鎖定態 name 為 null → 節點隱藏。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct FolderEntry {
+    pub id: String,
+    pub name: Option<String>,
+}
+
 /// 命令佇列的成員：意圖（UI/捷徑）與結果（worker 回傳）。
 #[derive(Clone)]
 pub enum Cmd {
@@ -93,8 +125,13 @@ pub enum Cmd {
     CloseChangePassword,
     SubmitChangePassword,
     AskDelete(ItemId),
-    /// 垃圾桶切換（工具列膠囊；None 視角＝一般列表）。
+    /// 垃圾桶切換（側欄列；None 視角＝一般列表）。
     ToggleTrash,
+    /// 側欄資料夾節點：None＝全部項目、Some("")＝未歸屬、Some(id)＝該夾。
+    ChooseFolder(Option<String>),
+    /// 拉資料夾鏡像（連線後與開表單前刷新）。
+    FetchFolders,
+    FoldersLoaded(Arc<Vec<FolderEntry>>),
     /// 垃圾桶詳情動作：還原（軟刪撤銷）與永久刪除（先確認再 PurgeNow）。
     RestoreItem(ItemId),
     AskPurge(ItemId),
@@ -239,8 +276,10 @@ pub struct AppCore {
     pub items: Signal<Arc<Vec<ItemView>>>,
     pub query: Signal<String>,
     pub tag: Signal<Option<String>>,
-    /// 垃圾桶模式：true＝列表只列軟刪項目（Query.deleted 交 daemon 過濾）。
-    pub trash: Signal<bool>,
+    /// 側欄視角（資料夾三態＋垃圾桶，互斥由 `VaultFilter` 方法保證）。
+    pub filter: Signal<VaultFilter>,
+    /// 資料夾鏡像（ListFolders；鎖定態 name None → 節點隱藏）。
+    pub folders: Signal<Arc<Vec<FolderEntry>>>,
     pub sort: Signal<SortKey>,
     pub sort_menu: Signal<bool>,
     pub list_gen: Signal<u64>,
@@ -277,7 +316,8 @@ impl AppCore {
             items: signal(Arc::new(Vec::new())),
             query: signal(String::new()),
             tag: signal(None),
-            trash: signal(false),
+            filter: signal(VaultFilter::default()),
+            folders: signal(Arc::new(Vec::new())),
             sort: signal(SortKey::Name),
             sort_menu: signal(false),
             list_gen: signal(0),
@@ -390,6 +430,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.phase.set(Phase::Ready);
             core.vault.set(Some(state));
             core.error_text.set(None);
+            core.send(Cmd::FetchFolders);
             fetch_list(core);
         }
         Cmd::ConnectFailed { detail } => {
@@ -447,11 +488,13 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             }
         }
         Cmd::OpenCreate => {
+            core.send(Cmd::FetchFolders);
             core.leave_detail();
             core.form.reset(None);
             core.route.set(Route::Create);
         }
         Cmd::OpenEdit(id) => {
+            core.send(Cmd::FetchFolders);
             core.leave_detail();
             core.form.reset(None);
             core.route.set(Route::Edit(id));
@@ -668,12 +711,31 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             })));
         }
         Cmd::ToggleTrash => {
-            let next = !core.trash.get();
-            core.trash.set(next);
+            core.filter.update(|f| f.toggle_trash());
             core.leave_detail();
             core.sort_menu.set(false);
             core.route.set(Route::List);
             fetch_list(core);
+        }
+        Cmd::ChooseFolder(folder) => {
+            core.filter.update(|f| f.pick_folder(folder));
+            core.leave_detail();
+            core.sort_menu.set(false);
+            core.route.set(Route::List);
+            fetch_list(core);
+        }
+        Cmd::FetchFolders => {
+            core.ipc(|s| match s.call(&Call::Vault(VaultCall::ListFolders)) {
+                Ok(Response::Json(v)) => Cmd::FoldersLoaded(Arc::new(parse_folders(&v))),
+                Ok(other) => Cmd::Failed {
+                    err: format!("ListFolders 回應形態不符：{other:?}"),
+                },
+                Err(e) => Cmd::Failed { err: e.display() },
+            });
+        }
+        Cmd::FoldersLoaded(rows) => {
+            core.settle();
+            core.folders.set(rows);
         }
         Cmd::RestoreItem(id) => {
             let name = item_name(core, id);
@@ -834,12 +896,14 @@ fn item_name(core: &AppCore, id: ItemId) -> String {
 pub fn fetch_list(core: &AppCore) {
     let seq = core.list_gen.get() + 1;
     core.list_gen.set(seq);
+    let filter = core.filter.get();
     let q = Query {
         text: nonblank(&core.query.get()),
         tag: core.tag.get(),
         sort: core.sort.get(),
         limit: 0,
-        deleted: deleted_filter(core.trash.get()),
+        deleted: deleted_filter(filter.trash),
+        folder: filter.folder.clone(),
         ..Default::default()
     };
     core.ipc(move |s| {
@@ -1051,6 +1115,22 @@ pub fn nonblank(s: &str) -> Option<String> {
     (!t.is_empty()).then(|| t.to_owned())
 }
 
+/// ListFolders 的 `Response::Json` 陣列 → 鏡像列（缺 id 的列跳過；
+/// name null＝鎖定態信封解不了，呼叫端決定隱藏節點）。純函數可單測。
+pub fn parse_folders(v: &serde_json::Value) -> Vec<FolderEntry> {
+    v.as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|row| {
+                    let id = row.get("id").and_then(|i| i.as_str())?.to_owned();
+                    let name = row.get("name").and_then(|n| n.as_str()).map(str::to_owned);
+                    Some(FolderEntry { id, name })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// 鎖態的中文標籤（標題列指示器）。
 pub fn vault_label(st: &UnlockStateView) -> &'static str {
     match st {
@@ -1114,6 +1194,41 @@ mod tests {
         // 一般視角用 None（旧 daemon 兼容），垃圾桶用 Some(true)；不發 Some(false)。
         assert_eq!(deleted_filter(false), None);
         assert_eq!(deleted_filter(true), Some(true));
+    }
+
+    #[test]
+    fn vault_filter_folder_and_trash_are_exclusive() {
+        let mut f = VaultFilter::default();
+        assert!(!f.trash && f.folder.is_none());
+        // 選資料夾退出垃圾桶。
+        f.trash = true;
+        f.pick_folder(Some("id1".into()));
+        assert!(!f.trash);
+        assert_eq!(f.folder.as_deref(), Some("id1"));
+        // 進垃圾桶退出資料夾；再點一次回全部。
+        f.toggle_trash();
+        assert!(f.trash && f.folder.is_none());
+        f.toggle_trash();
+        assert!(!f.trash && f.folder.is_none());
+        // 未歸屬是 Some("")，與 None（全部）可區分。
+        f.pick_folder(Some(String::new()));
+        assert_eq!(f.folder.as_deref(), Some(""));
+        f.pick_folder(None);
+        assert!(f.folder.is_none() && !f.trash);
+    }
+
+    #[test]
+    fn parse_folders_maps_json_rows_and_skips_bad() {
+        let v = serde_json::json!([
+            {"id": "a", "name": "工作"},
+            {"id": "b", "name": null},
+            {"name": "缺id"},
+        ]);
+        let rows = parse_folders(&v);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name.as_deref(), Some("工作"));
+        assert_eq!(rows[1].name, None);
+        assert!(parse_folders(&serde_json::json!({"not": "array"})).is_empty());
     }
 
     #[test]

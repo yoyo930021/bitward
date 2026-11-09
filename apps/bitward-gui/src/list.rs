@@ -293,7 +293,7 @@ pub fn panel(core: AppCore) -> impl IntoElement {
                 .justify_center()
                 .gap_1()
                 .child(
-                    text(if empty_core.trash.get() {
+                    text(if empty_core.filter.get().trash {
                         "垃圾桶是空的"
                     } else {
                         "找不到符合的項目"

@@ -28,7 +28,7 @@ use std::time::Duration;
 use nsh_core::prelude::*;
 
 use bw_proto::UnlockStateView;
-use state::{AppCore, Cmd, Phase, Route};
+use state::{AppCore, Cmd, FolderEntry, Phase, Route};
 
 /// 連線參數解析順序：`--sock <path>` > `BITWARD_GUI_SOCK` >
 /// `$BITWARD_DATA_DIR/daemon.sock` > 平台資料目錄（`<datadir>/bitward/daemon.sock`）。
@@ -277,10 +277,15 @@ fn topbar(core: AppCore) -> View {
         )
 }
 
-/// 左側欄（官方三欄骨架）：庫入口／垃圾桶＋底部同步狀態與其他動作。
+/// 左側欄（官方三欄骨架）：我的密碼庫（資料夾樹）／已共享／垃圾桶＋
+/// 底部同步狀態與其他動作。資料夾與垃圾桶互斥（`VaultFilter`）。
 fn sidebar(core: AppCore) -> View {
-    let vault_sel = core.clone();
-    let vault_press = core.clone();
+    let all_sel = core.clone();
+    let all_press = core.clone();
+    let uncat_sel = core.clone();
+    let uncat_press = core.clone();
+    let tree_data = core.clone();
+    let tree_row = core.clone();
     let trash_sel = core.clone();
     let trash_press = core.clone();
     let sync_core = core.clone();
@@ -297,29 +302,66 @@ fn sidebar(core: AppCore) -> View {
         .border_color(theme::HAIRLINE)
         .px_2()
         .pt_3()
+        .child(side_label("我的密碼庫"))
         .child(side_item(
-            "我的密碼庫",
-            move || !vault_sel.trash.get(),
+            "全部項目".to_owned(),
             move || {
-                if vault_press.trash.get() {
-                    vault_press.send(Cmd::ToggleTrash);
-                } else {
-                    vault_press.send(Cmd::OpenList);
-                }
+                let f = all_sel.filter.get();
+                !f.trash && f.folder.is_none()
             },
+            move || all_press.send(Cmd::ChooseFolder(None)),
             false,
             None,
         ))
         .child(side_item(
-            "已共享",
+            "（未分類）".to_owned(),
+            move || {
+                let f = uncat_sel.filter.get();
+                !f.trash && f.folder.as_deref() == Some("")
+            },
+            move || uncat_press.send(Cmd::ChooseFolder(Some(String::new()))),
+            false,
+            None,
+        ))
+        .child(each(
+            move || {
+                tree_data
+                    .folders
+                    .get()
+                    .iter()
+                    .filter(|f| f.name.is_some())
+                    .cloned()
+                    .collect::<Vec<_>>()
+            },
+            |f: &FolderEntry| f.id.clone(),
+            move |item: ReadSignal<FolderEntry>, _| {
+                let id = item.get().id;
+                let sel_core = tree_row.clone();
+                let press_core = tree_row.clone();
+                let press_id = id.clone();
+                let shown = item.get().name.unwrap_or_default();
+                side_item(
+                    shown,
+                    move || {
+                        let f = sel_core.filter.get();
+                        !f.trash && f.folder.as_deref() == Some(id.as_str())
+                    },
+                    move || press_core.send(Cmd::ChooseFolder(Some(press_id.clone()))),
+                    false,
+                    None,
+                )
+            },
+        ))
+        .child(side_item(
+            "已共享".to_owned(),
             || false,
             || {},
             true,
             Some("組織共享：待 daemon 資料源就緒後開放"),
         ))
         .child(side_item(
-            "垃圾桶",
-            move || trash_sel.trash.get(),
+            "垃圾桶".to_owned(),
+            move || trash_sel.filter.get().trash,
             move || trash_press.send(Cmd::ToggleTrash),
             false,
             None,
@@ -364,9 +406,23 @@ fn sidebar(core: AppCore) -> View {
         )
 }
 
+/// 側欄分節標籤（不可點）。
+fn side_label(label: &'static str) -> View {
+    view()
+        .px_3()
+        .pt_1p5()
+        .pb_0p5()
+        .child(
+            text(label)
+                .text_size(px(11.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::TEXT_MUTED),
+        )
+}
+
 /// 側欄條目：32px 行；選中＝淡藍底＋左 3px 藍條；停用＝灰字＋tooltip。
 fn side_item(
-    label: &'static str,
+    label: String,
     selected: impl Fn() -> bool + 'static,
     on_press: impl Fn() + 'static,
     disabled: bool,
