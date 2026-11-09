@@ -224,7 +224,8 @@ fn find_view(core: &AppCore, name: &str) -> Option<bw_proto::ItemView> {
 /// 匯出確認 → 鎖態頁/解鎖 → 選取態 → 垃圾桶（列表/還原動作/還原後列表）→
 /// 產生器面板 → TOTP 倒數三段（真取碼後偽造時間源示 30/10/5 秒比例）→
 /// 資料夾樹歸屬過濾 → SecureNote 模態 → 自訂欄位編輯列 →
-/// 匯入模態（預覽/真跑/結果列），
+/// 匯入模態（預覽/真跑/結果列）→ 編輯欄位解鎖（text→boolean、增刪列、
+/// 開關樣落地）→ 附件生命週期（上傳確認/收斂在列/下載落地/刪除確認），
 /// 各步存一張 shot-N-*.png 後結束行程。時序裕量對齊
 /// spike（Background
 /// session 無 vsync 可等，固定 sleep；本地 daemon 往返 <50ms）。
@@ -594,7 +595,85 @@ pub fn script(dir: PathBuf, core: AppCore) {
     });
     let d = dir.clone();
     at(54200, move || capture(&d, "shot-30-import-result.png"));
-    at(54800, quit);
+
+    // —— 附件生命週期（批次 4b）：上傳確認 → 收斂後在列 → 下載 → 刪除確認 ——
+    let attach_file = std::env::temp_dir().join("bitward-attach-sample.txt");
+    let _ = std::fs::write(&attach_file, b"bitward gui attachment e2e payload 0123456789\n");
+    let c = core.clone();
+    at(55000, move || {
+        c.query.set(String::new());
+        c.send(Cmd::RefetchList);
+    });
+    let c = core.clone();
+    at(55400, move || {
+        if let Some(id) = find_id(&c, "2b 筆記範例") {
+            c.send(Cmd::OpenDetail(id));
+        }
+    });
+    let c = core.clone();
+    let fx = attach_file.display().to_string();
+    at(56000, move || {
+        c.att_upload_path.set(fx.clone());
+        c.att_upload_open.set(true);
+    });
+    let d = dir.clone();
+    at(56400, move || capture(&d, "shot-34-attachment-upload.png"));
+    let c = core.clone();
+    let fx = attach_file.display().to_string();
+    at(56600, move || {
+        if let Some(id) = find_id(&c, "2b 筆記範例") {
+            c.send(Cmd::UploadAttachment {
+                item_id: id,
+                path: fx.clone(),
+            });
+        }
+    });
+    let c = core.clone();
+    at(57200, move || {
+        let n = c.notice.get().unwrap_or_default();
+        assert!(n.contains("已排隊上傳"), "上傳回執應為排隊語意：{n}");
+    });
+    let c = core.clone();
+    let d = dir.clone();
+    at(61000, move || {
+        let has = c
+            .detail
+            .get()
+            .is_some_and(|dv| !dv.attachments.is_empty());
+        assert!(has, "背景推送收斂後附件列應已出現（事件幫浦重取）");
+        capture(&d, "shot-35-attachment-row.png");
+    });
+    let c = core.clone();
+    at(61400, move || {
+        if let Some(dv) = c.detail.get()
+            && let Some(a) = dv.attachments.first()
+        {
+            c.send(Cmd::DownloadAttachment {
+                item_id: dv.meta.id,
+                attachment_id: a.id.clone(),
+                file_name: a.file_name.clone(),
+            });
+        }
+    });
+    let d = dir.clone();
+    at(62600, move || capture(&d, "shot-36-attachment-downloaded.png"));
+    let c = core.clone();
+    at(63000, move || {
+        if let Some(dv) = c.detail.get()
+            && let Some(a) = dv.attachments.first()
+        {
+            c.send(Cmd::AskDeleteAttachment {
+                item_id: dv.meta.id,
+                attachment_id: a.id.clone(),
+                file_name: a.file_name.clone(),
+            });
+        }
+    });
+    let d = dir.clone();
+    at(63600, move || capture(&d, "shot-37-attachment-delete-confirm.png"));
+    let c = core.clone();
+    at(64000, move || c.send(Cmd::ConfirmYes));
+    at(65500, quit);
 }
 
 /// 由資料夾鏡像找名字的 id（找不到回空字串）。

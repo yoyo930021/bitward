@@ -9,6 +9,7 @@
 use std::rc::Rc;
 
 use bw_proto::CipherFieldKind;
+use nsh_base::input;
 use nsh_core::prelude::*;
 
 use crate::state::{AppCore, Cmd, Route};
@@ -37,6 +38,7 @@ pub fn pane(core: AppCore) -> View {
                 .child(section("驗證碼", totp_section(core.clone(), copied)))
                 .child(section("備註", notes_section(core.clone(), copied)))
                 .child(section("自訂欄位", custom_fields_section(core.clone(), copied)))
+                .child(section("附件", attachments_section(core.clone())))
                 .child(section("資訊", info_section(core.clone(), copied))),
         ))
 }
@@ -364,6 +366,168 @@ fn custom_fields_section(core: AppCore, copied: Signal<Option<&'static str>>) ->
             field_static_view(f.name.clone(), value_view, trailing)
         })
         .collect()
+}
+
+/// 附件節（官方同序：自訂欄位後、資訊前）。每筆一列＝檔名＋大小＋下載／刪除；
+/// 節尾內聯「附加檔案」編輯器（路徑框＋檔名/大小預覽＋上傳確認）。
+/// 投影來源：Get(Masked) 的 `attachments`（空時鍵缺席）；上傳後附件列要等
+/// 背景推送收斂才出現（事件幫浦自動重取詳情），UI 不假裝立即完成。
+fn attachments_section(core: AppCore) -> Vec<View> {
+    let Some(d) = core.detail.get() else {
+        return Vec::new();
+    };
+    let item_id = d.meta.id;
+    let mut rows: Vec<View> = d
+        .attachments
+        .iter()
+        .map(|a| att_row(core.clone(), item_id, a))
+        .collect();
+    rows.push(upload_editor(core.clone(), item_id, d.meta.organization_id.is_some()));
+    rows
+}
+
+/// 單筆附件列。
+fn att_row(core: AppCore, item_id: bw_proto::ItemId, meta: &bw_proto::AttachmentMeta) -> View {
+    let dl = core.clone();
+    let dl_id = meta.id.clone();
+    let dl_name = meta.file_name.clone();
+    let del = core.clone();
+    let del_id = meta.id.clone();
+    let del_name = meta.file_name.clone();
+    let size_label = meta
+        .size_name
+        .clone()
+        .unwrap_or_else(|| crate::attach::format_size(meta.size.unwrap_or_default()));
+    view()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(
+            view()
+                .flex_1()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .px_3()
+                .py_2()
+                .rounded(px(theme::RADIUS_BLOCK))
+                .bg(theme::SURFACE)
+                .overflow_hidden()
+                .child(
+                    text(meta.file_name.clone())
+                        .text_size(px(theme::TEXT_FIELD_VALUE))
+                        .text_color(theme::TEXT_PRIMARY)
+                        .number_of_lines(1)
+                        .flex_1(),
+                )
+                .child(
+                    text(size_label)
+                        .text_size(px(theme::TEXT_PAGE_SUB))
+                        .text_color(theme::TEXT_MUTED),
+                ),
+        )
+        .child(ui::button("下載", ui::Btn::Ghost, move || {
+            dl.send(Cmd::DownloadAttachment {
+                item_id,
+                attachment_id: dl_id.clone(),
+                file_name: dl_name.clone(),
+            })
+        }))
+        .child(ui::button("刪除", ui::Btn::Ghost, move || {
+            del.send(Cmd::AskDeleteAttachment {
+                item_id,
+                attachment_id: del_id.clone(),
+                file_name: del_name.clone(),
+            })
+        }))
+}
+
+/// 上傳內聯編輯器：「附加檔案」→ 路徑框＋預覽＋上傳確認。
+/// org 共享項目擋下（daemon 換鑰批次未開放），disabled＋tooltip。
+fn upload_editor(core: AppCore, item_id: bw_proto::ItemId, is_org: bool) -> View {
+    let open = core.att_upload_open;
+    let preview_core = core.clone();
+    let gate = crate::attach::upload_gate(if is_org { Some("org") } else { None });
+    view()
+        .flex_col()
+        .gap_1p5()
+        .child(when(
+            move || !open.get() && gate.is_none(),
+            move || {
+                let o = open;
+                view().flex_row().child(ui::button(
+                    "附加檔案",
+                    ui::Btn::Ghost,
+                    move || o.update(|v| *v = true),
+                ))
+            },
+        ))
+        .child(when(
+            move || !open.get() && gate.is_some(),
+            move || {
+                view()
+                    .flex_row()
+                    .child(ui::button("附加檔案", ui::Btn::Ghost, move || {}).tooltip(
+                        ui::tooltip_card(gate.unwrap_or("即將推出")),
+                    ))
+            },
+        ))
+        .child(when(
+            move || open.get() && gate.is_none(),
+            move || {
+                let p = preview_core.att_upload_path;
+                let press = preview_core.clone();
+                view()
+                    .flex_col()
+                    .gap_1p5()
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                input()
+                                    .value(move || p.get())
+                                    .placeholder("貼上檔案路徑，例：~/Downloads/bill.pdf")
+                                    .placeholder_color(move || theme::TEXT_MUTED.light)
+                                    .on_change(move |t: &str| p.set(t.to_owned()))
+                                    .h(px(theme::INPUT_H))
+                                    .px_3()
+                                    .rounded(px(theme::RADIUS_CONTROL))
+                                    .border(px(1.0))
+                                    .border_color(theme::HAIRLINE)
+                                    .bg(theme::BASE)
+                                    .text_color(theme::TEXT_PRIMARY)
+                                    .font_family(ui::mono_font())
+                                    .flex_1(),
+                            )
+                            .child(ui::button("上傳", ui::Btn::Primary, move || {
+                                let path = press.att_upload_path.get();
+                                press.send(Cmd::UploadAttachment { item_id, path })
+                            })),
+                    )
+                    .child(dynamic(move || {
+                        let cur = preview_core.att_upload_path.get();
+                        if cur.trim().is_empty() {
+                            return view().child(
+                                text("nsh 選檔面板僅支援圖片副檔名，請直接貼路徑（≤32 MiB）。")
+                                    .text_size(px(12.0))
+                                    .text_color(theme::TEXT_MUTED),
+                            );
+                        }
+                        match crate::attach::upload_preview(&cur) {
+                            Ok(s) => {
+                                view().child(text(s).text_size(px(12.0)).text_color(theme::SUCCESS))
+                            }
+                            Err(e) => view().child(
+                                text(e)
+                                    .text_size(px(12.0))
+                                    .text_color(theme::DESTRUCTIVE),
+                            ),
+                        }
+                    }))
+            },
+        ))
 }
 
 /// 密碼欄：預設遮罩（Masked 投影的 `password_masked`，無則純點號）；

@@ -14,9 +14,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use bw_proto::{
-    AuthCall, Call, CipherDraft, CipherFieldKind, EventTopic, FieldEdit, ItemId, ItemKind,
-    ItemView, OverlayOpWire, Query, Response, SortKey, SyncCall, UnlockStateView, UseCall,
-    VaultCall, View,
+    AttachmentOp, AuthCall, Call, CipherDraft, CipherFieldKind, EventTopic, FieldEdit, ItemId,
+    ItemKind, ItemView, OverlayOpWire, Query, Response, SortKey, SyncCall, UnlockStateView,
+    UseCall, VaultCall, View,
 };
 use nsh_core::prelude::*;
 
@@ -138,6 +138,38 @@ pub enum Cmd {
     ImportPreviewed(Result<(usize, usize), String>),
     ImportRun,
     ImportDone(Result<crate::import::ImportOutcome, String>),
+    /// 附件三操作（批次 4b）：item id 取當前行／Route::Detail；
+    /// `AttachmentDone` 承載顯示文案（Ok）或可懂錯誤（Err）。
+    UploadAttachment {
+        item_id: ItemId,
+        path: String,
+    },
+    DownloadAttachment {
+        item_id: ItemId,
+        attachment_id: String,
+        file_name: String,
+    },
+    AskDeleteAttachment {
+        item_id: ItemId,
+        attachment_id: String,
+        file_name: String,
+    },
+    DeleteAttachment {
+        item_id: ItemId,
+        attachment_id: String,
+    },
+    AttachmentDone {
+        item_id: ItemId,
+        op: crate::attach::AttOp,
+        res: Result<String, String>,
+    },
+    /// 事件幫浦刷新：列表必刷，開著詳情時連詳情一起刷（附件列收斂語意）。
+    EventsRefresh,
+    /// 事件驱动的詳情重取：失敗靜默（下一拍事件再試，不閃橫條）。
+    DetailRefreshed {
+        id: ItemId,
+        row: Option<Arc<ItemView>>,
+    },
     /// 垃圾桶切換（側欄列；None 視角＝一般列表）。
     ToggleTrash,
     /// 側欄資料夾節點：None＝全部項目、Some("")＝未歸屬、Some(id)＝該夾。
@@ -381,6 +413,10 @@ pub struct AppCore {
     pub import_modal: Signal<bool>,
     pub import_path: Signal<String>,
     pub import_preview: Signal<Option<Result<(usize, usize), String>>>,
+    /// 附件上傳草稿路徑（詳情頁內聯編輯器用）＋單飛狀態機＋編輯器開合。
+    pub att_upload_path: Signal<String>,
+    pub att_upload_open: Signal<bool>,
+    pub att_state: Signal<crate::attach::AttState>,
 }
 
 impl AppCore {
@@ -422,6 +458,9 @@ impl AppCore {
             import_modal: signal(false),
             import_path: signal(String::new()),
             import_preview: signal(None),
+            att_upload_path: signal(String::new()),
+            att_upload_open: signal(false),
+            att_state: signal(crate::attach::AttState::default()),
             form: FormFields {
                 name: signal(String::new()),
                 username: signal(String::new()),
@@ -477,7 +516,7 @@ impl AppCore {
                 &[EventTopic::OutboxDrained, EventTopic::VaultChanged],
                 move |topic| {
                     if matches!(topic, EventTopic::OutboxDrained | EventTopic::VaultChanged) {
-                        let _ = tx2.send(Cmd::RefetchList);
+                        let _ = tx2.send(Cmd::EventsRefresh);
                     }
                 },
             );
@@ -494,6 +533,8 @@ impl AppCore {
         self.totp.set(None);
         self.totp_valid_for.set(0);
         self.totp_issued.set(None);
+        self.att_upload_path.set(String::new());
+        self.att_upload_open.set(false);
     }
 }
 
@@ -955,6 +996,141 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                     fetch_list(core);
                 }
                 Err(e) => core.error_text.set(Some(format!("匯入失敗：{e}"))),
+            }
+        }
+        Cmd::UploadAttachment { item_id, path } => {
+                if core.att_state.get().busy() {
+                return;
+            }
+    core.att_state.update(|s| { s.start(crate::attach::AttOp::Upload); });
+            core.ipc(move |s| {
+                let res = crate::attach::read_for_upload(&path).and_then(|(name, bytes)| {
+                    match s.call(&Call::Vault(VaultCall::Attachment {
+                        sub: AttachmentOp::Upload {
+                            item_id,
+                            file_name: name.clone(),
+                            bytes,
+                        },
+                    })) {
+                        Ok(Response::Ok) => {
+                            Ok(format!("已排隊上傳「{name}」（背景推送後入列，掛未同步）"))
+                        }
+                        Ok(other) => Err(format!("Attachment.Upload 回應形態不符：{other:?}")),
+                        Err(e) => Err(e.display()),
+                    }
+                });
+                Cmd::AttachmentDone {
+                    item_id,
+                    op: crate::attach::AttOp::Upload,
+                    res,
+                }
+            });
+        }
+        Cmd::DownloadAttachment {
+            item_id,
+            attachment_id,
+            file_name,
+        } => {
+                if core.att_state.get().busy() {
+                return;
+            }
+    core.att_state.update(|s| { s.start(crate::attach::AttOp::Download); });
+            core.ipc(move |s| {
+                let res = match s.call(&Call::Vault(VaultCall::Attachment {
+                    sub: AttachmentOp::Download {
+                        item_id,
+                        attachment_id,
+                    },
+                })) {
+                    Ok(Response::AttachmentBytes(b)) => {
+                        crate::attach::write_download(&file_name, &b)
+                    }
+                    Ok(other) => Err(format!("Attachment.Download 回應形態不符：{other:?}")),
+                    Err(e) => Err(e.display()),
+                };
+                Cmd::AttachmentDone {
+                    item_id,
+                    op: crate::attach::AttOp::Download,
+                    res: res.map(|p| format!("附件已下載至 {p}")),
+                }
+            });
+        }
+        Cmd::AskDeleteAttachment {
+            item_id,
+            attachment_id,
+            file_name,
+        } => {
+            core.confirm.set(Some(Arc::new(Confirm {
+                title: format!("刪除附件「{file_name}」？"),
+                description: "從伺服器與本機鏡像移除；需連網，無離線佇列，不可復原。".into(),
+                confirm_label: "刪除附件".into(),
+                destructive: true,
+                on_confirm: Cmd::DeleteAttachment {
+                    item_id,
+                    attachment_id,
+                },
+            })));
+        }
+        Cmd::DeleteAttachment {
+            item_id,
+            attachment_id,
+        } => {
+                if core.att_state.get().busy() {
+                return;
+            }
+    core.att_state.update(|s| { s.start(crate::attach::AttOp::Delete); });
+            core.ipc(move |s| {
+                let res = match s.call(&Call::Vault(VaultCall::Attachment {
+                    sub: AttachmentOp::Delete {
+                        item_id,
+                        attachment_id,
+                    },
+                })) {
+                    Ok(Response::Ok) => Ok("附件已刪除".to_owned()),
+                    Ok(other) => Err(format!("Attachment.Delete 回應形態不符：{other:?}")),
+                    Err(e) => Err(e.display()),
+                };
+                Cmd::AttachmentDone {
+                    item_id,
+                    op: crate::attach::AttOp::Delete,
+                    res,
+                }
+            });
+        }
+        Cmd::AttachmentDone { item_id, op, res } => {
+            core.settle();
+            core.att_state.update(|s| s.finish());
+            match res {
+                Ok(msg) => {
+                    core.error_text.set(None);
+                    core.notice.set(Some(msg));
+                    // 上傳/刪除後重取詳情投影（附件列增減要落地到 UI）；
+                    // 下載只動磁碟，不觸發重取。
+                    if op != crate::attach::AttOp::Download {
+                        core.send(Cmd::OpenDetail(item_id));
+                    }
+                }
+                Err(e) => core.error_text.set(Some(e)),
+            }
+        }
+        Cmd::EventsRefresh => {
+            fetch_list(core);
+            if let Route::Detail(id) = core.route.get() {
+                core.ipc(move |s| match s.call(&get(id, View::Masked)) {
+                    Ok(Response::Item(Some(row))) => Cmd::DetailRefreshed {
+                        id,
+                        row: Some(Arc::new(*row)),
+                    },
+                    _ => Cmd::DetailRefreshed { id, row: None },
+                });
+            }
+        }
+        Cmd::DetailRefreshed { id, row } => {
+            core.settle();
+            if core.route.get() == Route::Detail(id)
+                && let Some(row) = row
+            {
+                core.detail.set(Some(row));
             }
         }
         Cmd::ConfirmYes => {

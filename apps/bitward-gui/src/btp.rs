@@ -18,8 +18,9 @@ use bw_proto::{
     UnlockStateView, WtpError,
 };
 
-/// 與 `bw_btp::MAX_FRAME` 同值：幀上限要在解碼前擋住。
-const MAX_FRAME: u32 = 1024 * 1024;
+/// 與 `bw_btp::MAX_FRAME` 同值：幀上限要在解碼前擋住。批次 4a 起放寬到
+/// 48MiB——32MiB 附件的 base64 幀（≈43MiB）要過得了本機線。
+const MAX_FRAME: u32 = 48 * 1024 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]

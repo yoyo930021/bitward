@@ -8,6 +8,7 @@
 //! 新增/編輯與確認走模態；nav_stack 在 macOS dev host 不渲染，spike
 //! FINDINGS 卡點 4）。外觀代幣全在 `theme`（本批發官方淺色皮）。
 
+mod attach;
 mod btp;
 mod detail;
 mod export;
