@@ -9,6 +9,7 @@
 //! FINDINGS 卡點 4）。外觀代幣全在 `theme`（本批發官方淺色皮）。
 
 mod attach;
+mod approvals;
 mod btp;
 mod detail;
 mod export;
@@ -160,6 +161,13 @@ pub fn App() -> impl IntoElement {
                 totp_core.send(Cmd::RequestTotp);
             }
             totp_core.totp_tick.set(totp_core.totp_tick.get() + 1);
+        }
+    });
+    // 批准佇列節拍：照殼批准中心的 1.5s 輪詢（Ready 才拉；事件幫浦另路即時推）。
+    let pending_core = core.clone();
+    set_interval(Duration::from_millis(1500), move || {
+        if matches!(pending_core.phase.get(), Phase::Ready) {
+            pending_core.send(Cmd::FetchPending);
         }
     });
     if let Some(dir) = std::env::var_os("NSH_GUI_SHOTS").map(PathBuf::from) {
@@ -336,6 +344,9 @@ fn sidebar(core: AppCore) -> View {
     let tree_row = core.clone();
     let trash_sel = core.clone();
     let trash_press = core.clone();
+    let app_sel = core.clone();
+    let app_press = core.clone();
+    let app_cnt = core.clone();
     let sync_core = core.clone();
     let sync_time = core.clone();
     let export_core = core.clone();
@@ -361,6 +372,7 @@ fn sidebar(core: AppCore) -> View {
             move || all_press.send(Cmd::ChooseFolder(None)),
             false,
             None,
+            || 0,
         ))
         .child(side_item(
             "（未分類）".to_owned(),
@@ -371,6 +383,7 @@ fn sidebar(core: AppCore) -> View {
             move || uncat_press.send(Cmd::ChooseFolder(Some(String::new()))),
             false,
             None,
+            || 0,
         ))
         .child(each(
             move || {
@@ -398,6 +411,7 @@ fn sidebar(core: AppCore) -> View {
                     move || press_core.send(Cmd::ChooseFolder(Some(press_id.clone()))),
                     false,
                     None,
+                    || 0,
                 )
             },
         ))
@@ -407,6 +421,7 @@ fn sidebar(core: AppCore) -> View {
             || {},
             true,
             Some("組織共享：待 daemon 資料源就緒後開放"),
+            || 0,
         ))
         .child(side_item(
             "垃圾桶".to_owned(),
@@ -414,6 +429,15 @@ fn sidebar(core: AppCore) -> View {
             move || trash_press.send(Cmd::ToggleTrash),
             false,
             None,
+            || 0,
+        ))
+        .child(side_item(
+            "待批准".to_owned(),
+            move || app_sel.route.get() == Route::Approvals,
+            move || app_press.send(Cmd::OpenApprovals),
+            false,
+            None,
+            move || app_cnt.pending.get().len(),
         ))
         .child(view().flex_1())
         .child(
@@ -473,13 +497,15 @@ fn side_label(label: &'static str) -> View {
         )
 }
 
-/// 側欄條目：32px 行；選中＝淡藍底＋左 3px 藍條；停用＝灰字＋tooltip。
+/// 側欄條目：32px 行；選中＝淡藍底＋左 3px 藍條；停用＝灰字＋tooltip；
+/// `count` > 0 時右側掛筆數徽章（待批准用，0 不顯示）。
 fn side_item(
     label: String,
     selected: impl Fn() -> bool + 'static,
     on_press: impl Fn() + 'static,
     disabled: bool,
     tip: Option<&'static str>,
+    count: impl Fn() -> usize + 'static,
 ) -> View {
     let selected = Rc::new(selected);
     let sel_bg = selected.clone();
@@ -537,6 +563,27 @@ fn side_item(
                 }
             }),
     )
+    .child(view().flex_1())
+    .child(dynamic(move || {
+        let n = count();
+        if n == 0 {
+            return view();
+        }
+        view()
+            .h(px(theme::BADGE_H))
+            .px_1p5()
+            .rounded_full()
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .bg(theme::WARNING.opacity(0.16))
+            .child(
+                text(format!("{n}"))
+                    .text_size(px(theme::TEXT_BADGE))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme::WARNING),
+            )
+    }))
 }
 
 /// 側欄底部文字鈕（匯出/改密/立即同步）。
@@ -644,7 +691,8 @@ fn router(core: AppCore) -> impl IntoElement {
 fn split(core: AppCore) -> View {
     let detail_cond = core.clone();
     let detail_build = core.clone();
-    let loading_cond = core.clone();
+    let route_cond = core.clone();
+    let approvals_build = core.clone();
     view()
         .flex_row()
         .flex_1()
@@ -664,14 +712,17 @@ fn split(core: AppCore) -> View {
             view()
                 .flex_1()
                 .bg(theme::BASE)
-                .child(when(
-                    move || detail_cond.detail.get().is_some(),
-                    move || detail::pane(detail_build.clone()),
-                ).otherwise(move || {
-                    if matches!(loading_cond.route.get(), Route::Detail(_)) {
-                        detail::loading()
-                    } else {
-                        detail::placeholder()
+                .child(dynamic(move || {
+                    match route_cond.route.get() {
+                        Route::Approvals => approvals::pane(approvals_build.clone()),
+                        Route::Detail(_) => {
+                            if detail_cond.detail.get().is_some() {
+                                detail::pane(detail_build.clone())
+                            } else {
+                                detail::loading()
+                            }
+                        }
+                        _ => detail::placeholder(),
                     }
                 })),
         )

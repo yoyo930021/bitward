@@ -14,9 +14,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use bw_proto::{
-    AttachmentOp, AuthCall, Call, CipherDraft, CipherFieldKind, EventTopic, FieldEdit, ItemId,
-    ItemKind, ItemView, OverlayOpWire, Query, Response, SortKey, SyncCall, UnlockStateView,
-    UseCall, VaultCall, View,
+    AgentCall, AttachmentOp, AuthCall, Call, CipherDraft, CipherFieldKind, EventTopic, FieldEdit,
+    ItemId, ItemKind, ItemView, OverlayOpWire, Query, Response, SortKey, SyncCall,
+    UnlockStateView, UseCall, VaultCall, View,
 };
 use nsh_core::prelude::*;
 
@@ -39,6 +39,8 @@ pub enum Route {
     Detail(ItemId),
     Create,
     Edit(ItemId),
+    /// 批准佇列（右欄視角，側欄「待批准」進入；單鍵直決無二次確認）。
+    Approvals,
 }
 
 /// 確認對話框（刪除、匯出共用）；`on_confirm` 是確認後要投遞的命令。
@@ -99,6 +101,16 @@ impl VaultFilter {
 pub struct FolderEntry {
     pub id: String,
     pub name: Option<String>,
+}
+
+/// 待批准列（`AgentCall::ListPending` → `Response::Sessions` 投影）。
+/// `requested_at_ms`：daemon 現行回包尚無此欄（批次 6 查證缺角，已報）；
+/// 欄位預留，daemon 補上即自動顯示，不虛構時間。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PendingRow {
+    pub id: String,
+    pub summary: String,
+    pub requested_at_ms: Option<u64>,
 }
 
 /// 命令佇列的成員：意圖（UI/捷徑）與結果（worker 回傳）。
@@ -177,6 +189,17 @@ pub enum Cmd {
     ToggleTrash,
     /// 側欄資料夾節點：None＝全部項目、Some("")＝未歸屬、Some(id)＝該夾。
     ChooseFolder(Option<String>),
+    /// 批准中心（批次 6 併入 GUI）：佇列視角、輪詢、單鍵直決。
+    OpenApprovals,
+    FetchPending,
+    PendingLoaded(Arc<Vec<PendingRow>>),
+    ApprovePending(String),
+    DenyPending(String),
+    /// 批准/拒絕回包：Ok=成功（刷新佇列＋列表——批准可能放行鏡像變化）。
+    PendingActed {
+        approve: bool,
+        res: Result<(), String>,
+    },
     /// 拉資料夾鏡像（連線後與開表單前刷新）。
     FetchFolders,
     FoldersLoaded(Arc<Vec<FolderEntry>>),
@@ -391,6 +414,8 @@ pub struct AppCore {
     pub filter: Signal<VaultFilter>,
     /// 資料夾鏡像（ListFolders；鎖定態 name None → 節點隱藏）。
     pub folders: Signal<Arc<Vec<FolderEntry>>>,
+    /// 待批准佇列（側欄徽章＋右欄佇列視角的共同真相源）。
+    pub pending: Signal<Arc<Vec<PendingRow>>>,
     pub sort: Signal<SortKey>,
     pub sort_menu: Signal<bool>,
     pub list_gen: Signal<u64>,
@@ -439,6 +464,7 @@ impl AppCore {
             tag: signal(None),
             filter: signal(VaultFilter::default()),
             folders: signal(Arc::new(Vec::new())),
+            pending: signal(Arc::new(Vec::new())),
             sort: signal(SortKey::Name),
             sort_menu: signal(false),
             list_gen: signal(0),
@@ -509,9 +535,22 @@ impl AppCore {
         self.busy.set(self.busy.get().saturating_sub(1));
     }
 
+    /// 輪詢专用：同 `ipc` 但不動 busy 計數（背景節拍不該讓標題閃「處理中…」）。
+    fn ipc_quiet<F>(&self, f: F)
+    where
+        F: FnOnce(Arc<Session>) -> Cmd + Send + 'static,
+    {
+        let tx = self.tx.clone();
+        let session = self.session.clone();
+        std::thread::spawn(move || {
+            let cmd = f(session);
+            let _ = tx.send(cmd);
+        });
+    }
+
     /// 事件幫浦：自開一條 daemon 監聽連線（執行緒非「背景任務」語意的
     /// worker，只回投命令、不碰訊號）。`OutboxDrained`／`VaultChanged`
-    /// 到達即重抓列表——VW 恢復後「未同步」徽章無感自動消失；
+    /// 到達即重抓（未同步徽章無感消失）、`ApprovalRequired` 即重拉佇列；
     /// 斷線 1 秒重連（daemon 重啟自愈）。
     pub fn watch_events(&self) {
         let session = self.session.clone();
@@ -519,10 +558,20 @@ impl AppCore {
         std::thread::spawn(move || loop {
             let tx2 = tx.clone();
             let _ = session.listen(
-                &[EventTopic::OutboxDrained, EventTopic::VaultChanged],
+                &[
+                    EventTopic::OutboxDrained,
+                    EventTopic::VaultChanged,
+                    EventTopic::ApprovalRequired,
+                ],
                 move |topic| {
-                    if matches!(topic, EventTopic::OutboxDrained | EventTopic::VaultChanged) {
-                        let _ = tx2.send(Cmd::EventsRefresh);
+                    match topic {
+                        EventTopic::ApprovalRequired => {
+                            let _ = tx2.send(Cmd::FetchPending);
+                        }
+                        EventTopic::OutboxDrained | EventTopic::VaultChanged => {
+                            let _ = tx2.send(Cmd::EventsRefresh);
+                        }
+                        _ => {}
                     }
                 },
             );
@@ -1143,6 +1192,66 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.theme_mode.set(mode);
             crate::save_theme_mode(mode);
         }
+        Cmd::OpenApprovals => {
+            core.leave_detail();
+            core.sort_menu.set(false);
+            core.route.set(Route::Approvals);
+            core.send(Cmd::FetchPending);
+        }
+        Cmd::FetchPending => {
+            core.ipc_quiet(|s| match s.call(&Call::Agent(AgentCall::ListPending)) {
+                Ok(Response::Sessions(rows)) => Cmd::PendingLoaded(Arc::new(parse_pending(&rows))),
+                // 輪詢失敗靜默（下一拍重試；連線死因已由其他路徑顯式報）。
+                _ => Cmd::PendingLoaded(Arc::new(Vec::new())),
+            });
+        }
+        Cmd::PendingLoaded(rows) => {
+            core.pending.set(rows);
+        }
+        Cmd::ApprovePending(id) => {
+            core.ipc(move |s| {
+                let res = match uuid::Uuid::parse_str(&id) {
+                    Ok(uuid) => match s.call(&Call::Agent(AgentCall::Approve {
+                        id: bw_proto::ApprovalId(uuid),
+                        grants: None,
+                    })) {
+                        Ok(Response::Ok) => Ok(()),
+                        Ok(other) => Err(format!("Approve 回應形態不符：{other:?}")),
+                        Err(e) => Err(e.display()),
+                    },
+                    Err(e) => Err(format!("批准 id 非 uuid：{e}")),
+                };
+                Cmd::PendingActed { approve: true, res }
+            });
+        }
+        Cmd::DenyPending(id) => {
+            core.ipc(move |s| {
+                let res = match uuid::Uuid::parse_str(&id) {
+                    Ok(uuid) => match s.call(&Call::Agent(AgentCall::Deny {
+                        id: bw_proto::ApprovalId(uuid),
+                    })) {
+                        Ok(Response::Ok) => Ok(()),
+                        Ok(other) => Err(format!("Deny 回應形態不符：{other:?}")),
+                        Err(e) => Err(e.display()),
+                    },
+                    Err(e) => Err(format!("拒絕 id 非 uuid：{e}")),
+                };
+                Cmd::PendingActed { approve: false, res }
+            });
+        }
+        Cmd::PendingActed { approve, res } => {
+            core.settle();
+            match res {
+                Ok(()) => {
+                    core.error_text.set(None);
+                    core.notice.set(Some(if approve { "已批准請求" } else { "已拒絕請求" }.into()));
+                    core.send(Cmd::FetchPending);
+                    // 批准可能放行了被擋的鏡像寫入，列表順勢重抓。
+                    fetch_list(core);
+                }
+                Err(e) => core.error_text.set(Some(e)),
+            }
+        }
         Cmd::ConfirmYes => {
             let Some(c) = core.confirm.get() else {
                 return;
@@ -1516,6 +1625,25 @@ pub fn parse_folders(v: &serde_json::Value) -> Vec<FolderEntry> {
         .unwrap_or_default()
 }
 
+/// `Response::Sessions`（ListPending 行）→ 佇列列；缺 id 跳過。
+/// `requested_at_ms` 為 daemon 後補欄位，缺席＝None（UI 不虛構時間）。
+pub fn parse_pending(rows: &[serde_json::Value]) -> Vec<PendingRow> {
+    rows.iter()
+        .filter_map(|row| {
+            let id = row.get("id").and_then(|i| i.as_str())?.to_owned();
+            Some(PendingRow {
+                id,
+                summary: row
+                    .get("summary")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+                requested_at_ms: row.get("requested_at_ms").and_then(|t| t.as_u64()),
+            })
+        })
+        .collect()
+}
+
 /// 自訂欄位 diff（純函數，可單測）：以 `key` 對齊基準／現況，回
 /// `(leaf, structural)` 兩批。leaf＝`field.<i>.name/value`（i 為基準陣列
 /// 位置）；structural＝SetType（基準位置）→ RemoveField（基準位置，
@@ -1682,6 +1810,21 @@ mod tests {
         assert_eq!(rows[0].name.as_deref(), Some("工作"));
         assert_eq!(rows[1].name, None);
         assert!(parse_folders(&serde_json::json!({"not": "array"})).is_empty());
+    }
+
+    #[test]
+    fn parse_pending_maps_rows_and_tolerates_missing_time() {
+        let v = serde_json::json!([
+            {"id": "x1", "summary": "Vault.Get.Reveal", "requested_at_ms": 1794000000123u64},
+            {"id": "x2", "summary": "Use.Run"},
+            {"summary": "缺id跳過"},
+        ]);
+        let rows = parse_pending(v.as_array().unwrap());
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, "x1");
+        assert_eq!(rows[0].requested_at_ms, Some(1794000000123));
+        // daemon 尚未帶時間欄：None 而非虛構值。
+        assert_eq!(rows[1].requested_at_ms, None);
     }
 
     fn draft(key: u32, name: &str, value: &str, kind: CipherFieldKind) -> FieldDraft {
