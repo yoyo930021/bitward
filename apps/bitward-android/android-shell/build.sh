@@ -19,6 +19,9 @@ OUT_APK="$APP_DIR/.nsh/out/bitward-islands.apk"
 STAGE="$HERE/build/nsh-stage"
 KS="${NSH_DEBUG_KEYSTORE:-$HOME/.android/debug.keystore}"
 
+# icon 產物斷言：mipmap／adaptive XML 由 scripts/gen-icons.sh 生成後入庫（res＝源檔）
+bash "$APP_DIR/../../scripts/gen-icons.sh" --check || exit 1
+
 [[ -f "$NSH_APK" ]] || (cd "$APP_DIR" && nsh package --target android)
 [[ -f "$KS" ]] || { echo "找不到簽章鑰匙庫 $KS（nsh package 用的同一把）" >&2; exit 1; }
 
