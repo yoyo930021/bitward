@@ -33,7 +33,7 @@ cd apps/bitward-gui
 BITWARD_GUI_SOCK=<repo>/dev/e2e/demo/s NSH_GUI_SHOTS=$PWD nsh run --target macos
 ```
 
-依指令序列跑完整驗收流並寫 `shot-1..23、26..30-*.png`（24/25 見下）後退出：列表全量（三欄骨架、
+依指令序列跑完整驗收流並寫 `shot-1..23、26..33-*.png`（24/25 見下）後退出：列表全量（三欄骨架、
 型別磚、未同步膠囊，右欄空態為「選取一個項目」佔位）→ 搜尋 "GitHub" →
 詳情遮罩 → 詳情 revealed → 新增表單模態 → 真送新增（Create+AddTag）
 → TOTP 拒絕路徑（無 seed → 錯誤橫條）→ 排序下拉 → 標籤 chips 選取 →
@@ -46,7 +46,9 @@ TOTP 倒數三段（真取碼後偽造時間源示 30/10/5 秒比例，5 秒段�
 資料夾樹（把「GitHub 測試」歸入工作資料夾後過濾，側欄節點選中態）→
 SecureNote 模態（帳密收合、備註大欄、Card/Identity 佔位灰）→
 自訂欄位編輯列（文字＋隱藏兩列）→ 匯入模態（貼路徑→預覽計數）→
-匯入執行後結果列（已匯入 N／跳過 M，列內含匯入產物）。
+編輯模式欄位解鎖（text→boolean 開關拍板 shot-31、增／刪列 shot-32、
+存檔後詳情頁布爾欄開關樣 shot-33）→ 匯入執行後結果列
+（已匯入 N／跳過 M，走單交易 `VaultCall:Import`，列內含匯入產物）。
 
 ### 徽章無感收斂證據（`NSH_GUI_SHOTS_DRAIN`）
 
@@ -63,9 +65,11 @@ BITWARD_GUI_SOCK=<drain-daemon.sock> NSH_GUI_SHOTS=$PWD NSH_GUI_SHOTS_DRAIN=1 \
 ```
 
 注意：垃圾桶與資料夾需要 daemon 支援 `Query.deleted`／`Query.folder` 三態與
-`ListFolders`／`Vault:Restore`／`Vault:Purge`（主線三件套已落地）；產生器的
-`Use:GeneratePassword` 為既有呼叫面。匯入無 daemon 端點，走 GUI 本地解析＋
-逐筆 `Vault:Create` 兜底。跑前把 demo daemon 重啟為新構成品並 `bitward unlock`，
+`ListFolders`／`Vault:Restore`／`Vault:Purge`（主線三件套已落地）；批次 2c 的
+編輯欄位增刪改型與原子匯入需要 `FieldEdit::SetType/AppendField/RemoveField`
+與 `VaultCall:Import`（daemon 批次 3，e32e1d6 起）。產生器的 `Use:GeneratePassword`
+為既有呼叫面。匯入執行走單交易 `VaultCall:Import`（全收或全拒），本地解析只做
+預覽計數與加密檔擋下。跑前把 demo daemon 重啟為新構成品並 `bitward unlock`，
 且側欄「工作資料夾」需已存在（`bitward folder create 工作資料夾`）。
 
 注意：流裡會真寫 demo vault（建一筆 "E2E 驗證項目"、改名、軟刪；

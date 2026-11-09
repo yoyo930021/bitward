@@ -518,6 +518,9 @@ pub fn script(dir: PathBuf, core: AppCore) {
     at(44600, move || c.send(Cmd::SubmitForm));
 
     // —— 編輯模式欄位解鎖（批次 3）：text→boolean 拍板 ——
+    // 先退出資料夾過濾（2b 筆記範例無資料夾，在過濾態下不可見）。
+    let c = core.clone();
+    at(45000, move || c.send(Cmd::ChooseFolder(None)));
     let c = core.clone();
     at(45600, move || {
         if let Some(id) = find_id(&c, "2b 筆記範例") {
@@ -590,8 +593,8 @@ pub fn script(dir: PathBuf, core: AppCore) {
         c.send(Cmd::RefetchList);
     });
     let d = dir.clone();
-    at(50200, move || capture(&d, "shot-30-import-result.png"));
-    at(50800, quit);
+    at(54200, move || capture(&d, "shot-30-import-result.png"));
+    at(54800, quit);
 }
 
 /// 由資料夾鏡像找名字的 id（找不到回空字串）。
