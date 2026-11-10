@@ -1001,9 +1001,10 @@ impl Hub {
     /// password/totp/fields/notes 全部以 item key 加密（jslib `Cipher.key`；
     /// bitwarden.com/help/what-encryption-is-used）。
     /// - 帶 `key` 欄 → 解包得 item key。包裝鑰候選依歸屬
-    ///   （[`Self::cipher_owner_org`]）排首，再補其他已派生鑰——type 2 信封
-    ///   MAC 先驗，錯鑰解不開、絕不會誤出明文；歸屬候選排首讓 move 收斂前
-    ///   的過渡窗（鏡像已改歸屬、`key` 仍舊包法）也解得開。全解不開 → None。
+    ///   （[`Self::cipher_owner_org`]）排首（常見路徑），再補其他已派生鑰
+    ///   依次嘗試——type 2 信封 MAC 先驗，錯鑰解不開、絕不會誤出明文；
+    ///   多候選也覆蓋 move 收斂前的過渡窗（鏡像已改歸屬、`key` 仍舊包法）。
+    ///   全解不開 → None。
     /// - 無 `key` 欄（舊項目/自家 CLI 種子）→ 歸屬鑰直解內容欄（jslib 對
     ///   無 key cipher 的 fallback 同口徑，官方讀我們舊寫法產的項目不受影響）。
     ///

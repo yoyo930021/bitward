@@ -62,7 +62,7 @@
 
 明確不存在：第二個 sync 客戶端、GUI 內嵌的第二份金鑰、獨立的 HTTP 服務層（HTTP/TLS 只是 BTP 的一種 transport binding）。
 
-金鑰落盤形態：`vault.db` 存伺服器原樣密文（`2.iv|ct|mac` 不改寫）；user key 以 OS 級封存（macOS Keychain biometric ACL、Android Keystore Class 3-bound/StrongBox）；重啟 daemon 用封存金鑰直接解包，**不重跑 KDF**（冷啟秒級，graft 自候選二）。master password 只在解鎖瞬間存在，無任何常駐環境變數（`BW_SESSION` 概念不存在）。
+金鑰落盤形態：`vault.db` 存伺服器原樣密文（`2.iv|ct|mac` 不改寫）；user key 以 OS 級封存（macOS Keychain biometric ACL、Android Keystore Class 3-bound/StrongBox）；重啟 daemon 用封存金鑰直接解包，**不重跑 KDF**（冷啟秒級，graft 自候選二）。master password 只在解鎖瞬間存在，無任何常駐環境變數（`BW_SESSION` 概念不存在）。欄位級金鑰採官方模型：每筆 cipher 的 `key` 欄存「item key（64B enc‖mac）被 user/org key 包」的信封，name/帳密等內容欄以 item key 加密；daemon 的單一解析器（bitwarderd `Hub::cipher_decrypt_key`）依歸屬 unwrapped 後選鑰，無 `key` 欄的舊形態退回歸屬鑰直解（jslib fallback 同口徑）。
 
 ### 1.1 多中樞拓撲（多個 Full client）
 
@@ -206,7 +206,7 @@ Enrollment：agent 首次連線產生 `EnrollmentRequest`，daemon 推 `NeedAppr
 pub struct Mutation { pub id: MutationId, pub seq: u64,        // 同 item FIFO，跨機欄位級 3-way merge
                       pub item: ItemId, pub base: ServerRev,   // 樂觀併發基準
                       pub op: Op,                              // Create|Patch|Delete|Restore|Move|Assign|Attachment*
-                      pub payload_enc: EncryptedBlob,          // 入列時即用 user key 加密好；push 路徑不再碰金鑰
+                      pub payload_enc: EncryptedBlob,          // 入列時即用解析器選定金鑰（item key／org／user）加密好；push 路徑不再碰金鑰
                       pub origin: SessionId,                   // 衝突時知道該問誰
                       pub state: MutState }                    // Queued|InFlight|Awaiting|Applied|Conflict|Dead
 ```
