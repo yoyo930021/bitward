@@ -83,11 +83,18 @@ pass "A12a 不同欄併發自動合併"
 
 # A12b：同欄衝突 → 收件匣。序列化：A 離線編輯並先收斂；B 鏡像留在舊 rev（通知不會回放），
 # B 再編輯同欄 → 必然 CAS 落空 → 欄位級 merge 判衝突。
+# 2026-11-10 實錄加固：A 的收斂推送（auto-drain 退避可遲至 ~30s）與 B 的編輯
+# 幾乎同時落地時，B 的 targeted pull 若先於 edit，鏡像變 fresh → CAS 命中 →
+# 衝突=0 的假紅 flake。把 B 的編輯也放進停啟窗口：mutation 的 base 在入列
+# 當下凍結，重啟後 push 必 CAS 落空——序列化由腳本控制，不再賭時鐘順序。
 docker stop "$VW" >/dev/null
 A edit "$GID" --set notes=from-a >/dev/null
 docker start "$VW" >/dev/null
 for _ in $(seq 1 30); do [[ "$(A outbox --json | jq "$PENDING")" == "0" ]] && break; sleep 1; done
+[[ "$(A outbox --json | jq "$PENDING")" == "0" ]] || fail "A12b 前置：A 的 from-a 未收斂"
+docker stop "$VW" >/dev/null
 B edit "$GID" --set notes=from-b >/dev/null
+docker start "$VW" >/dev/null
 CONFC=0
 for _ in $(seq 1 60); do
   CB=$(B conflicts --json | jq 'length')
