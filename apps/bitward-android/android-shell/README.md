@@ -56,7 +56,8 @@ cd apps/bitward-android && android-shell/build.sh
 | `app/src/main/AndroidManifest.xml` | 孤島三 service＋复刻 nsh 的 application/activity 節（application 加 `android:name=".BitwardApplication"`） |
 | `app/src/main/kotlin/io/bitward/android/BitwardApplication.kt` | 進程最早期把 `BITWARD_ANDROID_DATA` 指向 `noBackupFilesDir/bitward`（鏡像目錄缺陷修） |
 | `app/src/main/kotlin/io/bitward/android/BitwardAutofillService.kt` | 填充服務＋`HubBridge` 程序內介面（unlocked/candidates/reveal/save）＋`HubHolder.ensureBridge()` |
-| `app/src/main/kotlin/io/bitward/android/NativeHub.kt` | Rust 中樞的 JNI 面（`src/jni.rs` 符號）＋`HubBridge` 的 in-process 實作 |
+| `app/src/main/kotlin/io/bitward/android/NativeHub.kt` | Rust 中樞的 JNI 面（`src/jni.rs` 五支符號：ready/unlocked/candidates/reveal/save）＋`HubBridge` 的 in-process 實作 |
+| `app/src/main/kotlin/io/bitward/android/AutofillProbeActivity.kt` | e2e A16 探針頁：hint 帳密欄＋`AutofillManager.commit()`（確定性觸發存檔流；零業務語意） |
 | `app/src/main/kotlin/io/bitward/android/BitwardCredentialProviderService.kt` | API 34 `android.service.credentials.CredentialProviderService` 轉接（骨架，bridge 已預留） |
 | `app/src/main/kotlin/io/bitward/android/BitwardKeyStore.kt` | Keystore Class 3（AES wrap 金鑰＋EC 探針，StrongBox 降級路） |
 | `app/src/main/kotlin/io/bitward/android/HubService.kt` | foreground service 保命（`startForeground` 尚未接，見下） |
@@ -85,6 +86,11 @@ cd apps/bitward-android && android-shell/build.sh
    但本批**未解鎖的冷啟 service 仍回鎖定態**——金鑰只活在已登入的 UI
    進程記憶體，這是 Keystore 批之前刻意保留的邊界。
 4. 背景同步/UnifiedPush 走 `HubService.startForeground`（尚未接，含通知權限）。
+5. save 真寫入（2026-11-10 第四批）：未儲存組合的 fill 回應掛 `SaveInfo`
+   （USERNAME|PASSWORD，帳號欄現值對上候選＝已儲存不掛）；onSaveRequest 從
+   fillContexts 結構取帳密與查詢鍵（webDomain 優先、原生退 package）過
+   `nshSave` → `Hub::save_from_autofill`（同帳號改密＝patch 密碼欄；查無＝
+   create；同組合＝unchanged 零寫入）。鎖態 save 回失敗不假裝存（驗收 A16）。
 
 解鎖引導：鎖定態面板列「Bitward：尚未解鎖」，點它拉開 app 走登入；
 解鎖後的下一次 fill 請求就是真候選列（驗收 A11 走的就是這條路）。

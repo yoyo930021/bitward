@@ -262,14 +262,15 @@ impl Hub {
             .unwrap_or(u32::MAX);
         if pending > 0 {
             log::warn!("pull: outbox 尚有 {pending} 列未推送，跳過全量重建（離線態）");
-            return Ok(self.store.cipher_count().unwrap_or(0) as usize);
+            // 計數口徑＝可見鏡像（list 排除 tombstone／封存），不是 raw 行數。
+            return Ok(self.list("").len());
         }
         let raw = client.sync().await.map_err(|e| format!("sync 失敗：{e}"))?;
         self.store
             .apply_sync(&raw)
             .map_err(|e| format!("鏡像落地失敗：{e}"))?;
         self.reindex_plain()?;
-        Ok(self.store.cipher_count().unwrap_or(0) as usize)
+        Ok(self.list("").len())
     }
 
     /// 鏡像落盤後的明文索引回填（與 daemon 同語意、同函數：欄位路徑見

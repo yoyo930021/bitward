@@ -274,6 +274,8 @@ pub fn vault_page(
                 .child(
                     view()
                         .flex_col()
+                        .flex_1()
+                        .min_w(px(0.0))
                         .gap_0p5()
                         .child(
                             text("金庫")
@@ -292,7 +294,8 @@ pub fn vault_page(
                                         Phase::SignedOut => String::new(),
                                     })
                                     .text_size(px(theme::TEXT_ROW_SUB))
-                                    .text_color(theme::TEXT_SECONDARY),
+                                    .text_color(theme::TEXT_SECONDARY)
+                                    .flex_shrink_0(),
                                 )
                                 .child(
                                     text(move || match phase.get() {
@@ -302,7 +305,8 @@ pub fn vault_page(
                                     .text_size(px(11.5))
                                     .text_color(theme::TEXT_MUTED)
                                     .number_of_lines(1)
-                                    .ellipsize_mode(EllipsizeMode::Tail),
+                                    .ellipsize_mode(EllipsizeMode::Tail)
+                                    .flex_1(),
                                 ),
                         ),
                 )
@@ -311,6 +315,7 @@ pub fn vault_page(
                         .flex_row()
                         .items_center()
                         .gap_2()
+                        .flex_shrink_0()
                         .child(ghost_button("重新同步", move || {
                             if phase.get() == Phase::Busy {
                                 return;
@@ -834,10 +839,7 @@ pub fn detail_page(
                                 Some(r) => r.username.unwrap_or_default(),
                                 None => "••••••••".to_owned(),
                             },
-                            vec![
-                                reveal_toggle(show_hub.clone(), id, plain, show_status),
-                                copy_revealed(plain, "username", copied),
-                            ],
+                            vec![copy_revealed(plain, "username", copied)],
                         ),
                         field_block(
                             "密碼",
@@ -847,7 +849,10 @@ pub fn detail_page(
                                 }
                                 None => "••••••••".to_owned(),
                             },
-                            vec![copy_revealed(plain, "password", copied)],
+                            vec![
+                                reveal_toggle(show_hub.clone(), id, plain, show_status),
+                                copy_revealed(plain, "password", copied),
+                            ],
                         ),
                     ],
                 ))
@@ -946,23 +951,28 @@ pub fn detail_page(
                         rows.push(block(m.tags.join("、"), false, vec![]));
                     }
                     let status_line = if hub_pending(&other_hub, id) { "待推送" } else { "已同步" };
-                    let status_fg = if hub_pending(&other_hub, id) {
-                        theme::ACCENT
-                    } else {
-                        theme::TEXT_MUTED
-                    };
-                    rows.push(block(
-                        status_line.to_owned(),
-                        false,
-                        vec![view()
+                    let status_hub = other_hub.clone();
+                    rows.push(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
                             .child(
                                 text(status_line)
-                                    .text_size(px(theme::TEXT_BADGE))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(status_fg),
+                                    .text_size(px(theme::TEXT_FIELD_VALUE))
+                                    .text_color(move || {
+                                        if hub_pending(&status_hub, id) {
+                                            theme::ACCENT
+                                        } else {
+                                            theme::TEXT_SECONDARY
+                                        }
+                                    }),
                             )
-                            .into()],
-                    ));
+                            .rounded(px(theme::RADIUS_BLOCK))
+                            .bg(theme::SURFACE)
+                            .px_3()
+                            .py_2(),
+                    );
                     if rows.is_empty() {
                         return view();
                     }

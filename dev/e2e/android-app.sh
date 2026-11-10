@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Android P4b 驗收（契約 §5 P4 列「Android track 自此起平行」）。
 #
-# 十四斷言（A1–A14）：
+# 十七斷言（A1–A17）：
 #   A1 in-process 核心（bw-crypto/bw-server/bw-store）交叉編譯進三 ABI 的 APK
 #   A2 app 裝進 emulator 並啟動到登入畫面（原生 nav 標題渲染）
 #   A3 真實 UI 路徑完成登入：prelogin→派生→password grant→user key 解封→sync→明文索引
@@ -19,6 +19,13 @@
 #   A13 編輯只動密碼欄：預填走 reveal、送欄位級差量→同步後 VW 端帳號欄存活
 #   A14 刪除＝軟刪：tombstone 即刻離列→同步後 VW 端鏡像不再列出（restore
 #       語意在 Hub，UI 本批不掛）
+#   A15 手機新皮：頂部列＋搜尋＋資料夾 chip 列＋FAB 全在層級；全頁表單建
+#       TOTP 項目（seed 欄真落鏡像）、詳情分節值塊截圖
+#   A16 autofill save 全鏈：探針頁輸入未儲存組合→fill 回 SaveInfo→提交→
+#       onSaveRequest→Hub::save_from_autofill create→outbox→重新同步 drain
+#       →暫時 daemon 對 VW reveal 出存进去的帳密（鎖態不假裝存）
+#   A17 詳情 TOTP 自動碼：進頁免按鈕現算，碼與本機 python HMAC 同值、
+#       倒數條「剩餘 N 秒」渲染（≤5s 轉警告色屬視覺，截圖留證）
 # 產物：apps/bitward-android/shots/*.png（截圖）與 .nsh/out/bitward-islands.apk
 #       （孤島＋nsh 中樞的合併 APK；A1–A7 裝的就是這顆）
 set -euo pipefail
@@ -473,6 +480,156 @@ LEFT=$(B2 --json ls --text "e2e-added" | python3 -c 'import json,sys; print(len(
 kill $HUB_PID 2>/dev/null || true
 trap - EXIT
 pass "A14 刪除：軟刪即刻離列、同步後 VW 端收斂（列表不再含該筆）"
+
+# --- 15. A15：手機新皮層級＋全頁表單建 TOTP 項目 ------------------------------
+# 表單打字照 IME 教訓：autofill 服務保持關（A12 起未開），A16 才開。
+dump /tmp/android-a15-vault.xml
+for t in "鏡像 4 筆" "全部" "未歸屬" "新增" "搜尋名稱或網址"; do
+  has_text /tmp/android-a15-vault.xml "$t" || fail "A15 新皮層級缺「$t」（見 /tmp/android-a15-vault.xml）"
+done
+# 列距實測：相鄰列名文字 y 差＝列高節拍（44dp 換算裝置 px，容許 ±3px 取整）。
+DEN=$($ADB shell wm density | sed -E 's/.*: ([0-9]+).*/\1/' | tr -d '\r')
+PITCH=$(python3 -c "print(int(44*$DEN/160))")
+python3 - "$PITCH" <<'PY' || fail "A15 列高不是 44dp 節拍"
+import re, sys
+pitch = int(sys.argv[1])
+x = open('/tmp/android-a15-vault.xml').read()
+ys = []
+for m in re.finditer(r'text="(github|gitlab|cloudflare|bitward-selftest)"[^>]*bounds="\[\d+,(\d+)\]\[\d+,\d+\]"', x):
+    ys.append(int(m.group(2)))
+ys.sort()
+pitches = [b - a for a, b in zip(ys, ys[1:])]
+assert any(abs(p - pitch) <= 3 for p in pitches), f"row pitch {pitches} vs {pitch}"
+PY
+shot 15-vault-skin
+# 詳情分節截圖（遮罩態值塊）
+tap_text a15-row "gitlab"
+dump /tmp/android-a15-detail.xml
+has_text /tmp/android-a15-detail.xml "帳號" || fail "A15 詳情分節缺「帳號」label"
+has_text /tmp/android-a15-detail.xml "••••••••" || fail "A15 詳情值塊應遮罩"
+has_text /tmp/android-a15-detail.xml "其他資訊" || fail "A15 詳情缺「其他資訊」節"
+shot 15-detail-skin
+$ADB shell input keyevent 4 </dev/null >/dev/null 2>&1
+sleep 1
+# 全頁表單：FAB → 新增項目頁（名稱＋seed＋網址），存完列表掛待推送。
+tap_text a15-fab "新增"
+wait_text "新增項目" 10 || fail "A15 全頁表單沒出現"
+shot 15-form
+tap_text a15-name "項目名稱（必填）"
+type_text "totp-demo"
+hide_ime
+tap_text a15-totp "驗證碼 seed（可留空；編輯不改動＝保留原 seed）"
+type_text "JBSWY3DPEHPK3PXP"
+hide_ime
+tap_text a15-uri "網址（可留空）"
+type_text "https://totp.example.com"
+hide_ime
+$ADB logcat -c
+tap_text a15-save "儲存"
+wait_text "totp-demo" 15 || { $ADB logcat -d | grep -E 'nsh_app|bitward' | tail -20; fail "A15 表單新增後列表沒出現該筆"; }
+dump /tmp/android-a15-pending.xml
+has_text /tmp/android-a15-pending.xml "待推送" || fail "A15 表單新增列應掛「待推送」"
+APP_LOG=$($ADB logcat -d)
+[[ "$APP_LOG" == *'create'*'待推送'* ]] || fail "A15 logcat 沒有 create 入列軌跡"
+shot 15-vault-totp-pending
+pass "A15 新皮：chip 列＋FAB＋44px 列節拍、全頁表單建 TOTP 項目（seed 落鏡像）"
+
+# --- 16. A16：autofill save 全鏈（SaveInfo→onSaveRequest→outbox→drain→VW） ----
+# 探針頁（AutofillProbeActivity）：hint 帳密欄＋commit 鈕；app 進程未重啟，
+# 中樞保持解鎖（force-stop 會丟金鑰，這裡刻意不重啟）。
+SAVE_USER="save-e2e-$(date +%s)"
+SAVE_PASS="SavePass-9f3Kq"
+$ADB shell settings put secure autofill_service "$AF_SVC"
+$ADB shell settings put secure current_autofill_service "$AF_SVC"
+sleep 2
+$ADB logcat -c
+$ADB shell am start -n "$PKG/.AutofillProbeActivity" >/dev/null 2>&1
+sleep 2
+tap_text a16-user "probe-user"
+for _ in $(seq 1 15); do
+  $ADB logcat -d | grep -q 'saveinfo=true' && break
+  sleep 1
+done
+APP_LOG=$($ADB logcat -d)
+[[ "$APP_LOG" == *'onFillRequest unlocked=true'* ]] || fail "A16 探針頁沒送來解鎖態 fill 請求"
+[[ "$APP_LOG" == *'saveinfo=true'* ]] || fail "A16 未儲存組合沒掛 SaveInfo"
+type_text "$SAVE_USER"
+hide_ime
+tap_text a16-pass "probe-pass"
+type_text "$SAVE_PASS"
+hide_ime
+$ADB logcat -c
+tap_text a16-submit "提交"
+# 系統存檔提示（SaveInfo 流的必經步驟）：認「儲存到 Bitward」描述列與
+# framework Save 鈕兩種形態，点了再等孤島落地標記。
+for _ in $(seq 1 12); do
+  dump /tmp/android-a16-prompt.xml
+  if has_text /tmp/android-a16-prompt.xml "儲存到 Bitward"; then tap_text a16-chip "儲存到 Bitward"; fi
+  if has_text /tmp/android-a16-prompt.xml "Save"; then tap_text a16-btn "Save"; fi
+  $ADB logcat -d | grep -q 'save ok action=' && break
+  sleep 1
+done
+APP_LOG=$($ADB logcat -d)
+[[ "$APP_LOG" == *'bitward-island: save ok action=created'* ]] \
+  || { echo "$APP_LOG" | grep bitward-island | tail -8; fail "A16 onSaveRequest 全鏈沒落地（無 save ok 標記）"; }
+[[ "$APP_LOG" == *'jni: save q=io.bitward.android action=created'* ]] \
+  || fail "A16 Rust 側沒有 create 軌跡（JNI save 標記缺失）"
+shot 16-save-prompt
+# 收斂走「登入 pull 前 drain」的正史路徑：重啟 app 重登（A11/A12 同款），
+# 計數 4→6（seed＋totp-demo＋存檔項）且待推送清乾淨。
+$ADB shell am force-stop $PKG
+$ADB shell settings put secure autofill_service null >/dev/null 2>&1 || true
+$ADB shell settings put secure current_autofill_service null >/dev/null 2>&1 || true
+$ADB shell monkey -p $PKG -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+wait_text "登入你的密碼庫" 30 || fail "A16 重啟後登入畫面沒出現"
+tap_text pw-field3 "只用於派生金鑰，不落地"
+type_text "$WP"
+hide_ime
+tap_text login-btn3 "登入"
+wait_text "鏡像 6 筆" 60 || { $ADB logcat -d | grep -E 'bitward|nsh|AndroidRuntime' | tail -20; fail "A16 重登後計數不對（應 6＝seed4＋totp-demo＋存檔）"; }
+dump /tmp/android-a16-list.xml
+has_text /tmp/android-a16-list.xml "io.bitward.android" || fail "A16 存檔項沒進列表"
+if has_text /tmp/android-a16-list.xml "待推送"; then fail "A16 登入 drain 後「待推送」沒清"; fi
+shot 16-save-synced
+# VW 直讀：暫時 daemon 拉鏡像、reveal 存進去那組帳密（金鑰鏈同 A12 口徑）。
+BITWARD_DATA_DIR="$PWD/$DA" "$DAEMON" --data-dir "$DA" --sock "$DA/s3" >"$DA/log3" 2>&1 &
+HUB_PID=$!
+trap 'kill $HUB_PID 2>/dev/null || true' EXIT
+sleep 1
+B3() { "$CLI" --sock "$DA/s3" "$@"; }
+echo "$WP" | B3 login --server "$SRV_HOST" --email "$EMAIL" --password-stdin >/dev/null \
+  || fail "A16 暫時 daemon 登入失敗"
+B3 sync >/dev/null
+SAVED_ID=$(B3 --json ls --text "io.bitward.android" | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(rows[0]["meta"]["id"] if rows else "")')
+[[ -n "$SAVED_ID" ]] || fail "A16 伺服器鏡像沒有存檔項（push 未送達 VW）"
+REVEAL=$(B3 --json reveal "$SAVED_ID")
+[[ "$REVEAL" == *"\"password\": \"$SAVE_PASS\""* ]] || fail "A16 VW 端 reveal 密碼不對：$REVEAL"
+[[ "$REVEAL" == *"$SAVE_USER"* ]] || fail "A16 VW 端 reveal 帳號欄缺失：$REVEAL"
+TOTPID=$(B3 --json ls --text "totp-demo" | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(rows[0]["meta"]["id"] if rows else "")')
+[[ -n "$TOTPID" ]] || fail "A16 表單建的 totp-demo 沒推達 VW（同批 drain）"
+pass "A16 autofill save 全鏈：SaveInfo→onSaveRequest→Hub create→drain→VW reveal 實帳密"
+
+# --- 17. A17：詳情 TOTP 自動碼（免按鈕、碼與本機 HMAC 同值） ------------------
+tap_text a17-row "totp-demo"
+wait_text "剩餘" 20 || { dump /tmp/android-a17-totp.xml; fail "A17 進詳情沒出現倒數條（自動取碼沒跑）"; }
+CODE=""
+for _ in $(seq 1 10); do
+  C=$(python3 -c "
+import base64,hmac,struct,time,hashlib
+seed=base64.b32decode('JBSWY3DPEHPK3PXP')
+t=int(time.time())//30
+d=hmac.new(seed,struct.pack('>Q',t),hashlib.sha1).digest()
+print('%06d' % (struct.unpack('>I',d[-4:])[0] % 1000000))")
+  dump /tmp/android-a17-code.xml
+  grep -q "text=\"$C\"" /tmp/android-a17-code.xml && { CODE=$C; break; }
+  sleep 1
+done
+[[ -n "$CODE" ]] || { dump /tmp/android-a17-code.xml; fail "A17 自動碼與本機 HMAC 不同值"; }
+shot 17-totp-auto
+$ADB shell input keyevent 4 </dev/null >/dev/null 2>&1
+kill $HUB_PID 2>/dev/null || true
+trap - EXIT
+pass "A17 TOTP 自動碼現算渲染（code=$CODE 同值、倒數條在），詳情截圖留證"
 
 echo
 echo "截圖：$(ls "$SHOTS" | tr '\n' ' ')"

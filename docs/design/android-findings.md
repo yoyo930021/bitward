@@ -252,3 +252,80 @@ nsh 管線（三 ABI 交叉編譯、NDK 注入、debug 簽章）全部照用。�
   欄位間切換**必隱鍵盤**（`input keyevent 111`）：模態總高度超過 IME 抬昇
   後的可視區時，下一欄的 tap 落在鍵盤上，文字接進前一欄（A12 首輪實錄：
   uri 字串接到密碼欄變成 `e2epasshttps://…`，VW reveal 斷言當場抓到）。
+
+## P4b 第四批（2026-11-10）：手機皮（ui.rs 重寫）＋autofill save 真寫入（A15–A17）
+
+### 新皮結構（tokens 落地形態）
+
+- 列表頁：頂部列 56（標題＋計數＋帳號列＋「重新同步／鎖定」）→ 搜尋框 44 →
+  資料夾 chip 列（全部／未歸屬／各夾，`Query.folder` 三態口徑）→ 44px 虛擬列表
+  → 右下 FAB（56、accent、extended「＋新增」）。詳情與表單都是 `nav_stack`
+  push 頁（編輯模態退役：全頁表單才有空間露出多網址／自訂欄／備註等支援面）。
+- 詳情頁：44 大磚＋大名稱＋收藏星（真寫入 `favorite` leaf）→ 分節值塊
+  （帳號／密碼→驗證碼→網址→自訂欄→備註→其他資訊）。TOTP **自動碼**：
+  進頁即 `Hub::totp_code`（無 seed＝`Ok(None)` 合法態、整節靜默收合），
+  `set_interval` 1s 心跳驅動倒數條（≤5s 轉 warning），視窗歸零 effect 自動重取。
+- 表單差量紀律同 macOS：網址列 key＝基準索引、新列隨機號；三批送
+  （既有列 leaf 批 → 結構批（刪列降序→附加）→ 新列 match 尾批走第二次
+  patch）。自訂欄按 key 對齊基準索引（中段刪列不動旁列）。單測 6 條罩住
+  （`uri_edits`／`field_edits`／boolean 正規化／六態表／totp 純函數）。
+
+### favicon 快取放 UI 訊號，不放 Hub Mutex
+
+前一手在 Hub 掛 `Mutex<HashMap>` 供渲染期查閱——斷流丟失，重寫時改判：
+渲染訂閱與結算回寫必須走同一條反應鏈，所以快取是 `Icons`（App 根
+`Signal<Arc<HashMap<..>>>`，同 macOS `state::icons`）；Hub 只留
+`icon_data_uri`（單飛閘＋磁碟快取，已提交面）。列表頁 `effect` 訂閱
+filtered 換算、對缺態 host 標 Loading＋spawn；字母磚是永久退路。
+
+### autofill save 鏈（onFillRequest→SaveInfo→onSaveRequest→Hub）
+
+- 判準：帳號欄現值非空且等於某候選帳號＝已儲存；否則（含空欄）掛
+  `SaveInfo(USERNAME|PASSWORD, [userField, passField])`＋描述「儲存到 Bitward」。
+  鎖態走既有 lockedResponse（無 SaveInfo＝框架不會發存檔請求）。
+- `onSaveRequest` 從 `request.fillContexts` 末個結構取帳密現值＋查詢鍵
+  （webDomain 優先、原生退 package）→ `nshSave` JNI（第五支符號，回
+  `[id, action]`，明文不落 log）→ `Hub::save_from_autofill`（冪等：同組合
+  unchanged 零寫入；同帳號新密碼＝patch 只動 password 欄）。本地交易進
+  outbox＝列表「待推送」，drain 照「重新同步／登入 pull 前」收斂。
+- **stub jar 實錄（第二批坑清單延續）**：`AssistStructure$ViewNode` 的取值面是
+  `getAutofillValue()`（不是文檔常見的 `getValue()`），`AutofillValue` 無
+  `isNull()`——判文字用 `isText()`。本地 android-35 stub jar 與真 API 36 jar
+  皆如此（javap 實查）。
+- **e2e 探針頁**（`AutofillProbeActivity`）：系統只在提交時發 onSaveRequest，
+  真 app 提交時機各家不同 → 探針頁＝hint 帳密欄＋`AutofillManager.commit()`
+  鈕（文件化「收集完畢」訊號）。欄位間距 260/140dp：autofill 面板錨在 focus
+  欄下方，緊貼的下一欄／鈕會被蓋住，tap 誤命中候選列（設計期避開，未踩坑）。
+
+### 首輪實錄：頂部列把「鎖定」推出屏（A7 FAIL→修）
+
+Pixel 10 Pro XL（1440px 寬）實測：email·server 列（43 字元）把頂部列左欄撐到
+x=1188，「重新同步」文字截斷、「鎖定」整個出屏，uiautomator 層級查無節點。
+修法＝左欄 `flex_1().min_w(0)`、帳號列 `flex_1()`＋ellipsize、計數與按鈕群
+`flex_shrink_0`。教訓：**單欄手機皮裡任何「文字＋按鈕同列」的列，文字側必須
+帶收斂約束，否則長帳號（email·https://host）直接擠掉動作鈕**。
+
+### 缺角清單（daemon 面 vs Android in-process 中樞；交回 Main，不改 crates/bins）
+
+對照 `crates/bw-proto` 的 Call 列舉與 `apps/bitward-android/src/hub.rs` 現面
+（Login/List/Get/Create/Patch/Delete/ListFolders/GetIcon/TotpCode/Sync/存檔已覆盖；
+垃圾桶與封存**排除**由共用 `Store::query` 預設免费得）。缺：
+
+| daemon 面 | Android 缺什麼 | 影響 |
+|---|---|---|
+| `Vault:Restore`／`Vault:Purge` | 軟刪復原、永久刪除（Hub 語意在 daemon） | 刪除後只能等伺服器端收斂，無垃圾桶視角 |
+| `Vault:SetArchived` | 封存／解封存寫入 | 列表已隱封存項，但 app 內無法操作 |
+| `Vault:Overlay`（AddTag/RemoveTag） | 標籤寫入 | 表單標籤欄 disabled＋註記；詳情唯讀顯示 |
+| `Vault:CreateFolder`／`DeleteFolder` | 資料夾管理 | chip 列／表單只選既有夾 |
+| `Vault:MoveToOrg`＋akey 解封 | org 共享項目寫入 | `patch` 直接拒絕共享項（不產生壞密文） |
+| `Vault:Import`／`Vault:Send` | 匯入、Send 面 | app 無入口 |
+| `Vault:Attachment` | 附件上傳／下載／刪除 | 詳情無附件節 |
+| `Vault:FindDuplicates`／`Merge` | 查重與合併 | — |
+| `Passkey:*` 全面 | GetPasskeys/DeletePasskey/Register/Assert；CredentialProviderService 只骨架 | 詳情無 passkey 節；孤島 passkey 未接線 |
+| `Use:GeneratePassword` | 密碼產生器 | 表單無產生器面板（macOS 有） |
+| `Sync:ListConflicts`／`ResolveConflict` | 衝突收件匣 | outbox 衝突進 bw-store 表，app 無 UI 入口 |
+| `Admin:GetSettings`／`SetSettings` | 本機設定面（自動鎖定／剪貼簿清除／重啟鎖定／鎖定清搜尋） | app 無設定頁；複製鈕無定時清除；**無自動鎖定**（金鑰長驻記憶體至手動「鎖定」） |
+| `Auth:ChangePassword` | 改主密碼 | — |
+| `Auth:Unlock`（封存金鑰重入） | 冷啟免主密碼解鎖 | 見已知的下一步 1 |
+| `Push:*` | UnifiedPush 註冊 | 背景同步未接（同第三批） |
+| `Vault:Reports` | 密碼健康度 | R4 進行中，落地後需同步評估接面 |

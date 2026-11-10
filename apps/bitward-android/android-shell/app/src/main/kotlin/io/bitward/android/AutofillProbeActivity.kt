@@ -49,8 +49,18 @@ class AutofillProbeActivity : Activity() {
                 Log.i(ISLAND_TAG, "probe commit requested")
             }
         }
+        // 欄位間距放大：autofill 面板錨在 focus 欄下方，緊貼的下一欄／鈕會
+        // 被面板蓋住——e2e 的 tap 會誤命中候選列（實測教訓同 A9 段）。
+        fun gap(dp: Int) = View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                (dp * resources.displayMetrics.density).toInt(),
+            )
+        }
         root.addView(user)
+        root.addView(gap(260))
         root.addView(pass)
+        root.addView(gap(140))
         root.addView(submit)
         setContentView(root)
     }
