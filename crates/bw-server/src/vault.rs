@@ -172,6 +172,7 @@ impl Client {
     ///   原始碼 `src/api/core/ciphers.rs` routes! 全表無 history handler。
     /// - 官方雲現行 OpenAPI（sdk-internal 生成客戶端 ciphers_api.rs，58 op）亦已
     ///   移除本端點（版本歷史僅存於 2023 年前舊雲）；`/details` 是附件明細非歷史。
+    ///
     /// 呼叫端（daemon reports 面）以 `is_route_missing_err` 分流「不支援」語意。
     pub async fn cipher_history(&self, id: ItemId) -> Result<Value, ServerError> {
         self.get_json(&format!("ciphers/{id}/history")).await

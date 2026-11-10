@@ -170,6 +170,8 @@ pub enum LockReason { User, Timeout, ServerLogout, KeyRotation, Revoked { by }, 
 
 `with_keys` 閉包是金鑰邊界：其他模組永遠拿不到 `KeyBundle` 實值，只能在閉包內用 → 編譯期排除「金鑰被傳進 thin client / 存進 store / 印進 log」。
 
+報告儀表板（路線 4，2026-11-10）：`VaultCall::Reports{PasswordReuse, WeakPasswords, CipherHistory}`——重用＝`FindDuplicates` 的 (host,username) 群集投影直接重用（同一掃描不另起、只回 id）；弱密碼＝鏡像全量 Reveal 級解密打分（`bw_crypto::password_score` 0–4，zxcvbn 同口徑分級語意的自寫規則近似：長度／字元類別／字典 top98 双形比對／重複／連續鏈，不引 zxcvbn 系 crate 的字典與 regex 機器），只在解鎖態現算、明文不出 `with_keys` 閉包、**結果不落盤**（落盤＝明文殘留面）、回包只含 id/name/score，列管門檻 `WEAK_PASSWORD_THRESHOLD=3` 單一定義 daemon 過濾與 GUI 著色共用；歷史＝代理 `GET /api/ciphers/{id}/history`（線格式查證：Vaultwarden 1.37.2 未實裝本路由（dev 容器實測 404＋routes! 全表無 handler）、官方雲現行 OpenAPI 亦無——條目自帶各版本 `key` 信封，由 `cipher_decrypt_key` 三態解析器直吃、名稱解密、`data.login.uris` 取計數；404/405→`supported:false` 收合 GUI 歷史節；查證無 server 端還原端點→`restoreSupported:false` 唯讀＋註記）。三報告出口全部去敏（分級 Identity，比照 FindDuplicates），GUI 側欄「報告」節卡面→清單→詳情歷史三層（`dev/e2e/reports.sh` 六斷言：shim 反代實裝舊版歷史格式驗名稱解密，同時留 VW 直連 404 基線）。
+
 ### 2.3 Agent session / grant / 出口淨化
 
 ```rust

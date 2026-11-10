@@ -185,6 +185,7 @@ impl Hub {
     ///   故本呼叫在 VW 上走 `supported:false` 分支，GUI 歷史節收合。
     /// - 官方雲現行 OpenAPI（bitwarden-sdk-internal 生成 ciphers_api.rs，58 op）
     ///   亦無歷史端點（版本歷史屬 2023 年前舊雲形態）。
+    ///
     /// 404/405 → `supported:false`（同 `is_route_missing_err` 慣例；鏡像存在的
     ///   項目在實裝路由的 server 上 404＝條目不存在，兩態語意皆為「無歷史可看」）。
     /// **唯讀**：查證無任何 server 端「從歷史還原」端點（官方 web vault 的
