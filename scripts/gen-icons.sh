@@ -71,6 +71,12 @@ if [ "$CHECK" = 1 ]; then
   exit $?
 fi
 
+if ! command -v resvg >/dev/null 2>&1; then
+  # 非互動 shell（launchd／detached）PATH 常缺 /opt/homebrew/bin——遍尋常見位置再放棄。
+  for _cand in /opt/homebrew/bin/resvg /usr/local/bin/resvg; do
+    [ -x "$_cand" ] && export PATH="$(dirname "$_cand"):$PATH" && break
+  done
+fi
 command -v resvg >/dev/null || { echo "FATAL: 找不到 resvg（brew install resvg）；icon 產物需要它"; exit 1; }
 [ -f "$SRC" ] || { echo "FATAL: 缺主設計 $SRC"; exit 1; }
 
