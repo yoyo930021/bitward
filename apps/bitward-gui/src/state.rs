@@ -250,10 +250,25 @@ pub enum Cmd {
     StateUpdated {
         state: UnlockStateView,
         refetch: bool,
+        /// 帳號顯示欄（批次 8）：None＝本路徑無情報（如 Welcome），不動現值。
+        reauth: bool,
+        email: Option<String>,
+        server: Option<String>,
     },
+    /// 主畫面切登入卡（帳號列/橫幅點擊；SignedOut 時本就是主畫面）。
+    OpenLogin,
+    /// 登入卡送出：前端校驗 → `Auth:Login{password:Some}`（本機 UDS 明文合法）。
+    SubmitLogin,
+    /// 登入失敗回包（成功直接走 StateUpdated，登入即解鎖的 hub 語意）。
+    LoginDone(Result<(), String>),
+    /// 空作（背景路徑無情報可落地時佔位）。
+    Nop,
     /// Sync:Trigger 成功回包：蓋同步時間戳、提示「已同步」、重抓列表。
     SyncDone {
         state: UnlockStateView,
+        reauth: bool,
+        email: Option<String>,
+        server: Option<String>,
     },
     WriteDone {
         err: Option<String>,
@@ -381,6 +396,99 @@ impl PwFields {
     }
 }
 
+/// 登入卡三欄（批次 8）：server/email＋密碼明文（只進訊號與送出時的
+/// `Zeroizing` 副本，同 `FormFields.password` 紀律）；error＝daemon 錯誤
+/// 原文可懂化；busy＝送出中（防連點重複登入）。
+#[derive(Clone)]
+pub struct LoginFields {
+    pub server: Signal<String>,
+    pub email: Signal<String>,
+    pub password: Signal<String>,
+    pub error: Signal<Option<String>>,
+    pub busy: Signal<bool>,
+}
+
+impl LoginFields {
+    fn reset(&self) {
+        self.password.set(String::new());
+        self.error.set(None);
+        self.busy.set(false);
+    }
+}
+
+/// 伺服器 URL 正規化＋http(s) 閘（純函數，單測點）：缺 scheme 補 https、
+/// 非 http(s) 拒絕、host 空/含空白拒絕。回傳送 daemon 的正規形態。
+pub fn normalize_server(raw: &str) -> Result<String, &'static str> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err("伺服器 URL 不可為空白");
+    }
+    let lower = s.to_lowercase();
+    let (scheme, rest_raw) = match lower.split_once("://") {
+        Some(("http", rest)) => ("http", rest),
+        Some(("https", rest)) => ("https", rest),
+        Some((_, _)) => return Err("僅支援 http(s) 伺服器 URL"),
+        None => ("https", s),
+    };
+    let host = rest_raw.split('/').next().unwrap_or("");
+    let host_ok = !host.is_empty()
+        && !host.contains(char::is_whitespace)
+        && (host.contains('.') || host == "localhost" || host.contains(':'));
+    if !host_ok {
+        return Err("伺服器 URL 格式不對，例：https://vault.example.com");
+    }
+    // scheme 以小寫正規化、host 起保留原樣（IDN/大小寫由 daemon 端处理）。
+    let rest = &s[s.len() - rest_raw.len()..];
+    Ok(format!("{scheme}://{rest}"))
+}
+
+/// 登入表單前端校驗（繁中訊息；省一次往返，最終裁判仍是 daemon）。
+/// Ok＝正規化後的 server URL。
+pub fn validate_login(server: &str, email: &str, password: &str) -> Result<String, String> {
+    if email.trim().is_empty() {
+        return Err("請輸入 email".into());
+    }
+    if password.is_empty() {
+        return Err("請輸入主密碼".into());
+    }
+    normalize_server(server).map_err(str::to_owned)
+}
+
+/// 登入錯誤可懂化（批次 8）：保留 daemon 原文（使用者要看真話），
+/// 403／傳輸類另加一句繁中提示。
+pub fn humanize_login(err: &str) -> String {
+    if err.contains("403") || err.contains("incorrect") {
+        format!("{err}（憑證遭拒：檢查 email 與主密碼）")
+    } else if err.contains("refused")
+        || err.contains("transport")
+        || err.contains("connect")
+        || err.contains("dns")
+    {
+        format!("{err}（連不到伺服器：檢查 URL 與網路）")
+    } else {
+        err.to_owned()
+    }
+}
+
+/// 側欄帳號列的顯示態（純函數，單測點）：needs_reauth 優先（憑證失效
+/// 時即使仍解鎖也要人看見）；未登入次之；其餘為已登入（email 可知則示）。
+#[derive(Debug, PartialEq, Eq)]
+pub enum AcctRow {
+    Reauth,
+    SignedOut,
+    Signed(Option<String>),
+}
+
+pub fn account_row(state: Option<&UnlockStateView>, reauth: bool, email: Option<&str>) -> AcctRow {
+    if reauth {
+        return AcctRow::Reauth;
+    }
+    match state {
+        None | Some(UnlockStateView::SignedOut) => AcctRow::SignedOut,
+        _ => AcctRow::Signed(email.map(str::to_owned)),
+    }
+}
+
 /// 新主密碼強度閘（與 daemon `hub::MIN_MASTER_PASSWORD` 同值；daemon 是
 /// 真相源，這裡只是送出前的前端攔截，省一次往返）。
 pub const MIN_MASTER_PASSWORD: usize = 12;
@@ -436,6 +544,15 @@ pub struct AppCore {
     pub totp_tick: Signal<u64>,
     /// 側欄同步狀態：本視窗最近一次 Sync:Trigger 成功時刻。
     pub last_sync: Signal<Option<Instant>>,
+    /// daemon 憑證失效旗（status.needs_reauth）：橫幅＋帳號列 warning。
+    pub needs_reauth: Signal<bool>,
+    /// 帳號顯示欄（status.email/server）：側欄帳號列與登入卡預填。
+    pub acct_email: Signal<Option<String>>,
+    pub acct_server: Signal<Option<String>>,
+    /// 主畫面強制切登入卡（needs_reauth 點擊進路；登入成功即清）。
+    pub show_login: Signal<bool>,
+    /// 登入卡三欄＋錯誤＋送出旗（批次 8：SignedOut 主畫面）。
+    pub login: LoginFields,
     pub confirm: Signal<Option<Arc<Confirm>>>,
     pub form: FormFields,
     /// 改主密碼模態開關 + 三欄（true 時 App 掛 modal）。
@@ -482,6 +599,17 @@ impl AppCore {
             totp_issued: signal(None),
             totp_tick: signal(0),
             last_sync: signal(None),
+            needs_reauth: signal(false),
+            acct_email: signal(None),
+            acct_server: signal(None),
+            show_login: signal(false),
+            login: LoginFields {
+                server: signal(String::new()),
+                email: signal(String::new()),
+                password: signal(String::new()),
+                error: signal(None),
+                busy: signal(false),
+            },
             confirm: signal_with(None, SignalEquals::Never),
             pw_modal: signal(false),
             pw: PwFields {
@@ -640,6 +768,18 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.error_text.set(None);
             core.send(Cmd::FetchFolders);
             fetch_list(core);
+            // 批次 8：Welcome 不帶帳號情報，補一發輕量 Status 回填
+            // 帳號列 email／登入卡 server 預填／needs_reauth 旗。
+            core.ipc_quiet(|s| match s.call(&Call::Sync(SyncCall::Status)) {
+                Ok(Response::Status(info)) => Cmd::StateUpdated {
+                    state: info.state,
+                    refetch: false,
+                    reauth: info.needs_reauth,
+                    email: info.email,
+                    server: info.server,
+                },
+                _ => Cmd::Nop,
+            });
         }
         Cmd::ConnectFailed { detail } => {
             core.settle();
@@ -849,6 +989,9 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                     Ok(Response::Status(info)) => Cmd::StateUpdated {
                         state: info.state,
                         refetch: true,
+                        reauth: info.needs_reauth,
+                        email: info.email,
+                        server: info.server,
                     },
                     Ok(other) => Cmd::Failed {
                         err: format!("Unlock 回應形態不符：{other:?}"),
@@ -859,17 +1002,29 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         }
         Cmd::TriggerSync => {
             core.ipc(|s| match s.call(&Call::Sync(SyncCall::Trigger { force: true })) {
-                Ok(Response::Status(info)) => Cmd::SyncDone { state: info.state },
+                Ok(Response::Status(info)) => Cmd::SyncDone {
+                    state: info.state,
+                    reauth: info.needs_reauth,
+                    email: info.email,
+                    server: info.server,
+                },
                 Ok(other) => Cmd::Failed {
                     err: format!("Sync.Trigger 回應形態不符：{other:?}"),
                 },
                 Err(e) => Cmd::Failed { err: e.display() },
             });
         }
-        Cmd::SyncDone { state } => {
+        Cmd::SyncDone { state, reauth, email, server } => {
             core.settle();
             core.vault.set(Some(state));
             core.error_text.set(None);
+            core.needs_reauth.set(reauth);
+            if email.is_some() {
+                core.acct_email.set(email);
+            }
+            if server.is_some() {
+                core.acct_server.set(server);
+            }
             core.last_sync.set(Some(Instant::now()));
             core.notice.set(Some("已同步".into()));
             fetch_list(core);
@@ -886,19 +1041,81 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                     Ok(state) => Cmd::StateUpdated {
                         state,
                         refetch: true,
+                        reauth: false,
+                        email: None,
+                        server: None,
                     },
                     Err(e) => Cmd::Failed { err: e.display() },
                 }
             });
         }
-        Cmd::StateUpdated { state, refetch } => {
+        Cmd::StateUpdated { state, refetch, reauth, email, server } => {
             core.settle();
+            let unlocked = matches!(state, UnlockStateView::Unlocked { .. });
             core.vault.set(Some(state));
             core.error_text.set(None);
+            core.needs_reauth.set(reauth);
+            if email.is_some() {
+                core.acct_email.set(email);
+            }
+            if server.is_some() {
+                core.acct_server.set(server);
+            }
+            // 解鎖/登入成功＝離開登入卡並清明文（登入即解鎖的 hub 語意）。
+            if unlocked {
+                core.show_login.set(false);
+                core.login.reset();
+                core.send(Cmd::FetchFolders);
+            }
             if refetch {
                 fetch_list(core);
             }
         }
+        Cmd::OpenLogin => core.show_login.set(true),
+        Cmd::SubmitLogin => {
+            if core.login.busy.get() {
+                return;
+            }
+            let server = core.login.server.get();
+            let email = core.login.email.get().trim().to_owned();
+            let pw = core.login.password.get().clone();
+            match validate_login(&server, &email, &pw) {
+                Err(msg) => core.login.error.set(Some(msg)),
+                Ok(url) => {
+                    core.login.busy.set(true);
+                    core.login.error.set(None);
+                    core.ipc(move |s| {
+                        match s.call(&Call::Auth(AuthCall::Login {
+                            server: url,
+                            email,
+                            password: Some(pw),
+                            api_key: None,
+                        })) {
+                            // 登入即解鎖：成功直接回 Status，走 StateUpdated。
+                            Ok(Response::Status(info)) => Cmd::StateUpdated {
+                                state: info.state,
+                                refetch: true,
+                                reauth: info.needs_reauth,
+                                email: info.email,
+                                server: info.server,
+                            },
+                            Ok(other) => Cmd::LoginDone(Err(format!(
+                                "Login 回應形態不符：{other:?}"
+                            ))),
+                            Err(e) => Cmd::LoginDone(Err(humanize_login(&e.display()))),
+                        }
+                    });
+                }
+            }
+        }
+        Cmd::LoginDone(res) => {
+            core.login.busy.set(false);
+            match res {
+                Ok(()) => core.login.reset(),
+                Err(e) => core.login.error.set(Some(e)),
+            }
+        }
+        Cmd::Nop => {}
         Cmd::OpenChangePassword => {
             core.pw.reset();
             core.pw_modal.set(true);
@@ -1907,6 +2124,48 @@ pub fn is_unlocked(st: &Option<UnlockStateView>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_server_gates_scheme_and_host() {
+        // 缺 scheme 補 https、大小寫正規化、localhost/含點 host 過閘。
+        assert_eq!(normalize_server("vault.example.com").unwrap(), "https://vault.example.com");
+        assert_eq!(normalize_server("HTTPS://Vault.Example.com/x").unwrap(), "https://Vault.Example.com/x");
+        assert_eq!(normalize_server("http://127.0.0.1:18095").unwrap(), "http://127.0.0.1:18095");
+        assert_eq!(normalize_server("localhost:8080").unwrap(), "https://localhost:8080");
+        // 非 http(s)、空 host、含空白、空字串全拒。
+        assert!(normalize_server("ftp://x.test").is_err());
+        assert!(normalize_server("https://").is_err());
+        assert!(normalize_server("https://a b").is_err());
+        assert!(normalize_server("   ").is_err());
+    }
+
+    #[test]
+    fn validate_login_requires_email_and_password() {
+        assert_eq!(
+            validate_login("vault.test", " a@b.c ", "").unwrap_err(),
+            "請輸入主密碼"
+        );
+        assert_eq!(
+            validate_login("vault.test", "  ", "pw").unwrap_err(),
+            "請輸入 email"
+        );
+        assert_eq!(validate_login("vault.test", "a@b.c", "pw").unwrap(), "https://vault.test");
+    }
+
+    #[test]
+    fn account_row_maps_reauth_first() {
+        let unlocked = UnlockStateView::Unlocked { epoch: 1, deadline_epoch_ms: None };
+        let out = UnlockStateView::SignedOut;
+        // needs_reauth 優先於一切（即使仍解鎖）。
+        assert_eq!(account_row(Some(&unlocked), true, Some("a@b.c")), AcctRow::Reauth);
+        assert_eq!(account_row(None, true, None), AcctRow::Reauth);
+        // 未登入（含 Welcome 尚無狀態）→ 登入入口。
+        assert_eq!(account_row(Some(&out), false, None), AcctRow::SignedOut);
+        assert_eq!(account_row(None, false, None), AcctRow::SignedOut);
+        // 其餘為已登入，email 可知則附。
+        assert_eq!(account_row(Some(&unlocked), false, Some("a@b.c")), AcctRow::Signed(Some("a@b.c".into())));
+        assert_eq!(account_row(Some(&unlocked), false, None), AcctRow::Signed(None));
+    }
 
     #[test]
     fn form_dirty_edit_baseline_matches_submit_semantics() {

@@ -197,6 +197,7 @@ pub fn App() -> impl IntoElement {
         .bg(theme::BASE)
         .child(topbar(core.clone()))
         .child(banner(core.clone()))
+        .child(reauth_banner(core.clone()))
         .child(when(
             move || conn_cond.phase.get() == Phase::Connecting,
             move || centered_hint(conn_build.clone(), "連線中…"),
@@ -342,7 +343,6 @@ fn sidebar(core: AppCore) -> View {
     let app_press = core.clone();
     let app_cnt = core.clone();
     let sync_core = core.clone();
-    let sync_time = core.clone();
     let export_core = core.clone();
     let import_core = core.clone();
     let pw_cond = core.clone();
@@ -440,23 +440,7 @@ fn sidebar(core: AppCore) -> View {
                 .gap_1()
                 .px_1()
                 .pb_3()
-                .child(
-                    text(move || match sync_time.last_sync.get() {
-                        Some(at) => {
-                            let s = at.elapsed().as_secs();
-                            if s < 60 {
-                                "上次同步：剛剛".to_owned()
-                            } else if s < 3600 {
-                                format!("上次同步：{} 分前", s / 60)
-                            } else {
-                                format!("上次同步：{} 小時前", s / 3600)
-                            }
-                        }
-                        None => "上次同步：本視窗尚未觸發".to_owned(),
-                    })
-                    .text_size(px(11.5))
-                    .text_color(theme::TEXT_MUTED),
-                )
+                .child(account_row(sync_core.clone()))
                 .child(side_text_button("立即同步", move || {
                     sync_core.send(Cmd::TriggerSync)
                 }))
@@ -669,16 +653,29 @@ fn theme_chip(label: &'static str, want: Appearance, core: AppCore) -> View {
         )
 }
 
-/// Ready 後的內容區：鎖態整頁取代主從式版面（Route 仍是導航真相）。
+/// Ready 後的內容區：登入卡／鎖態整頁取代主從式版面（Route 仍是導航真相）。
 fn router(core: AppCore) -> impl IntoElement {
+    let login_cond = core.clone();
+    let login_build = core.clone();
     let lock_cond = core.clone();
-    let lock_build = core.clone();
-    let split_build = core.clone();
+    let lock_build0 = core.clone();
+    let split_build0 = core.clone();
     when(
-        move || !matches!(lock_cond.vault.get(), Some(UnlockStateView::Unlocked { .. })),
-        move || lock_page(lock_build.clone()),
+        move || {
+            login_cond.show_login.get()
+                || matches!(login_cond.vault.get(), Some(UnlockStateView::SignedOut))
+        },
+        move || login_page(login_build.clone()),
     )
-    .otherwise(move || split(split_build.clone()))
+    .otherwise(move || {
+        let lock_build = lock_build0.clone();
+        let split_build = split_build0.clone();
+        when(
+            move || !matches!(lock_cond.vault.get(), Some(UnlockStateView::Unlocked { .. })),
+            move || lock_page(lock_build.clone()),
+        )
+        .otherwise(move || split(split_build.clone()))
+    })
 }
 
 /// 主從式版面（官方三欄骨架）：左側欄｜中列表欄｜右詳情欄。
@@ -793,6 +790,217 @@ fn lock_page(core: AppCore) -> View {
                     },
                 )),
         )
+}
+
+/// 登入卡（批次 8，鎖態卡姊妹款）：SignedOut 主畫面。置中 elevated 卡——
+/// 伺服器 URL（預填 status.server）、email、密碼（secure）、`登入` primary；
+/// 送 `Auth:Login{password:Some}`（本機 UDS 明文合法，同 CLI 紀律）；
+/// 失敗顯示 daemon 錯誤原文＋可懂化；成功→hub 登入即解鎖→StateUpdated 進庫。
+fn login_page(core: AppCore) -> View {
+    // 預填：server 取 status 上次值（空則留佔位提示）；email 取帳號列值。
+    if core.login.server.get().is_empty() && let Some(s) = core.acct_server.get() {
+        core.login.server.set(s);
+    }
+    if core.login.email.get().is_empty() && let Some(e) = core.acct_email.get() {
+        core.login.email.set(e);
+    }
+    let server = core.login.server;
+    let email = core.login.email;
+    let password = core.login.password;
+    let submit = core.clone();
+    let err_core = core.clone();
+    let busy_cond = core.clone();
+    view()
+        .flex_1()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .child(
+            view()
+                .w(px(380.0))
+                .flex_col()
+                .gap(px(theme::FORM_GAP))
+                .p_6()
+                .rounded(px(theme::RADIUS_CARD))
+                .border(px(1.0))
+                .border_color(theme::HAIRLINE)
+                .bg(theme::ELEVATED)
+                .shadow(vec![BoxShadow {
+                    offset_x: px(0.0),
+                    offset_y: px(12.0),
+                    blur: px(32.0),
+                    spread: px(-8.0),
+                    color: black().opacity(0.18).into(),
+                    inset: false,
+                }])
+                .child(
+                    view()
+                        .flex_col()
+                        .items_center()
+                        .gap_2()
+                        .pb_1()
+                        .w_full()
+                        .child(
+                            text("🔑")
+                                .text_size(px(theme::GLYPH_LOCK))
+                                .line_height(px(34.0)),
+                        )
+                        .child(
+                            text("登入密碼庫")
+                                .text_size(px(theme::TEXT_CARD_TITLE))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme::TEXT_PRIMARY),
+                        ),
+                )
+                .child(ui::form_field(
+                    "伺服器",
+                    "https://vault.example.com",
+                    server,
+                    false,
+                    move |v| server.set(v),
+                ))
+                .child(ui::form_field("Email", "you@example.com", email, false, move |v| {
+                    email.set(v)
+                }))
+                .child(ui::form_field(
+                    "主密碼",
+                    "（登入後即解鎖金鑰鏈）",
+                    password,
+                    true,
+                    move |v| password.set(v),
+                ))
+                .child(
+                    text(move || err_core.login.error.get().unwrap_or_default())
+                        .text_size(px(12.5))
+                        .line_height(px(18.0))
+                        .text_color(theme::DESTRUCTIVE),
+                )
+                .child(when(
+                    move || !busy_cond.login.busy.get(),
+                    move || {
+                        let c = submit.clone();
+                        view().w_full().child(
+                            ui::button("登入", ui::Btn::PrimaryWide, move || {
+                                c.send(Cmd::SubmitLogin)
+                            })
+                            .w_full(),
+                        )
+                    },
+                ))
+                .child(when(
+                    move || busy_cond.login.busy.get(),
+                    move || {
+                        text("登入中…")
+                            .text_size(px(12.5))
+                            .text_color(theme::TEXT_SECONDARY)
+                            .animate_pulse()
+                    },
+                ))
+                .child(
+                    text("想改用 API key 登入？目前僅支援主密碼（CLI 亦提供 API key）。")
+                        .text_size(px(11.0))
+                        .line_height(px(15.0))
+                        .text_color(theme::TEXT_MUTED),
+                ),
+        )
+}
+
+/// needs_reauth 橫幅：憑證失效時置頂（既有橫條樣式、warning 色）；
+/// 點擊主體直接進登入卡。
+fn reauth_banner(core: AppCore) -> impl IntoElement {
+    let cond = core.clone();
+    let build = core.clone();
+    when(
+        move || cond.needs_reauth.get() && !cond.show_login.get(),
+        move || {
+            let c = build.clone();
+            view()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .px_6()
+                .py_2()
+                .cursor_pointer()
+                .on_press(move || c.send(Cmd::OpenLogin))
+                .bg(theme::WARNING.opacity(0.14))
+                .child(
+                    text("憑證失效，請重新登入")
+                        .text_size(px(12.5))
+                        .line_height(px(18.0))
+                        .text_color(theme::WARNING)
+                        .flex_1(),
+                )
+        },
+    )
+}
+
+/// 側欄帳號列：依 `account_row` 映射三態（失效／未登入／已登入）。
+/// 前兩者點擊＝主畫面切登入卡；已登入顯示 email（可知時）＋上次同步。
+fn account_row(core: AppCore) -> impl IntoElement {
+    let press0 = core.clone();
+    let reauth0 = core.clone();
+    let cond = core.clone();
+    let sync0 = core.clone();
+    dynamic(move || {
+        let press = press0.clone();
+        let reauth = reauth0.clone();
+        let sync_email = sync0.clone();
+        let col = view().flex_col().gap_0p5();
+        match state::account_row(
+            cond.vault.get().as_ref(),
+            cond.needs_reauth.get(),
+            cond.acct_email.get().as_deref(),
+        ) {
+            state::AcctRow::Reauth => col
+                .cursor_pointer()
+                .on_press(move || reauth.send(Cmd::OpenLogin))
+                .child(
+                    text("憑證失效，請重新登入")
+                        .text_size(px(11.5))
+                        .text_color(theme::WARNING),
+                )
+                .child(sync_line(sync_email.clone())),
+            state::AcctRow::SignedOut => col
+                .cursor_pointer()
+                .on_press(move || press.send(Cmd::OpenLogin))
+                .child(
+                    text("未登入")
+                        .text_size(px(11.5))
+                        .text_color(theme::TEXT_SECONDARY),
+                ),
+            state::AcctRow::Signed(email) => {
+                let mut c = col;
+                if let Some(e) = email {
+                    c = c.child(
+                        text(e)
+                            .text_size(px(11.5))
+                            .text_color(theme::TEXT_SECONDARY)
+                            .number_of_lines(1),
+                    );
+                }
+                c.child(sync_line(sync_email.clone()))
+            }
+        }
+    })
+}
+
+/// 「上次同步：…」一行（本視窗最近 Sync:Trigger 成功時刻；從未觸發如實說）。
+fn sync_line(core: AppCore) -> Text {
+    text(move || match core.last_sync.get() {
+        Some(at) => {
+            let s = at.elapsed().as_secs();
+            if s < 60 {
+                "上次同步：剛剛".to_owned()
+            } else if s < 3600 {
+                format!("上次同步：{} 分前", s / 60)
+            } else {
+                format!("上次同步：{} 小時前", s / 3600)
+            }
+        }
+        None => "上次同步：本視窗尚未觸發".to_owned(),
+    })
+    .text_size(px(11.5))
+    .text_color(theme::TEXT_MUTED)
 }
 
 /// 錯誤橫條：協定/傳輸錯誤與匯出失敗；點擊 ✕ 收合。
