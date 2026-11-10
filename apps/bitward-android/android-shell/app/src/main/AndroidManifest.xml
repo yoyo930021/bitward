@@ -35,6 +35,14 @@
             </intent-filter>
         </activity>
 
+        <!-- e2e A16 專用填充探針頁：hint 帳密欄＋commit 鈕（驗 save 全鏈，
+             正式入口不列 launcher）。 -->
+        <activity
+            android:name=".AutofillProbeActivity"
+            android:exported="true"
+            android:label="Autofill 探針"
+            android:windowSoftInputMode="adjustResize" />
+
         <!-- 填充服務：契約 §1「Android app＝Full（in-process 中樞）」；
              中樞與本服務同程序（不宣告 android:process），走程序內介面，不經 BTP。 -->
         <service

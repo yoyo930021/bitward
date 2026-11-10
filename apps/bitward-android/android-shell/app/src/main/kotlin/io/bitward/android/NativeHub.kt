@@ -49,6 +49,10 @@ object NativeHub {
     /** 回 `[username, password]`；null＝找不到或未解鎖。 */
     @JvmStatic
     external fun nshReveal(itemId: String): Array<String>?
+
+    /** 儲存真寫入：回 `[id, created|updated|unchanged]`；null＝橋內錯或未解鎖。 */
+    @JvmStatic
+    external fun nshSave(query: String, username: String, password: String): Array<String>?
 }
 
 /**
@@ -75,8 +79,6 @@ class NativeHubBridge : BitwardAutofillService.HubBridge {
         )
     }
 
-    override fun save(itemId: String?, username: String, password: String) {
-        // 寫入路徑（outbox＋衝突收斂）是 P4b 下一批；這裡不假裝存了。
-        Log.i(ISLAND_TAG, "bridge save 尚未接寫入路徑（下一批）")
-    }
+    override fun save(query: String, username: String, password: String): String? =
+        NativeHub.nshSave(query, username, password)?.takeIf { it.size >= 2 }?.get(1)
 }

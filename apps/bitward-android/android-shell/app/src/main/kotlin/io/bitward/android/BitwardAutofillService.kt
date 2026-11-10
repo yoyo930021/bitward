@@ -11,6 +11,7 @@ import android.service.autofill.FillCallback
 import android.service.autofill.FillRequest
 import android.service.autofill.FillResponse
 import android.service.autofill.SaveCallback
+import android.service.autofill.SaveInfo
 import android.service.autofill.SaveRequest
 import android.text.InputType
 import android.util.Log
@@ -57,8 +58,13 @@ class BitwardAutofillService : AutofillService() {
         /** 取用一筆：填充用的明文（填完即歸零，不進 Kotlin String 常駐快取）。 */
         fun revealFor(itemId: String): SecretBundle
 
-        /** 儲存新密碼：進 outbox（離線也可記，收斂靠伺服器）。寫入路徑下一批。 */
-        fun save(itemId: String?, username: String, password: String)
+        /**
+         * 儲存真寫入（`Hub::save_from_autofill` 的橋上形態）：同帳號候選存在
+         * 且密碼不同＝patch 密碼欄；查無組合＝create 一筆 Login。本地交易先行
+         * 進 outbox（「待推送」，離線也可記），回傳動作 created|updated|
+         * unchanged；null＝中樞寫入失敗（鎖態、預驗拒收）。
+         */
+        fun save(query: String, username: String, password: String): String?
     }
 
     data class FillCandidate(val id: String, val label: String)
@@ -98,9 +104,11 @@ class BitwardAutofillService : AutofillService() {
         val userField = targets.username ?: targets.focused
         val response = FillResponse.Builder()
         var datasets = 0
+        val secrets = ArrayList<SecretBundle>()
         if (userField != null) {
             for (c in candidates) {
                 val secret = runCatching { bridge.revealFor(c.id) }.getOrNull() ?: continue
+                secrets.add(secret)
                 val row = RemoteViews(packageName, R.layout.autofill_dataset)
                 row.setTextViewText(R.id.autofill_row, c.label)
                 val dataset = Dataset.Builder()
@@ -112,23 +120,46 @@ class BitwardAutofillService : AutofillService() {
                 datasets++
             }
         }
-        Log.i(ISLAND_TAG, "fill response datasets=$datasets queries=${targets.queries.size}")
+        // 未儲存組合 → SaveInfo（官方流：使用者提交時系統回 onSaveRequest，
+        // 那裡才拿得到真值並寫入）。判準：帳號欄現值非空且等於某候選帳號＝
+        // 已儲存；空欄（還沒打字）或對不上任何候選＝未儲存，掛 SaveInfo。
+        var saveInfo = false
+        if (userField != null && targets.password != null) {
+            val typed = targets.userValue.orEmpty()
+            val savedCombo = typed.isNotEmpty() && secrets.any { it.username == typed }
+            if (!savedCombo) {
+                val info = SaveInfo.Builder(
+                    SaveInfo.SAVE_DATA_TYPE_USERNAME or SaveInfo.SAVE_DATA_TYPE_PASSWORD,
+                    arrayOf(userField, targets.password),
+                )
+                    .setDescription("儲存到 Bitward")
+                    .build()
+                response.setSaveInfo(info)
+                saveInfo = true
+            }
+        }
+        Log.i(
+            ISLAND_TAG,
+            "fill response datasets=$datasets saveinfo=$saveInfo queries=${targets.queries.size}",
+        )
         callback.onSuccess(response.build())
     }
 
-    /** 最近一次 fill 請求的結構判讀：可綁定的欄位 id 與該問中樞的查詢鍵。 */
+    /** 最近一次 fill 請求的結構判讀：可綁定欄位 id、帳號欄現值與查詢鍵。 */
     private class FillTargets(
         val focused: AutofillId?,
         val username: AutofillId?,
         val password: AutofillId?,
+        val userValue: String?,
         val queries: List<String>,
     )
 
     private fun analyze(request: FillRequest): FillTargets {
         val ctx = request.fillContexts.lastOrNull()
-            ?: return FillTargets(null, null, null, emptyList())
+            ?: return FillTargets(null, null, null, null, emptyList())
         var user: AutofillId? = null
         var pass: AutofillId? = null
+        var userValue: String? = null
         val queries = LinkedHashSet<String>()
         val structure = ctx.structure
         for (w in 0 until structure.windowNodeCount) {
@@ -139,6 +170,7 @@ class BitwardAutofillService : AutofillService() {
                         }
                     ) {
                         user = node.autofillId
+                        userValue = node.textValue()
                     }
                     if (pass == null && hints.any { it == HINT_PASSWORD || it == HINT_WEB_PASSWORD }) {
                         pass = node.autofillId
@@ -153,8 +185,12 @@ class BitwardAutofillService : AutofillService() {
             }
         }
         structure.activityComponent?.packageName?.let { queries.add(it) }
-        return FillTargets(ctx.focusedId, user, pass, queries.filter { it.isNotEmpty() })
+        return FillTargets(ctx.focusedId, user, pass, userValue, queries.filter { it.isNotEmpty() })
     }
+
+    /** 節點的可讀文字現值（autofill 視角；非文字欄或空值回 null）。 */
+    private fun AssistStructure.ViewNode.textValue(): String? =
+        autofillValue?.takeIf { it.isText }?.textValue?.toString()?.takeIf { it.isNotEmpty() }
 
     private fun walk(node: AssistStructure.ViewNode, visit: (AssistStructure.ViewNode) -> Unit) {
         visit(node)
@@ -177,11 +213,51 @@ class BitwardAutofillService : AutofillService() {
             return
         }
         if (!bridge.unlocked()) {
+            // 鎖態不寫（金鑰不在記憶體，寫了也是解不開的密文）。
             callback.onFailure("Bitward 尚未解鎖")
             return
         }
-        // TODO(P4b 下一批): 從 request.fillContexts 的 fillable values 取值後 save()
-        //（寫入路徑＝bw-sync outbox，見 apps/bitward-android/README.md 已知的下一步 2）。
+        val ctx = request.fillContexts.lastOrNull()
+            ?: run {
+                callback.onFailure("儲存請求沒有表單結構")
+                return
+            }
+        // 取值紀律同填充：帳號靠 hint、密碼靠 hint／inputType；查詢鍵
+        // webDomain 優先、原生退 package（與 analyze 同一座標系）。
+        var user: String? = null
+        var pass: String? = null
+        var domain: String? = null
+        for (w in 0 until ctx.structure.windowNodeCount) {
+            walk(ctx.structure.getWindowNodeAt(w).rootViewNode) { node ->
+                node.webDomain?.lowercase()?.let { d -> if (domain == null) domain = d }
+                val v = node.textValue() ?: return@walk
+                node.autofillHints?.let { hints ->
+                    if (user == null && hints.any {
+                            it == HINT_USERNAME || it == HINT_EMAIL || it == HINT_WEB_USERNAME
+                        }
+                    ) {
+                        user = v
+                    }
+                    if (pass == null && hints.any { it == HINT_PASSWORD || it == HINT_WEB_PASSWORD }) {
+                        pass = v
+                    }
+                }
+                if (pass == null && isPasswordInput(node.inputType)) pass = v
+            }
+        }
+        val query = domain ?: ctx.structure.activityComponent?.packageName
+        val pw = pass.orEmpty()
+        if (query.isNullOrEmpty() || pw.isEmpty()) {
+            callback.onFailure("找不到網址或密碼欄")
+            return
+        }
+        val action = bridge.save(query, user.orEmpty(), pw)
+        if (action == null) {
+            callback.onFailure("Bitward 寫入失敗")
+            return
+        }
+        // 明文不落 log；id＋動作足夠對帳（outbox「待推送」由 app 端收斂）。
+        Log.i(ISLAND_TAG, "save ok action=$action query=$query")
         callback.onSuccess()
     }
 

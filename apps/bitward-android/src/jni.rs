@@ -150,3 +150,39 @@ pub extern "system" fn Java_io_bitward_android_NativeHub_nshReveal(
         &mut env,
     )
 }
+
+/// AutofillService 儲存真寫入（onSaveRequest 落地端）：`query` 是 web host 或
+/// app package（填充查詢鍵同源）。回 `[id, created|updated|unchanged]`；
+/// null＝橋內錯或未解鎖（鎖態由 Kotlin 先擋，這裡再擋一道）。
+/// 本地交易先行入 outbox（「待推送」），drain 收斂照既有「重新同步」路徑。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_bitward_android_NativeHub_nshSave(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    query: JString<'_>,
+    username: JString<'_>,
+    password: JString<'_>,
+) -> jobjectArray {
+    guard(
+        |env| {
+            let q = arg_str(env, &query);
+            let user = arg_str(env, &username);
+            let pass = arg_str(env, &password);
+            let Some(h) = hub() else {
+                return std::ptr::null_mut();
+            };
+            match h.save_from_autofill(&q, &user, &pass) {
+                Ok((id, action)) => {
+                    // 過橋只報 id 與動作；明文欄位不打 log。
+                    log::info!("jni: save q={q} action={action} id={id}");
+                    strings_array(env, &[id.to_string(), action.to_owned()])
+                }
+                Err(e) => {
+                    log::warn!("jni: save 失敗：{e}");
+                    std::ptr::null_mut()
+                }
+            }
+        },
+        &mut env,
+    )
+}
