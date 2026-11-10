@@ -299,8 +299,11 @@ private struct StatusView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Bitward").font(.largeTitle.bold())
-            Text("背景常駐殼：密碼庫視窗由本殼轉發開啟（Contents/Applications/BitwardGUI.app）；批准中心與本頁從選單「Bitward」喚起")
+            Text("背景常駐殼：密碼庫視窗由本殼轉發開啟（Contents/Applications/BitwardGUI.app）；本頁從選單「Bitward」或狀態列喚起")
                 .foregroundStyle(.secondary)
+            Text("Vault 登入與同步狀態在密碼庫側欄（本頁只管開機常駐）。")
+                .font(.callout)
+                .foregroundStyle(.tertiary)
             Divider()
             HStack {
                 Text("開機常駐 daemon：").bold()
