@@ -46,6 +46,23 @@ pub enum Route {
     Settings,
     /// 報告儀表板（右欄視角，側欄「報告」進入；卡面→清單兩層同訊號切換）。
     Reports,
+    /// Send 加密分享（右欄視角，側欄「Send」進入；清單↔新增↔成功三態同訊號切換）。
+    Send,
+}
+
+/// Send 視角兩態（清單／新增表單；成功態由 `send_created` 訊號承載）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SendTab {
+    List,
+    Create,
+}
+
+/// Send 新增表單的內容型別（官方 Send type 0/1 的表單投影）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SendKind {
+    #[default]
+    Text,
+    File,
 }
 
 /// 報告視角的兩態（儀表板卡面／清單）。
@@ -299,6 +316,21 @@ pub enum Cmd {
         item: ItemId,
         report: Arc<serde_json::Value>,
     },
+    /// Send 加密分享（路線 5）：清單視角、新增表單、刪除確認。
+    OpenSend,
+    ShowSendsTab(SendTab),
+    FetchSends,
+    SendsLoaded(Arc<serde_json::Value>),
+    SendsFailed(String),
+    /// 表單送出：讀訊號→驗證→`VaultCall:Send{Create}`（成功回包含 URL）。
+    SubmitSend,
+    SendCreated(Result<Arc<serde_json::Value>, String>),
+    AskDeleteSend {
+        id: ItemId,
+        name: String,
+    },
+    DeleteSend(ItemId),
+    SendDeleted(Result<(), String>),
     /// 事件驱动的鎖態刷新（daemon `LockStateChanged` 廣播：自動鎖定沒有
     /// 人按的呼叫，界面只能靠事件看見；Status 屬輪詢豁免、不會餵活計時器）。
     RefreshStatus,
@@ -513,6 +545,35 @@ impl FormFields {
         self.fields.set(Arc::new(Vec::new()));
         self.gen_panel.set(GenState::default());
         self.gen_draft.set(None);
+    }
+}
+
+/// Send 新增表單（路線 5）。`text`/`password` 是明文欄——離開視角或送出成功
+/// 即清（`leave_detail` 同款紀律：明文不常駐）。`max` 空字串＝不限。
+#[derive(Clone)]
+pub struct SendFormFields {
+    pub kind: Signal<SendKind>,
+    pub text: Signal<String>,
+    /// 檔案路徑（附件上傳同形：文字路徑欄，無原生選檔器）。
+    pub path: Signal<String>,
+    pub password: Signal<String>,
+    /// 存活天數（官方選單 1/7/30）。
+    pub days: Signal<u32>,
+    pub max: Signal<String>,
+    pub hide_email: Signal<bool>,
+    pub error: Signal<Option<String>>,
+}
+
+impl SendFormFields {
+    fn reset(&self) {
+        self.kind.set(SendKind::default());
+        self.text.set(String::new());
+        self.path.set(String::new());
+        self.password.set(String::new());
+        self.days.set(7);
+        self.max.set(String::new());
+        self.hide_email.set(false);
+        self.error.set(None);
     }
 }
 
@@ -826,6 +887,11 @@ pub struct AppCore {
     pub reports_weak: Signal<Arc<serde_json::Value>>,
     /// 詳情頁歷史節（Reports:CipherHistory 回包鏡；離開詳情即清，有才渲染）。
     pub history: Signal<Arc<serde_json::Value>>,
+    /// Send 視角（路線 5）：tab 兩態＋鏡像清單＋新增表單＋成功回包（含 URL）。
+    pub send_tab: Signal<SendTab>,
+    pub sends: Signal<Arc<serde_json::Value>>,
+    pub send_form: SendFormFields,
+    pub send_created: Signal<Option<Arc<serde_json::Value>>>,
 }
 
 impl AppCore {
@@ -897,6 +963,19 @@ impl AppCore {
             reports_reuse: signal(Arc::new(Vec::new())),
             reports_weak: signal(Arc::new(serde_json::json!({"threshold": bw_proto::WEAK_PASSWORD_THRESHOLD, "items": []}))),
             history: signal(Arc::new(serde_json::json!({"supported": false, "versions": []}))),
+            send_tab: signal(SendTab::List),
+            sends: signal(Arc::new(serde_json::json!({"items": []}))),
+            send_form: SendFormFields {
+                kind: signal(SendKind::default()),
+                text: signal(String::new()),
+                path: signal(String::new()),
+                password: signal(String::new()),
+                days: signal(7),
+                max: signal(String::new()),
+                hide_email: signal(false),
+                error: signal(None),
+            },
+            send_created: signal(None),
             form: FormFields {
                 name: signal(String::new()),
                 username: signal(String::new()),
@@ -1002,6 +1081,9 @@ impl AppCore {
         self.att_upload_open.set(false);
         self.passkeys.set(Arc::new(Vec::new()));
         self.history.set(Arc::new(serde_json::json!({"supported": false, "versions": []})));
+        // Send 表單明文（文字/密碼）不跨視角常駐；成功卡連同 URL 一起丟
+        self.send_form.reset();
+        self.send_created.set(None);
     }
 }
 
@@ -1987,6 +2069,153 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             if matches!(core.route.get(), Route::Detail(i) | Route::Edit(i) if i == item) {
                 core.history.set(report);
             }
+        }
+        Cmd::OpenSend => {
+            core.leave_detail();
+            core.sort_menu.set(false);
+            core.route.set(Route::Send);
+            core.send_tab.set(SendTab::List);
+            core.send_created.set(None);
+            core.send(Cmd::FetchSends);
+        }
+        Cmd::ShowSendsTab(tab) => {
+            core.send_tab.set(tab);
+            if matches!(tab, SendTab::Create) {
+                core.send_form.reset();
+                core.send_created.set(None);
+            }
+        }
+        Cmd::FetchSends => {
+            // 清單主內容：失敗進橫條（daemon 離線照回鏡像，能錯的是少數
+            // 傳輸/存儲態）；回包 {"items":[...]} 原樣入訊號、渲染端解析。
+            core.ipc(|s| match s.call(&Call::Vault(VaultCall::Send {
+                sub: bw_proto::SendOp::List,
+            })) {
+                Ok(Response::Json(v)) => Cmd::SendsLoaded(Arc::new(v)),
+                Ok(other) => Cmd::SendsFailed(format!("Send.List 回應形態不符：{other:?}")),
+                Err(e) => Cmd::SendsFailed(e.display()),
+            });
+        }
+        Cmd::SendsLoaded(v) => {
+            core.settle();
+            core.error_text.set(None);
+            core.sends.set(v);
+        }
+        Cmd::SendsFailed(e) => {
+            core.settle();
+            core.error_text.set(Some(e));
+        }
+        Cmd::SubmitSend => {
+            let f = &core.send_form;
+            f.error.set(None);
+            let kind = f.kind.get();
+            let text = f.text.get();
+            let path = f.path.get();
+            let password = f.password.get();
+            let days = f.days.get();
+            let max_raw = f.max.get();
+            let hide = f.hide_email.get();
+            let max = if max_raw.trim().is_empty() {
+                None
+            } else {
+                match max_raw.trim().parse::<u32>() {
+                    Ok(n) if n > 0 => Some(n),
+                    _ => {
+                        f.error.set(Some("存取上限需為正整數（留空＝不限）".into()));
+                        return;
+                    }
+                }
+            };
+            let content = match kind {
+                SendKind::Text => {
+                    if text.is_empty() {
+                        f.error.set(Some("請輸入要分享的文字".into()));
+                        return;
+                    }
+                    Some(bw_proto::SendContent::Text { text })
+                }
+                SendKind::File => {
+                    if path.is_empty() {
+                        f.error.set(Some("請輸入要分享的檔案路徑".into()));
+                        return;
+                    }
+                    None // 讀檔在 worker 閉包內做（見下）
+                }
+            };
+            core.ipc(move |s| {
+                // 檔案：read_for_upload 驗路徑與大小上限（附件同紀律），
+                // 大檔讀取不凍 UI
+                let content = match content {
+                    Some(c) => c,
+                    None => match crate::attach::read_for_upload(&path) {
+                        Ok((file_name, bytes)) => {
+                            bw_proto::SendContent::File { file_name, bytes }
+                        }
+                        Err(e) => return Cmd::SendCreated(Err(e)),
+                    },
+                };
+                match s.call(&Call::Vault(VaultCall::Send {
+                    sub: bw_proto::SendOp::Create {
+                        name: None,
+                        content,
+                        password: (!password.is_empty()).then_some(password),
+                        deletion_hours: days.saturating_mul(24),
+                        max_access: max,
+                        hide_email: hide,
+                    },
+                })) {
+                    Ok(Response::Json(v)) => Cmd::SendCreated(Ok(Arc::new(v))),
+                    Ok(other) => {
+                        Cmd::SendCreated(Err(format!("Send.Create 回應形態不符：{other:?}")))
+                    }
+                    Err(e) => Cmd::SendCreated(Err(e.display())),
+                }
+            });
+        }
+        Cmd::SendCreated(res) => {
+            core.settle();
+            match res {
+                Ok(v) => {
+                    // 成功態：URL 卡＋複製鈕（官方 send-success 流）；表單明文即清
+                    core.send_form.text.set(String::new());
+                    core.send_form.password.set(String::new());
+                    core.send_form.error.set(None);
+                    core.send_created.set(Some(v));
+                    core.send(Cmd::FetchSends);
+                }
+                Err(e) => core.send_form.error.set(Some(e)),
+            }
+        }
+        Cmd::AskDeleteSend { id, name } => {
+            core.confirm.set(Some(Arc::new(Confirm {
+                title: format!("移除 Send「{name}」？"),
+                description: "伺服器端一併刪除（含檔案）；接收方的連結即刻失效，無法復原。".into(),
+                confirm_label: "移除".into(),
+                destructive: true,
+                on_confirm: Cmd::DeleteSend(id),
+            })));
+        }
+        Cmd::DeleteSend(id) => {
+            core.ipc(move |s| match s.call(&Call::Vault(VaultCall::Send {
+                sub: bw_proto::SendOp::Remove { id },
+            })) {
+                Ok(Response::Ok) => Cmd::SendDeleted(Ok(())),
+                Ok(other) => {
+                    Cmd::SendDeleted(Err(format!("Send.Remove 回應形態不符：{other:?}")))
+                }
+                Err(e) => Cmd::SendDeleted(Err(e.display())),
+            });
+        }
+        Cmd::SendDeleted(res) => {
+            core.settle();
+            core.confirm.set(None);
+            if let Err(e) = res {
+                core.error_text.set(Some(e));
+            } else {
+                core.error_text.set(None);
+                core.notice.set(Some("已移除 Send".into()));
+            }
+            core.send(Cmd::FetchSends);
         }
         Cmd::RefreshStatus => {
             core.ipc_quiet(|s| match s.call(&Call::Sync(SyncCall::Status)) {

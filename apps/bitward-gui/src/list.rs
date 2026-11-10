@@ -150,11 +150,11 @@ fn collect_tags(items: &[ItemView]) -> Vec<String> {
     tags
 }
 
-fn chip(label: String, selected: impl Fn() -> bool + 'static, on_press: impl Fn() + 'static) -> View {
+pub(crate) fn chip(label: String, selected: impl Fn() -> bool + 'static, on_press: impl Fn() + 'static) -> View {
     chip_dyn(move || label.clone(), selected, on_press)
 }
 
-fn chip_dyn(
+pub(crate) fn chip_dyn(
     label: impl Fn() -> String + 'static,
     selected: impl Fn() -> bool + 'static,
     on_press: impl Fn() + 'static,

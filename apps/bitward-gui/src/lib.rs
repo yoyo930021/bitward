@@ -18,6 +18,7 @@ mod import;
 mod list;
 mod passgen;
 mod reports;
+mod send;
 mod settings;
 mod shots;
 mod state;
@@ -356,6 +357,8 @@ fn sidebar(core: AppCore) -> View {
     let set_press = core.clone();
     let rep_sel = core.clone();
     let rep_press = core.clone();
+    let send_sel = core.clone();
+    let send_press = core.clone();
     let sync_core = core.clone();
     let export_core = core.clone();
     let import_core = core.clone();
@@ -459,6 +462,14 @@ fn sidebar(core: AppCore) -> View {
             "報告".to_owned(),
             move || rep_sel.route.get() == Route::Reports,
             move || rep_press.send(Cmd::OpenReports),
+            false,
+            None,
+            || 0,
+        ))
+        .child(side_item(
+            "Send".to_owned(),
+            move || send_sel.route.get() == Route::Send,
+            move || send_press.send(Cmd::OpenSend),
             false,
             None,
             || 0,
@@ -724,6 +735,7 @@ fn split(core: AppCore) -> View {
     let approvals_build = core.clone();
     let settings_build = core.clone();
     let reports_build = core.clone();
+    let send_build = core.clone();
     let form_build = core.clone();
     view()
         .flex_row()
@@ -749,6 +761,7 @@ fn split(core: AppCore) -> View {
                         Route::Approvals => approvals::pane(approvals_build.clone()),
                         Route::Settings => settings::pane(settings_build.clone()),
                         Route::Reports => reports::pane(reports_build.clone()),
+                        Route::Send => send::pane(send_build.clone()),
                         Route::Create => form::pane(form_build.clone()),
                         Route::Edit(_) | Route::Detail(_) => {
                             if detail_cond.detail.get().is_some() {

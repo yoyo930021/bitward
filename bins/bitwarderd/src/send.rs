@@ -184,8 +184,8 @@ impl Hub {
     }
 
     /// 清單：連網時先以 `GET /sends` 全量刷新鏡像（伺服器是真相源），
-    /// 離線照回鏡像（讀取面不需連網）。名稱需解鎖態解密（seed 是
-    /// user key 信封），鎖態 name=null——資料夾清單同語意。
+    /// 離線照回鏡像（讀取面不需連網）。名稱與 URL 需解鎖態（seed 是
+    /// user key 信封），鎖態兩者為 null——資料夾清單同語意。
     /// `viewed`＝accessCount>0（查證：VW send JSON **無** viewed 欄，實錄；
     /// 官方 web vault 同以存取計數推已檢視）。
     async fn send_list(&self) -> DispatchResult {
@@ -197,13 +197,20 @@ impl Hub {
         }
         let rows = self.store.send_list().map_err(denied)?;
         let unlocked = self.machine.is_unlocked();
+        let base = self.server_base().await.unwrap_or_default();
         let items: Vec<Value> = rows
             .iter()
             .map(|s| {
+                let (name, url) = if unlocked {
+                    self.send_open_projection(s, &base)
+                } else {
+                    (None, None)
+                };
                 json!({
                     "id": s.get("id"),
                     "type": s.get("type"),
-                    "name": if unlocked { self.send_name(s) } else { None },
+                    "name": name,
+                    "url": url,
                     "deletionDate": s.get("deletionDate"),
                     "expirationDate": s.get("expirationDate"),
                     "maxAccessCount": s.get("maxAccessCount"),
@@ -320,49 +327,66 @@ impl Hub {
         })))
     }
 
-    /// `{server}/#/send/{accessId}/{b64url(seed)}`——官方 web vault 同形
-    /// （`getSendUrl()+accessId+"/"+urlB64Key`，clients main 查證 2026-11-10）。
-    /// accessId 以伺服器回包為準；缺欄時按官方演算法自算
-    /// （`base64url_nopad(uuid bytes)`，VW send.rs `to_json` 同源）。
+    /// 同 [`compose_send_url_from`]，但 base 取帳號 server 值；未登入回可懂錯誤。
     async fn compose_send_url(&self, send: &Value, seed_b64: &str) -> Result<String, WtpError> {
         let base = self
             .server_base()
             .await
             .ok_or_else(|| denied("尚未登入：分享 URL 的 web 前綴取帳號 server 值"))?;
-        let id_s = send.get("id").and_then(Value::as_str).unwrap_or_default();
-        let access_id = send
-            .get("accessId")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| {
-                uuid::Uuid::parse_str(id_s)
-                    .ok()
-                    .map(|u| b64url(u.as_bytes()))
-            })
-            .ok_or_else(|| drift("Send 回包缺 id/accessId"))?;
-        Ok(format!(
-            "{}/#/send/{}/{}",
-            base.trim_end_matches('/'),
-            access_id,
-            seed_b64
-        ))
+        compose_send_url_from(send, &base, seed_b64).ok_or_else(|| drift("Send 回包缺 id"))
     }
 
-    /// 鏡像列的名稱解密（seed → 拉伸鍵 → name 信封）；解不開回 None
-    /// （比誤潑信封字串準，同資料夾清單語意）。
-    fn send_name(&self, send: &Value) -> Option<String> {
-        let key_env = send.get("key").and_then(Value::as_str)?;
-        let name_env = send.get("name").and_then(Value::as_str)?;
+    /// 鏡像列的解鎖投影：(解密名稱, 分享 URL)。seed 解不開時兩者都回
+    /// None（比誤潑信封字串準，同資料夾清單語意）；base 缺席（未登入）
+    /// 時名稱照回、URL 為 None。
+    fn send_open_projection(&self, send: &Value, base: &str) -> (Option<String>, Option<String>) {
+        let (Some(key_env), Some(name_env)) = (
+            send.get("key").and_then(Value::as_str),
+            send.get("name").and_then(Value::as_str),
+        ) else {
+            return (None, None);
+        };
         self.machine
-            .with_keys(|kb| {
+            .with_keys(|kb| -> Option<(String, Option<String>)> {
                 let seed = unwrap_seed(kb.user_key(), key_env).ok()?;
                 let ck = seed.stretch();
                 let raw = bw_crypto::decrypt_bytes_with_key(ck.as_slice(), name_env).ok()?;
-                String::from_utf8(raw).ok()
+                let name = String::from_utf8(raw).ok()?;
+                let url = compose_send_url_from(send, base, &b64url(seed.as_bytes()));
+                Some((name, url))
             })
             .ok()
             .flatten()
+            .map(|(n, u)| (Some(n), u))
+            .unwrap_or((None, None))
     }
+}
+
+/// `{server}/#/send/{accessId}/{b64url(seed)}`（官方 web vault 同形：
+/// `getSendUrl()+accessId+"/"+urlB64Key`，clients main 查證 2026-11-10）。
+/// accessId 以伺服器回包為準；缺欄時按官方演算法自算
+/// （`base64url_nopad(uuid bytes)`，VW send.rs `to_json` 同源）。
+/// base 空（未登入）→ None。
+fn compose_send_url_from(send: &Value, base: &str, seed_b64: &str) -> Option<String> {
+    if base.is_empty() {
+        return None;
+    }
+    let id_s = send.get("id").and_then(Value::as_str)?;
+    let access_id = send
+        .get("accessId")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            uuid::Uuid::parse_str(id_s)
+                .ok()
+                .map(|u| b64url(u.as_bytes()))
+        })?;
+    Some(format!(
+        "{}/#/send/{}/{}",
+        base.trim_end_matches('/'),
+        access_id,
+        seed_b64
+    ))
 }
 
 /// 審計動作欄（action_tag 用；細到子操作，同 Attachment 紀律）。
@@ -470,6 +494,11 @@ mod tests {
         assert_eq!(items[0]["name"], "帳單分享");
         assert_eq!(items[0]["viewed"], true);
         assert_eq!(items[0]["hasPassword"], true);
+        // 解鎖態清單直接帶可複製的分享 URL（GUI 列內複製鈕零跳）
+        assert_eq!(
+            items[0]["url"],
+            "http://127.0.0.1:9/#/send/ACC-IDA/AAECAwQFBgcICQoLDA0ODw"
+        );
         // URL：帳號 server 值 + accessId（伺服器給的為準）
         let Response::Json(u) = hub.send_op(&SendOp::Get { id }).await.unwrap() else {
             panic!("expect Json");
@@ -496,6 +525,7 @@ mod tests {
             panic!("expect Json");
         };
         assert_eq!(v["items"][0]["name"], Value::Null);
+        assert_eq!(v["items"][0]["url"], Value::Null);
     }
 
     #[tokio::test]

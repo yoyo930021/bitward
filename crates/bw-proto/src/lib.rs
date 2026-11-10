@@ -491,9 +491,9 @@ pub enum SendOp {
     },
     /// 鏡像清單（`/sync` 的 `sends[]` 與線上 `GET /sends` 刷新落庫；
     /// 離線照回鏡像）。回應 `Response::Json`（{"items":[{"id","type",
-    /// "name","deletionDate","expirationDate","maxAccessCount","accessCount",
+    /// "name","url","deletionDate","expirationDate","maxAccessCount","accessCount",
     /// "viewed","hideEmail","hasPassword"}]}，deletionDate 升序；
-    /// `name` 需解鎖態解密（seed 鏡像端為 user key 信封），鎖態為 null——
+    /// `name`/`url` 需解鎖態（seed 鏡像端為 user key 信封），鎖態為 null——
     /// 資料夾清單同語意；`viewed`＝accessCount>0（伺服器無 viewed 欄，實錄））。
     List,
     /// 分享 URL：`{帳號 server 值}/#/send/{accessId}/{b64url(seed)}`
