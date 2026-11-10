@@ -551,7 +551,8 @@ for _ in $(seq 1 15); do
   sleep 1
 done
 APP_LOG=$($ADB logcat -d)
-[[ "$APP_LOG" == *'onFillRequest unlocked=true'* ]] || fail "A16 探針頁沒送來解鎖態 fill 請求"
+[[ "$APP_LOG" == *'onFillRequest unlocked=true'* ]] \
+  || { echo "$APP_LOG" | grep -E 'bitward-island|AutofillManager' | tail -8; fail "A16 探針頁沒送來解鎖態 fill 請求"; }
 [[ "$APP_LOG" == *'saveinfo=true'* ]] || fail "A16 未儲存組合沒掛 SaveInfo"
 type_text "$SAVE_USER"
 hide_ime

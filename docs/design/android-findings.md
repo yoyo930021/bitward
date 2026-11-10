@@ -329,3 +329,13 @@ x=1188，「重新同步」文字截斷、「鎖定」整個出屏，uiautomator
 | `Auth:Unlock`（封存金鑰重入） | 冷啟免主密碼解鎖 | 見已知的下一步 1 |
 | `Push:*` | UnifiedPush 註冊 | 背景同步未接（同第三批） |
 | `Vault:Reports` | 密碼健康度 | R4 進行中，落地後需同步評估接面 |
+
+### A16 實錄二：探針頁被 edge-to-edge 埋進狀態欄（FAIL→修）
+
+r1/r2 兩輪 A16 同點掛：探針頁渲染成功、`tap_text` 也點了出去，但
+`onFillRequest` 完全沒進孤島。實測根因＝**targetSdk 35 的 edge-to-edge 強制**：
+探針 activity 沒吃 insets，第一欄 bounds 落在 [48,48]（狀態欄底下），tap 打在
+系統欄上，EditText 永遠 `focused=false`、IME 不起、fill 請求自然不发
+（nsh AppActivity 沒事是因為它自己處理 safe-area）。修＝`fitsSystemWindows=true`。
+教訓：**外殼新增原生頁要嘛吃 insets、要嘛別把可交互欄位排在屏頂 90px 內**；
+uiautomator 節點存在≠可點中，focus 斷言要看 `focused="true"` 而不是只認節點。

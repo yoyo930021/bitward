@@ -27,6 +27,9 @@ class AutofillProbeActivity : Activity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(pad, pad, pad, pad)
+            // targetSdk 35 強制 edge-to-edge：不吃 insets 的話第一欄落在
+            // 狀態欄底下，tap 打在系統欄上、欄位永遠拿不到 focus（A16 實錄）。
+            fitsSystemWindows = true
         }
         val user = EditText(this).apply {
             hint = "probe-user"
