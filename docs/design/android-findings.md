@@ -350,12 +350,18 @@ zh，系統存檔提示實錄節點＝標題「要将密码和用户名保存到
 改認「保存」優先、英文「Save」退路。修後實測鏈：`probe commit requested →
 onSaveRequest → jni: save q=io.bitward.android action=created → save ok`。
 
-### A16/A17 實錄四：`input text` 長字串截尾（13 字符壁）
+### A16/A17 實錄四：`input text` 長字串被 IME 候選改寫（非截尾）
 
-兩輪連跑實錄：f1 的 username（19 字元）落庫只剩前 13 字、f2 的 seed（16 字元）
-同型截斷——A17 的碼值等值斷言抓到（052789 不在完整 seed ±1h 任何視窗，且
-host/emulator 時鐘 skew＝0，排除引擎問題：app 老實存了截斷 seed、TOTP 引擎
-照它正確出碼）。根因＝打字期間面板/焦點事件吞掉尾段字元（同 IME 陷阱家族，
-短字串≤8 字元四輪未見）。修＝`type_verify`：打完 dump 驗層級現值，不實
-MOVE_END＋30×DEL 清欄重打一次；A15 seed、A16 username 接入。斷言保持嚴格
-等值（这正是它該抓的）。
+連跑實錄：f1 的 username（19 字元）落庫只剩「save-e2e-17943」、f2 的 seed
+（16 字元）同型失真——A17 的碼值等值斷言抓到（052789 不在完整 seed ±1h 任何
+視窗；host/emulator 時鐘 skew＝0，排除引擎問題：app 忠實存了進欄的字）。
+**定位實驗**：分兩段打 `"chunk-check-1"`＋`"794399999"`，欄位現值竟成
+`"chu794399999"`——第一段 13 字被 Google IME **候選改寫**成 3 字、第二段原樣
+附上。根因不是字數壁也不是 autofill 重驗證，是 `input text` 經 IME 注入時
+被自動更正吃掉前段。修法分兩層：
+
+- A16 探針頁**退役打字通道**：值經 `am start --es user/pass` intent extras
+  由 activity `setText` 落地（autofill 流只看欄位現值，語意等價、確定性）。
+- A15 seed（nsh 表單欄）留 `type_verify`：分段打＋dump 驗現值＋不實清欄重打，
+  兩輪不實**硬 fail**（絕不讓失真值溜進下游斷言變成難定位的遠端不符）。
+- 短字串（≤8 字元，如 e2euser/e2epass）六輪未見改寫，維持直打。

@@ -66,5 +66,10 @@ class AutofillProbeActivity : Activity() {
         root.addView(gap(140))
         root.addView(submit)
         setContentView(root)
+        // e2e 值經 intent extras 落地（實錄：`input text` 長字串會被 Google
+        // IME 候選改寫／吞尾，13+ 字元不可靠）；autofill 流只看欄位現值，
+        // setText 與手打的語意等價。
+        intent.getStringExtra("user")?.let { user.setText(it) }
+        intent.getStringExtra("pass")?.let { pass.setText(it) }
     }
 }

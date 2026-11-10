@@ -83,16 +83,26 @@ type_text() {
   $ADB shell input text "$esc" </dev/null >/dev/null 2>&1
   sleep 1
 }
-type_verify() {  # type_verify <打的字> <dump 留檔名>：長字串實錄會被面板/焦點
-  # 事件截尾（f1 username 19→13、f2 seed 16→13），驗層級現值、不實清欄重打一次。
-  type_text "$1"
+type_verify() {  # type_verify <打的字> <dump 留檔名>：單發 13+ 字元實錄會被
+  # autofill 重驗證吞尾（f1 username 19→13、f2 seed 16→13，重打同壁）。
+  # 改分兩段打＋段間等重驗證落定，驗層級現值，兩輪不實即 fail（不讓截斷
+  # 值溜進斷言：那會變成「VW reveal 不符」的遠端失敗，定位成本高）。
+  local s="$1" name="$2"
+  local n=$(( ${#s} / 2 ))
   for _ in 1 2; do
-    dump "/tmp/android-$2.xml"
-    has_text "/tmp/android-$2.xml" "$1" && return 0
+    if [ "${#s}" -le 8 ]; then
+      type_text "$s"
+    else
+      type_text "${s:0:n}"
+      sleep 2
+      type_text "${s:n}"
+    fi
+    dump "/tmp/android-$name.xml"
+    has_text "/tmp/android-$name.xml" "$s" && return 0
     $ADB shell input keyevent 123 </dev/null >/dev/null 2>&1
-    for _ in $(seq 1 30); do $ADB shell input keyevent 67 </dev/null >/dev/null 2>&1; done
-    type_text "$1"
+    for _ in $(seq 1 40); do $ADB shell input keyevent 67 </dev/null >/dev/null 2>&1; done
   done
+  fail "輸入截斷未癒合：$name 欄現值非「$s」（見 /tmp/android-$name.xml）"
 }
 hide_ime() {  # 軟鍵盤開著時，第一個 tap 只被 IME 吃掉、送不到 app（實測）
   $ADB shell input keyevent 111 </dev/null >/dev/null 2>&1
@@ -554,9 +564,13 @@ $ADB shell settings put secure autofill_service "$AF_SVC"
 $ADB shell settings put secure current_autofill_service "$AF_SVC"
 sleep 2
 $ADB logcat -c
-$ADB shell am start -n "$PKG/.AutofillProbeActivity" >/dev/null 2>&1
+$ADB shell am start -n "$PKG/.AutofillProbeActivity" \
+  --es user "$SAVE_USER" --es pass "$SAVE_PASS" >/dev/null 2>&1
 sleep 2
-tap_text a16-user "probe-user"
+# 預填值先驗再走流程（intent extras 落地＝確定性；IME 打字通道已退役）。
+dump /tmp/android-a16-prefill.xml
+has_text /tmp/android-a16-prefill.xml "$SAVE_USER" || fail "A16 預填帳號沒進欄位"
+tap_text a16-pass "probe-pass"
 for _ in $(seq 1 15); do
   $ADB logcat -d | grep -q 'saveinfo=true' && break
   sleep 1
@@ -565,10 +579,6 @@ APP_LOG=$($ADB logcat -d)
 [[ "$APP_LOG" == *'onFillRequest unlocked=true'* ]] \
   || { echo "$APP_LOG" | grep -E 'bitward-island|AutofillManager' | tail -8; fail "A16 探針頁沒送來解鎖態 fill 請求"; }
 [[ "$APP_LOG" == *'saveinfo=true'* ]] || fail "A16 未儲存組合沒掛 SaveInfo"
-type_verify "$SAVE_USER" a16-typed
-hide_ime
-tap_text a16-pass "probe-pass"
-type_text "$SAVE_PASS"
 hide_ime
 $ADB logcat -c
 tap_text a16-submit "提交"
