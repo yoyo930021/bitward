@@ -12,6 +12,8 @@ use bw_proto::CipherFieldKind;
 use nsh_base::input;
 use nsh_core::prelude::*;
 
+use crate::form;
+use crate::state;
 use crate::state::{AppCore, Cmd, Route};
 use crate::theme;
 use crate::ui;
@@ -21,10 +23,14 @@ type Disp = Rc<dyn Fn() -> String>;
 
 pub fn pane(core: AppCore) -> View {
     let copied = signal::<Option<&'static str>>(None);
+    // 批次 A＃2：同骨架原地變形——Route::Edit 時欄位換輸入框（綁 form 訊號），
+    // 節次序／標題／幾何全部沿用查看態，切換零跳動。
+    let editing = matches!(core.route.get(), Route::Edit(_));
+    let totp_cond = core.clone();
     view()
         .flex_col()
         .flex_1()
-        .child(identity_header(core.clone()))
+        .child(identity_header(core.clone(), editing))
         .child(view().h(px(1.0)).mx_8().bg(theme::HAIRLINE))
         .child(scroll().flex_1().child(
             view()
@@ -34,10 +40,21 @@ pub fn pane(core: AppCore) -> View {
                 .py_4()
                 .w_full()
                 .max_w(px(680.0))
-                .child(section("帳密", credentials_section(core.clone(), copied)))
-                .child(section("驗證碼", totp_section(core.clone(), copied)))
-                .child(section("備註", notes_section(core.clone(), copied)))
-                .child(section("自訂欄位", custom_fields_section(core.clone(), copied)))
+                .child(section("帳密", credentials_section(core.clone(), copied, editing)))
+                .child(when(
+                    move || {
+                        state::totp_section_shown(
+                            totp_cond.totp.get().as_deref(),
+                            totp_cond.totp_error.get().as_deref(),
+                        )
+                    },
+                    {
+                        let totp_build = core.clone();
+                        move || section("驗證碼", totp_section(totp_build.clone(), copied))
+                    },
+                ))
+                .child(section("備註", notes_section(core.clone(), copied, editing)))
+                .child(section("自訂欄位", custom_fields_section(core.clone(), copied, editing)))
                 .child(section_dyn("附件", {
                     let ac = core.clone();
                     move || attachments_rows(ac.clone())
@@ -120,7 +137,7 @@ fn section_dyn(title: &'static str, build: impl Fn() -> Vec<View> + 'static) -> 
 }
 
 /// 頂部 identity：大 monogram 退役，改型別磚＋大名稱＋網址連結＋動作群。
-fn identity_header(core: AppCore) -> View {
+fn identity_header(core: AppCore, editing: bool) -> View {
     let name_core = core.clone();
     let uri_core = core.clone();
     let uri_open = core.clone();
@@ -149,19 +166,41 @@ fn identity_header(core: AppCore) -> View {
                 .gap_0p5()
                 .flex_1()
                 .overflow_hidden()
-                .child(
-                    text(move || {
-                        uri_core
-                            .detail
-                            .get()
-                            .and_then(|d| d.meta.name.clone())
-                            .unwrap_or_else(|| "(未命名)".to_owned())
-                    })
-                    .text_size(px(theme::TEXT_IDENTITY))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme::TEXT_PRIMARY)
-                    .number_of_lines(1),
-                )
+                .child(if editing {
+                    // 名稱就地變輸入框：同字級同位置，零跳動。
+                    let name_sig = name_core.form.name;
+                    view().w_full().child(
+                        input()
+                            .value(move || name_sig.get())
+                            .placeholder("名稱".to_owned())
+                            .placeholder_color(move || color(theme::TEXT_MUTED))
+                            .on_change(move |t: &str| name_sig.set(t.to_owned()))
+                            .text_size(px(theme::TEXT_IDENTITY))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::TEXT_PRIMARY)
+                            .bg(theme::SURFACE)
+                            .px_3()
+                            .h(px(34.0))
+                            .rounded(px(theme::RADIUS_BLOCK))
+                            .border(px(1.0))
+                            .border_color(theme::HAIRLINE)
+                            .focus(|s| s.border_color(theme::ACCENT)),
+                    )
+                } else {
+                    view().w_full().child(
+                        text(move || {
+                            uri_core
+                                .detail
+                                .get()
+                                .and_then(|d| d.meta.name.clone())
+                                .unwrap_or_else(|| "(未命名)".to_owned())
+                        })
+                        .text_size(px(theme::TEXT_IDENTITY))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::TEXT_PRIMARY)
+                        .number_of_lines(1),
+                    )
+                })
                 .child(
                     view()
                         .flex_row()
@@ -213,6 +252,20 @@ fn identity_header(core: AppCore) -> View {
                             purge.send(Cmd::AskPurge(id));
                         }
                     }))
+            } else if editing {
+                // 編輯態頂部鈕：取消（髒走確認框）／儲存（diff 送出）。
+                let cancel = actions_core.clone();
+                let save = actions_core.clone();
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(ui::button("取消", ui::Btn::Ghost, move || {
+                        cancel.send(Cmd::RequestCloseForm)
+                    }))
+                    .child(ui::button("儲存", ui::Btn::Primary, move || {
+                        save.send(Cmd::SubmitForm)
+                    }))
             } else {
                 view()
                     .flex_row()
@@ -256,7 +309,17 @@ fn detail_disp(core: &AppCore, f: impl Fn(&bw_proto::ItemView) -> String + 'stat
 }
 
 /// 帳密節（官方 Login credentials＋Autofill options 合併）：帳號/密碼/網址/標籤。
-fn credentials_section(core: AppCore, copied: Signal<Option<&'static str>>) -> Vec<View> {
+/// 編輯態＝同節同序、值塊就地變輸入框（`edit_field`／`uris_editor`）。
+fn credentials_section(core: AppCore, copied: Signal<Option<&'static str>>, editing: bool) -> Vec<View> {
+    if editing {
+        return vec![
+            edit_field("帳號", "使用者名稱或電子信箱", core.form.username, false),
+            edit_field("密碼", "（不變更；輸入新值以替換）", core.form.password, true),
+            form::uris_editor(core.clone()),
+            edit_field("標籤", "逗號分隔，例：dev, 工作", core.form.tags, false),
+            form::folder_dropdown(core.clone()),
+        ];
+    }
     let username = detail_disp(&core, |d| d.username.clone().unwrap_or_else(|| "—".into()));
     let uris = detail_disp(&core, |d| {
         if d.meta.uris.is_empty() {
@@ -304,7 +367,10 @@ fn info_section(core: AppCore, copied: Signal<Option<&'static str>>) -> Vec<View
 }
 
 /// 備註節：notes 明文（Masked 視窗即帶全文；Metadata 下鍵不存在）。
-fn notes_section(core: AppCore, copied: Signal<Option<&'static str>>) -> Vec<View> {
+fn notes_section(core: AppCore, copied: Signal<Option<&'static str>>, editing: bool) -> Vec<View> {
+    if editing {
+        return vec![edit_field("備註", "筆記內容（明文進入 Outgoing 幀）", core.form.notes, false)];
+    }
     let notes = detail_disp(&core, |d| d.notes.clone().unwrap_or_else(|| "—".into()));
     let copy = notes.clone();
     vec![block(
@@ -317,7 +383,10 @@ fn notes_section(core: AppCore, copied: Signal<Option<&'static str>>) -> Vec<Vie
 /// 自訂欄位節：pane 每次 detail 重建時快照（Reveal 不改欄集）。
 /// 布爾欄渲染成開關樣（非純文字）；hidden 欄值僅 Reveal 出、Masked 下
 /// 顯示點號佔位且不給複製鈕。
-fn custom_fields_section(core: AppCore, copied: Signal<Option<&'static str>>) -> Vec<View> {
+fn custom_fields_section(core: AppCore, copied: Signal<Option<&'static str>>, editing: bool) -> Vec<View> {
+    if editing {
+        return vec![form::custom_fields_editor(core)];
+    }
     let Some(d) = core.detail.get() else {
         return Vec::new();
     };
@@ -728,6 +797,33 @@ fn field(label_text: &'static str, value: Disp, trailing: Vec<View>) -> View {
         )
 }
 
+/// 編輯態欄位：與 `field()` 同幾何（label 同位、圓角塊同寬同高），
+/// 塊內從文字換輸入框——morph 零跳動的欄位級實作。
+fn edit_field(label_text: &'static str, placeholder: &'static str, value: Signal<String>, secure: bool) -> View {
+    view()
+        .flex_col()
+        .gap_1()
+        .child(label(label_text))
+        .child(
+            input()
+                .value(move || value.get())
+                .placeholder(placeholder.to_owned())
+                .placeholder_color(move || color(theme::TEXT_MUTED))
+                .masked(secure)
+                .on_change(move |t: &str| value.set(t.to_owned()))
+                .px_3()
+                .h(px(34.0))
+                .w_full()
+                .rounded(px(theme::RADIUS_BLOCK))
+                .border(px(1.0))
+                .border_color(theme::HAIRLINE)
+                .bg(theme::SURFACE)
+                .text_color(theme::TEXT_PRIMARY)
+                .text_size(px(theme::TEXT_FIELD_VALUE))
+                .focus(|s| s.border_color(theme::ACCENT)),
+        )
+}
+
 /// 欄位值塊（build 時快照；自訂欄位用，欄名是動態字串、值塊内容由呼叫端
 /// 依型別構造——text/hidden 是文字、boolean 是開關樣）。
 fn field_static_view(label_text: String, value: View, trailing: Vec<View>) -> View {
@@ -757,39 +853,35 @@ fn field_static_view(label_text: String, value: View, trailing: Vec<View>) -> Vi
         )
 }
 
-/// TOTP 節：代碼塊（取碼鈕＋倒數＋複製）；有無 seed 由 daemon 裁決
-/// （Masked 投影的 totp_available 恆 false，不可用作開關）。
+/// TOTP 節（批次 A＃3）：渲染閘在 pane 層（`totp_section_shown`）——無 seed
+/// 的項目取碼回「沒有 TOTP seed」→ 整節不出現；有 seed 進詳情自動取碼，
+/// 6 位碼＋倒數條＋複製鈕，不需按任何鈕；真失敗顯示可懂一行（不彈窗）。
 fn totp_section(core: AppCore, copied: Signal<Option<&'static str>>) -> Vec<View> {
-    let hint_core = core.clone();
     let shown_core = core.clone();
-    let btn_core = core.clone();
-    let copy_core = core.clone();
+    let err_core = core.clone();
+    let btn_block = core.clone();
     vec![block_dyn(
         move || {
-            hint_core.totp.get().unwrap_or_else(|| {
-                "（按右側「驗證碼」向 daemon 取現算代碼）".to_owned()
+            shown_core.totp.get().unwrap_or_else(|| {
+                err_core.totp_error.get().unwrap_or_default()
             })
         },
         false,
         move || {
-            let btn = btn_core.clone();
-            let shown = shown_core.clone();
-            let copy = copy_core.clone();
-            let bar_build = shown.clone();
+            let bar_core = btn_block.clone();
+            let cond_bar = btn_block.clone();
+            let cond_copy = btn_block.clone();
+            let build_copy = btn_block.clone();
             let mut actions = view().flex_row().items_center().gap_1p5();
             actions = actions.child(when(
-                move || shown.totp.get().is_some(),
-                move || countdown(bar_build.clone()),
-            ));
-            actions = actions.child(ui::text_button_dyn(
-                || "驗證碼".to_owned(),
-                move || btn.send(Cmd::RequestTotp),
+                move || cond_bar.totp.get().is_some(),
+                move || countdown(bar_core.clone()),
             ));
             actions = actions.child(when(
-                move || shown.totp.get().is_some(),
+                move || cond_copy.totp.get().is_some(),
                 move || {
                     ui::copy_button(
-                        Rc::new(move || copy.totp.get().unwrap_or_default()),
+                        Rc::new(move || build_copy.totp.get().unwrap_or_default()),
                         "TOTP",
                         copied,
                     )

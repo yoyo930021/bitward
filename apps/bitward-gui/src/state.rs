@@ -56,7 +56,7 @@ pub struct Confirm {
 pub struct FormOriginal {
     pub name: String,
     pub username: Option<String>,
-    pub uri: Option<String>,
+    pub uris: Vec<String>,
     pub tags: Vec<String>,
     pub notes: Option<String>,
     pub folder_id: Option<String>,
@@ -247,6 +247,10 @@ pub enum Cmd {
         code: String,
         valid_for_secs: u32,
     },
+    /// 取碼回「無 seed」：正常缺席，整節不渲染、不報錯。
+    TotpAbsent,
+    /// 取碼其他失敗（seed 解錯/形態不符）：節內可懂一行，不彈窗不掛橫條。
+    TotpErrored(String),
     StateUpdated {
         state: UnlockStateView,
         refetch: bool,
@@ -257,6 +261,9 @@ pub enum Cmd {
     },
     /// 主畫面切登入卡（帳號列/橫幅點擊；SignedOut 時本就是主畫面）。
     OpenLogin,
+    /// 編輯態無變更退回查看態：保留 detail 骨架不重取（零跳動）；
+    /// 骨架缺席才退回完整 OpenDetail 路徑。
+    ShowDetailView(ItemId),
     /// 登入卡送出：前端校驗 → `Auth:Login{password:Some}`（本機 UDS 明文合法）。
     SubmitLogin,
     /// 第二步（2FA）：伺服器挑戰列出可用因子，卡原地進因子單選＋驗證碼態。
@@ -347,7 +354,7 @@ pub struct FormFields {
     /// 明文只在這個訊號與送出時的 `Zeroizing` 副本裡存在（契約 §2.7 規則 6：
     /// UI 純介面零業務邏輯，明文不進 JS、不落盤）。
     pub password: Signal<String>,
-    pub uri: Signal<String>,
+    pub uris: Signal<std::sync::Arc<Vec<UriDraft>>>,
     pub tags: Signal<String>,
     /// 型別切換：本批僅 Login/SecureNote 可選，Card/Identity 佔位 disabled。
     pub kind: Signal<ItemKind>,
@@ -369,7 +376,7 @@ impl FormFields {
         self.name.set(String::new());
         self.username.set(String::new());
         self.password.set(String::new());
-        self.uri.set(String::new());
+        self.uris.set(std::sync::Arc::new(Vec::new()));
         self.tags.set(String::new());
         self.error.set(None);
         self.original.set(original);
@@ -379,6 +386,27 @@ impl FormFields {
         self.fields.set(Arc::new(Vec::new()));
         self.gen_panel.set(GenState::default());
         self.gen_draft.set(None);
+    }
+}
+
+/// 網址編輯列（批次 A：多網址）。`key`＝基準陣列位置（對齊手法同
+/// `FieldDraft`，刪列/改列不錯位）；`NEW_URI`＝新增列（僅 create 面可送，
+/// daemon patch 目前只有 `uri.<n>` 就地 Set、無 append/remove）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UriDraft {
+    pub key: u32,
+    pub uri: String,
+}
+
+/// 新增列的哨兵 key（見 `UriDraft`）。
+pub const NEW_URI: u32 = u32::MAX;
+
+impl Default for UriDraft {
+    fn default() -> Self {
+        Self {
+            key: rand_key(),
+            uri: String::new(),
+        }
     }
 }
 
@@ -508,6 +536,27 @@ pub fn humanize_login(err: &str) -> String {
     }
 }
 
+/// 「無 seed」錯誤判別（純函數，單測點）：daemon 對無 seed 項目的回絕
+/// 措辭屬正常缺席（hub.rs totp()），其他錯誤才走可懂一行。
+pub fn totp_absent(err: &str) -> bool {
+    err.contains("沒有 TOTP seed")
+}
+
+/// 取碼錯誤可懂化：原樣保留 daemon 訊息並加一句繁中指引（不彈窗）。
+pub fn humanize_totp(err: &str) -> String {
+    if err.contains("Locked") || err.contains("鎖定") {
+        "取碼失敗：庫已鎖定".into()
+    } else {
+        format!("取碼失敗：{err}")
+    }
+}
+
+/// 「驗證碼」節渲染閘（純函數，單測點）：有碼或真錯誤才出現；
+/// 無 seed（兩者皆 None）整節不渲染。
+pub fn totp_section_shown(code: Option<&str>, err: Option<&str>) -> bool {
+    code.is_some() || err.is_some()
+}
+
 /// 側欄帳號列的顯示態（純函數，單測點）：needs_reauth 優先（憑證失效
 /// 時即使仍解鎖也要人看見）；未登入次之；其餘為已登入（email 可知則示）。
 #[derive(Debug, PartialEq, Eq)]
@@ -579,6 +628,8 @@ pub struct AppCore {
     /// 只用於詳情重繪與到期重取，不是背景任務）。
     pub totp_valid_for: Signal<u32>,
     pub totp_issued: Signal<Option<Instant>>,
+    /// 取碼失敗的可懂一行（解 seed 錯等）；「無 seed」不設此欄＝整節不渲染。
+    pub totp_error: Signal<Option<String>>,
     pub totp_tick: Signal<u64>,
     /// 側欄同步狀態：本視窗最近一次 Sync:Trigger 成功時刻。
     pub last_sync: Signal<Option<Instant>>,
@@ -635,6 +686,7 @@ impl AppCore {
             totp: signal(None),
             totp_valid_for: signal(0),
             totp_issued: signal(None),
+            totp_error: signal(None),
             totp_tick: signal(0),
             last_sync: signal(None),
             needs_reauth: signal(false),
@@ -671,7 +723,7 @@ impl AppCore {
                 name: signal(String::new()),
                 username: signal(String::new()),
                 password: signal(String::new()),
-                uri: signal(String::new()),
+                uris: signal(std::sync::Arc::new(Vec::new())),
                 tags: signal(String::new()),
                 kind: signal(ItemKind::Login),
                 folder_id: signal(String::new()),
@@ -760,6 +812,7 @@ impl AppCore {
         // 前的最後持有者；常駐拷貝不存在——GUI 不緩存任何 Reveal 結果）。
         self.revealed.set(None);
         self.totp.set(None);
+        self.totp_error.set(None);
         self.totp_valid_for.set(0);
         self.totp_issued.set(None);
         self.att_upload_path.set(String::new());
@@ -853,7 +906,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         Cmd::NavForced(_) => {}
         Cmd::RequestCloseForm => {
             let back = match core.route.get() {
-                Route::Edit(id) => Cmd::OpenDetail(id),
+                Route::Edit(id) => Cmd::ShowDetailView(id),
                 _ => Cmd::OpenList,
             };
             if matches!(core.route.get(), Route::Create | Route::Edit(_)) && form_dirty(core) {
@@ -893,18 +946,29 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         Cmd::DetailLoaded { id, row } => {
             core.settle();
             if core.route.get() == Route::Detail(id) {
+                let is_login = row.meta.kind == ItemKind::Login;
                 core.detail.set(Some(row));
+                // 批次 A：有 seed 與否由 daemon 裁決（投影不帶 seed 存在性），
+                // 進詳情即自動取碼——成功現碼、無 seed 靜默收合、真錯一行。
+                if is_login {
+                    core.send(Cmd::RequestTotp);
+                }
             }
         }
         Cmd::OpenCreate => {
             core.send(Cmd::FetchFolders);
             core.leave_detail();
             core.form.reset(None);
+            // 網址列至少給一列空框（舊單欄時代的發現性）。
+            core.form
+                .uris
+                .set(std::sync::Arc::new(vec![UriDraft::default()]));
             core.route.set(Route::Create);
         }
         Cmd::OpenEdit(id) => {
             core.send(Cmd::FetchFolders);
-            core.leave_detail();
+            // 批次 A＃2 morph：不清 detail——編輯態沿用查看態骨架（節次序、
+            // 標題、幾何全部原地，只欄位換輸入框），切換零跳動。
             core.form.reset(None);
             core.route.set(Route::Edit(id));
             core.ipc(move |s| match s.call(&get(id, View::Masked)) {
@@ -922,15 +986,27 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             if core.route.get() != Route::Edit(id) {
                 return;
             }
+            // 骨架直接吃這份 Masked 投影（查看態 sections 的唯讀資料源）。
+            core.detail.set(Some(row.clone()));
             core.form
                 .name
                 .set(row.meta.name.clone().unwrap_or_default());
             core.form
                 .username
                 .set(row.username.clone().unwrap_or_default());
+            let uri_rows: Vec<UriDraft> = row
+                .meta
+                .uris
+                .iter()
+                .enumerate()
+                .map(|(i, u)| UriDraft {
+                    key: i as u32,
+                    uri: u.clone(),
+                })
+                .collect();
             core.form
-                .uri
-                .set(row.meta.uris.first().cloned().unwrap_or_default());
+                .uris
+                .set(std::sync::Arc::new(uri_rows.clone()));
             core.form.tags.set(row.meta.tags.join(", "));
             core.form.kind.set(row.meta.kind);
             core.form
@@ -951,7 +1027,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.form.original.set(Some(Arc::new(FormOriginal {
                 name: row.meta.name.clone().unwrap_or_default(),
                 username: row.username.clone(),
-                uri: row.meta.uris.first().cloned(),
+                uris: row.meta.uris.clone(),
                 tags: row.meta.tags.clone(),
                 notes: row.notes.clone(),
                 folder_id: row.meta.folder_id.map(|f| f.to_string()),
@@ -995,12 +1071,28 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                         code,
                         valid_for_secs,
                     },
-                    Err(e) => Cmd::Failed { err: e.display() },
-                    Ok(other) => Cmd::Failed {
-                        err: format!("TotpCode 回應形態不符：{other:?}"),
-                    },
+                    Err(e) => {
+                        let msg = e.display();
+                        if totp_absent(&msg) {
+                            Cmd::TotpAbsent
+                        } else {
+                            Cmd::TotpErrored(msg)
+                        }
+                    }
+                    Ok(other) => Cmd::TotpErrored(format!("TotpCode 回應形態不符：{other:?}")),
                 },
             );
+        }
+        // 「此項目沒有 TOTP seed」＝正常缺席：靜默收合整節，不報錯。
+        Cmd::TotpAbsent => {
+            core.settle();
+            core.totp.set(None);
+            core.totp_error.set(None);
+        }
+        Cmd::TotpErrored(msg) => {
+            core.settle();
+            core.totp.set(None);
+            core.totp_error.set(Some(humanize_totp(&msg)));
         }
         Cmd::TotpLoaded {
             code,
@@ -1111,6 +1203,14 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             }
             if refetch {
                 fetch_list(core);
+            }
+        }
+        Cmd::ShowDetailView(id) => {
+            core.route.set(Route::Detail(id));
+            // 明文出棧（取消／無變更退回）；骨架在＝不重取，缺席才補 fetch。
+            core.form.password.set(String::new());
+            if core.detail.get().is_none() {
+                core.send(Cmd::OpenDetail(id));
             }
         }
         Cmd::OpenLogin => core.show_login.set(true),
@@ -1758,7 +1858,7 @@ fn submit_form(core: &AppCore) {
     core.form.error.set(None);
     let username = nonblank(&core.form.username.get());
     let password = nonblank(&core.form.password.get());
-    let uri = nonblank(core.form.uri.get().trim());
+    let uri_rows = core.form.uris.get();
     let tags = parse_tags(&core.form.tags.get());
     let kind = core.form.kind.get();
     let folder_id = nonblank(&core.form.folder_id.get());
@@ -1790,7 +1890,10 @@ fn submit_form(core: &AppCore) {
                     username,
                     password: password.as_deref().map(|p| p.to_string()),
                     totp: None,
-                    uris: uri.into_iter().collect(),
+                    uris: uri_rows
+                        .iter()
+                        .filter_map(|u| nonblank(u.uri.trim()))
+                        .collect(),
                     notes,
                     favorite: false,
                     folder_id,
@@ -1825,7 +1928,7 @@ fn submit_form(core: &AppCore) {
                 name: &name,
                 username,
                 password,
-                uri,
+                uris: &uri_rows,
                 notes,
                 folder_id,
                 tags: &tags,
@@ -1833,7 +1936,7 @@ fn submit_form(core: &AppCore) {
             };
             let (leaf, field_struct, add, remove) = edit_delta(&orig, &input);
             if leaf.is_empty() && field_struct.is_empty() && add.is_empty() && remove.is_empty() {
-                core.send(Cmd::OpenDetail(id));
+                core.send(Cmd::ShowDetailView(id));
                 return;
             }
             core.ipc(move |s| {
@@ -1983,12 +2086,31 @@ pub fn parse_pending(rows: &[serde_json::Value]) -> Vec<PendingRow> {
         .collect()
 }
 
+/// 多網址 diff（純函數，可單測）：以 `key`（基準索引）對齊現況列，值改變者
+/// 發 `uri.<key>` 的 Set（None＝清空該列）。新增列（`NEW_URI`）與刪除在編輯
+/// 面不產 edit（daemon 無 AppendUri/RemoveUri）；create 面走整包 `uris`。
+pub fn uri_sets(orig: &[String], rows: &[UriDraft]) -> Vec<FieldEdit> {
+    rows.iter()
+        .filter_map(|r| {
+            if r.key == NEW_URI {
+                return None;
+            }
+            let base = orig.get(r.key as usize)?;
+            let now = nonblank(r.uri.trim());
+            (now.as_deref() != Some(base.as_str())).then(|| FieldEdit::Set {
+                path: format!("uri.{}", r.key),
+                value: now,
+            })
+        })
+        .collect()
+}
+
 /// 表單現值（`edit_delta`／`form_is_dirty` 統一輸入形態；正規化在呼叫端）。
 pub struct FormInput<'a> {
     pub name: &'a str,
     pub username: Option<String>,
     pub password: Option<String>,
-    pub uri: Option<String>,
+    pub uris: &'a [UriDraft],
     pub notes: Option<String>,
     pub folder_id: Option<String>,
     pub tags: &'a [String],
@@ -2014,18 +2136,15 @@ pub fn edit_delta(
             value: f.username.clone(),
         });
     }
-    if f.uri != orig.uri {
-        leaf.push(FieldEdit::Set {
-            path: "uri.0".into(),
-            value: f.uri.clone(),
-        });
-    }
     if f.password.is_some() {
         leaf.push(FieldEdit::Set {
             path: "password".into(),
             value: f.password.clone(),
         });
     }
+    // 多網址（批次 A）：key 對齊基準逐列 `uri.<n>` Set；新增列在編輯面
+    // 不送出（daemon patch 無 AppendUri，UI 已擋＋tooltip）。
+    leaf.extend(uri_sets(&orig.uris, f.uris));
     if f.notes != orig.notes {
         leaf.push(FieldEdit::Set {
             path: "notes".into(),
@@ -2056,7 +2175,7 @@ pub fn form_is_dirty(
     name: &str,
     username: &str,
     password: &str,
-    uri: &str,
+    uris: &[UriDraft],
     tags: &str,
     notes: &str,
     folder_id: &str,
@@ -2066,7 +2185,6 @@ pub fn form_is_dirty(
     let name = name.trim().to_owned();
     let username = nonblank(username);
     let password = nonblank(password);
-    let uri = nonblank(uri.trim());
     let tag_list = parse_tags(tags);
     let notes = nonblank(notes);
     let folder = nonblank(folder_id);
@@ -2076,7 +2194,7 @@ pub fn form_is_dirty(
                 name: &name,
                 username,
                 password,
-                uri,
+                uris,
                 notes,
                 folder_id: folder,
                 tags: &tag_list,
@@ -2089,11 +2207,11 @@ pub fn form_is_dirty(
             !name.is_empty()
                 || username.is_some()
                 || password.is_some()
-                || uri.is_some()
                 || notes.is_some()
                 || folder.is_some()
                 || !tag_list.is_empty()
                 || kind != ItemKind::Login
+                || uris.iter().any(|u| nonblank(u.uri.trim()).is_some())
                 || drafts
                     .iter()
                     .any(|f| !f.name.trim().is_empty() || !f.value.trim().is_empty())
@@ -2108,7 +2226,7 @@ pub fn form_dirty(core: &AppCore) -> bool {
         &core.form.name.get(),
         &core.form.username.get(),
         &core.form.password.get(),
-        &core.form.uri.get(),
+        &core.form.uris.get(),
         &core.form.tags.get(),
         &core.form.notes.get(),
         &core.form.folder_id.get(),
@@ -2127,6 +2245,7 @@ fn nav_interrupts(cmd: &Cmd) -> bool {
             | Cmd::OpenCreate
             | Cmd::OpenEdit(_)
             | Cmd::OpenApprovals
+            | Cmd::ShowDetailView(_)
             | Cmd::ChooseFolder(_)
             | Cmd::ToggleTrash
     )
@@ -2315,36 +2434,41 @@ mod tests {
         let orig = FormOriginal {
             name: "GitHub".into(),
             username: Some("octo".into()),
-            uri: Some("https://github.com".into()),
+            uris: vec!["https://github.com".into()],
             tags: vec!["dev".into()],
             notes: None,
             folder_id: None,
             fields: vec![],
         };
+        let rows = [UriDraft {
+            key: 0,
+            uri: "https://github.com".into(),
+        }];
         // 基準原值＝不髒；空白抖動與「空密碼＝不動」也不髒（同 submit 正規化）。
         assert!(!form_is_dirty(
-            Some(&orig), "GitHub", "octo", "", "https://github.com", "dev", "", "",
+            Some(&orig), "GitHub", "octo", "", &rows, "dev", "", "",
             ItemKind::Login, &[]
         ));
         assert!(!form_is_dirty(
-            Some(&orig), "  GitHub ", "octo", "   ", "https://github.com", " dev ", " ", "",
+            Some(&orig), "  GitHub ", "octo", "   ", &rows, " dev ", " ", "",
             ItemKind::Login, &[]
         ));
         // 改名字、換密碼、清空網址、動標籤＝髒。
         assert!(form_is_dirty(
-            Some(&orig), "GitHub2", "octo", "", "https://github.com", "dev", "", "",
+            Some(&orig), "GitHub2", "octo", "", &rows, "dev", "", "",
             ItemKind::Login, &[]
         ));
         assert!(form_is_dirty(
-            Some(&orig), "GitHub", "octo", "newpw", "https://github.com", "dev", "", "",
+            Some(&orig), "GitHub", "octo", "newpw", &rows, "dev", "", "",
             ItemKind::Login, &[]
         ));
+        // 清空網址列值（Set uri.0 None）＝髒；列數縮減在編輯面不可達（無 ✕）。
         assert!(form_is_dirty(
-            Some(&orig), "GitHub", "octo", "", "", "dev", "", "",
-            ItemKind::Login, &[]
+            Some(&orig), "GitHub", "octo", "", &[UriDraft { key: 0, uri: "  ".into() }],
+            "dev", "", "", ItemKind::Login, &[]
         ));
         assert!(form_is_dirty(
-            Some(&orig), "GitHub", "octo", "", "https://github.com", "dev, 工作", "", "",
+            Some(&orig), "GitHub", "octo", "", &rows, "dev, 工作", "", "",
             ItemKind::Login, &[]
         ));
     }
@@ -2353,13 +2477,17 @@ mod tests {
     fn form_dirty_create_treats_any_input_as_dirty() {
         // 無基準＝新增：全空乾淨；任一欄位、型別切換、非空欄列＝髒。
         assert!(!form_is_dirty(
-            None, "", "", "", "", "", "", "", ItemKind::Login, &[]
+            None, "", "", "", &[], "", "", "", ItemKind::Login, &[]
         ));
         assert!(form_is_dirty(
-            None, "x", "", "", "", "", "", "", ItemKind::Login, &[]
+            None, "x", "", "", &[], "", "", "", ItemKind::Login, &[]
         ));
         assert!(form_is_dirty(
-            None, "", "", "", "", "", "", "", ItemKind::SecureNote, &[]
+            None, "", "", "", &[], "", "", "", ItemKind::SecureNote, &[]
+        ));
+        assert!(form_is_dirty(
+            None, "", "", "", &[UriDraft { key: NEW_URI, uri: "https://a.test".into() }],
+            "", "", "", ItemKind::Login, &[]
         ));
         let row = FieldDraft {
             key: 1,
@@ -2368,7 +2496,7 @@ mod tests {
             kind: CipherFieldKind::Text,
         };
         assert!(form_is_dirty(
-            None, "", "", "", "", "", "", "", ItemKind::Login, &[row]
+            None, "", "", "", &[], "", "", "", ItemKind::Login, &[row]
         ));
         let blank = FieldDraft {
             key: 2,
@@ -2377,8 +2505,50 @@ mod tests {
             kind: CipherFieldKind::Text,
         };
         assert!(!form_is_dirty(
-            None, "", "", "", "", "", "", "", ItemKind::Login, &[blank]
+            None, "", "", "", &[], "", "", "", ItemKind::Login, &[blank]
         ));
+    }
+
+    #[test]
+    fn uri_sets_key_alignment_and_append_gap() {
+        let orig = vec!["https://a.test".to_owned(), "https://b.test".to_owned()];
+        // 全等基準＝無 edit。
+        let same = [
+            UriDraft { key: 0, uri: "https://a.test".into() },
+            UriDraft { key: 1, uri: "https://b.test".into() },
+        ];
+        assert!(uri_sets(&orig, &same).is_empty());
+        // 改第二列→uri.1；順序倒置但 key 對齊→仍各歸原位。
+        let swapped = [
+            UriDraft { key: 1, uri: "https://b.test".into() },
+            UriDraft { key: 0, uri: "https://a2.test".into() },
+        ];
+        let edits = uri_sets(&orig, &swapped);
+        assert_eq!(edits.len(), 1);
+        assert!(matches!(&edits[0], FieldEdit::Set{path, value} if path=="uri.0" && value.as_deref()==Some("https://a2.test")));
+        // 清空列＝Set None；新增列（NEW_URI）編輯面不送（daemon 無 AppendUri）。
+        let mut cleared = same.clone();
+        cleared[1].uri = "  ".into();
+        let appended = [UriDraft { key: NEW_URI, uri: "https://c.test".into() }];
+        let e2 = uri_sets(&orig, &[cleared.to_vec(), appended.to_vec()].concat());
+        assert!(matches!(&e2[0], FieldEdit::Set{path, value} if path=="uri.1" && value.is_none()));
+        assert_eq!(e2.len(), 1);
+        // 基準外的幽靈 key（基準列已被他端移除）不產 edit。
+        let ghost = [UriDraft { key: 9, uri: "https://x.test".into() }];
+        assert!(uri_sets(&orig, &ghost).is_empty());
+    }
+
+    #[test]
+    fn totp_display_gates_classify_absent_vs_error() {
+        // 無 seed＝正常缺席：不渲染、不報錯。
+        assert!(totp_absent("denied: 此項目沒有 TOTP seed"));
+        assert!(!totp_absent("denied: seed base32 無效"));
+        assert!(!totp_section_shown(None, None));
+        // 有碼或真錯才出現；錯誤走可懂一行。
+        assert!(totp_section_shown(Some("123456"), None));
+        assert!(totp_section_shown(None, Some("取碼失敗：seed 無效")));
+        assert_eq!(humanize_totp("base32 decode error"), "取碼失敗：base32 decode error");
+        assert_eq!(humanize_totp("WtpError::Locked"), "取碼失敗：庫已鎖定");
     }
 
     #[test]

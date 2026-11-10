@@ -450,7 +450,16 @@ pub fn script(dir: PathBuf, core: AppCore) {
         c.form.name.set("範例網站".into());
         c.form.username.set("me@example.com".into());
         c.form.password.set("s3cret-範例".into());
-        c.form.uri.set("https://example.com".into());
+        c.form.uris.set(std::sync::Arc::new(vec![
+            crate::state::UriDraft {
+                key: crate::state::NEW_URI,
+                uri: "https://example.com".into(),
+            },
+            crate::state::UriDraft {
+                key: crate::state::NEW_URI.wrapping_sub(1),
+                uri: "https://backup.example.com".into(),
+            },
+        ]));
         c.form.tags.set("dev, 工作".into());
     });
     let d = dir.clone();
@@ -478,10 +487,17 @@ pub fn script(dir: PathBuf, core: AppCore) {
             c.send(Cmd::OpenDetail(id));
         }
     });
+    // 批次 A＃3：無 seed 項目——進詳情自動取碼被 daemon 回「沒有 TOTP seed」，
+    // 驗證碼節整節不渲染（手動 RequestTotp 已退役；此處斷言缺席態）。
     let c = core.clone();
-    at(10100, move || c.send(Cmd::RequestTotp));
+    at(10900, move || {
+        assert!(
+            c.totp.get().is_none() && c.totp_error.get().is_none(),
+            "無 seed 項目：取碼應靜默缺席（totp 與 totp_error 皆 None）"
+        );
+    });
     let d = dir.clone();
-    at(10900, move || capture(&d, "shot-6-totp-denied.png"));
+    at(11000, move || capture(&d, "shot-6-totp-absent.png"));
 
     // —— 排序下拉與標籤 chips（標籤已改 chips 行：選中描邊即證據）——
     let c = core.clone();
@@ -501,19 +517,30 @@ pub fn script(dir: PathBuf, core: AppCore) {
     let c = core.clone();
     at(12700, move || c.send(Cmd::ChooseTag(None)));
 
-    // —— 編輯改名（Vault:Patch）——
+    // —— 編輯改名（Vault:Patch）＋morph 同骨架對比（批次 A＃2）——
+    // 先拍查看態（同項目、同節序幾何），OpenEdit 後拍編輯態＝零跳動證據。
     let c = core.clone();
     at(12900, move || {
+        if let Some(id) = find_id(&c, "E2E 驗證項目") {
+            c.send(Cmd::OpenDetail(id));
+        }
+    });
+    let d = dir.clone();
+    at(13400, move || capture(&d, "shot-50-morph-view.png"));
+    let c = core.clone();
+    at(13600, move || {
         if let Some(id) = find_id(&c, "E2E 驗證項目") {
             c.send(Cmd::OpenEdit(id));
         }
     });
-    let c = core.clone();
-    at(13300, move || c.form.name.set("E2E 驗證項目改名".into()));
-    let c = core.clone();
-    at(13500, move || c.send(Cmd::SubmitForm));
     let d = dir.clone();
-    at(14600, move || capture(&d, "shot-9-edited.png"));
+    at(14300, move || capture(&d, "shot-51-morph-edit.png"));
+    let c = core.clone();
+    at(14500, move || c.form.name.set("E2E 驗證項目改名".into()));
+    let c = core.clone();
+    at(14700, move || c.send(Cmd::SubmitForm));
+    let d = dir.clone();
+    at(15400, move || capture(&d, "shot-9-edited.png"));
 
     // —— 刪除確認框：先取消（斷言未刪）再yes走 Vault:Delete ——
     let c = core.clone();

@@ -473,6 +473,7 @@ mod tests {
             updated_at: None,
             pending: false,
             deleted_at: None,
+            archived_at: None,
         })
     }
 

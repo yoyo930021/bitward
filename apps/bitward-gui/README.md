@@ -47,16 +47,19 @@ cd apps/bitward-gui
 BITWARD_GUI_SOCK=<repo>/dev/e2e/demo/s NSH_GUI_SHOTS=$PWD nsh run --target macos
 ```
 
-依指令序列跑完整驗收流並寫 `shot-1..23、26..43-*.png`（24/25 徽章流、44..47 登入流見下）後退出：列表全量（三欄骨架、
+依指令序列跑完整驗收流並寫 `shot-1..23、26..43、50..51-*.png`（24/25 徽章流、44..47 登入流、48/49 2FA 流見下）後退出：列表全量（三欄骨架、
 型別磚、未同步膠囊，右欄空態為「選取一個項目」佔位）→ 搜尋 "GitHub" →
 詳情遮罩 → 詳情 revealed → 新增編輯器（右欄 inline）→ 真送新增（Create+AddTag）
-→ TOTP 拒絕路徑（無 seed → 錯誤橫條）→ 排序下拉 → 標籤 chips 選取 →
+→ TOTP 缺席路徑（無 seed → 自動取碼靜默收合，驗證碼節不渲染，shot-6-totp-absent）→ 排序下拉 → 標籤 chips 選取 →
 編輯改名（Patch）→ 刪除確認框 → 取消不刪斷言 → 刪除後空列表 →
 鎖態頁（已鎖定+解鎖鈕）→ 解鎖 → 匯出確認框（未加密提醒）→ 匯出完成提示列 →
 選取態（清搜尋、開詳情；選中列淡藍底＋左 3px 藍條）→
 垃圾桶（軟刪條目＋刪除時間）→ 垃圾桶詳情（還原／永久刪除動作）→ 還原後回列表 →
 產生器面板展開（真送 Use:GeneratePassword 取草稿）→
 TOTP 倒數三段（真取碼後偽造時間源示 30/10/5 秒比例，5 秒段轉 warning 色）→
+編輯改名前的同骨架對比兩張（查看態 shot-50-morph-view／編輯態 shot-51-morph-edit：
+同項目、同節序、名稱就地變輸入框、值塊就地變輸入框、頂部鈕「編輯/刪除」變「取消/儲存」，
+切換零跳動；網址為多列編輯器，列數＝基準列、增刪留 daemon 面）→
 資料夾樹（把「GitHub 測試」歸入工作資料夾後過濾，側欄節點選中態）→
 SecureNote 編輯器（帳密收合、備註大欄、Card/Identity 佔位灰）→
 自訂欄位編輯列（文字＋隱藏兩列）→ 匯入模態（貼路徑→預覽計數）→
@@ -145,9 +148,9 @@ access token 壽命約 2 小時；daemon 自 4c 起**自動續期**（401 出口
 | `lib.rs` | 根元件 `App`：命令幫浦（`set_interval` 50ms + `batch`）、TOTP 心跳（1s 引擎計時器）、批准佇列節拍（1.5s 輪詢，照殼節奏）、主題 effect（`theme_mode`→`set_color_scheme`，即時翻轉不重建視窗；`theme.txt` 持久化）、頂部列（置中搜尋＋新增項目）、左側欄（我的密碼庫＋資料夾樹／已共享佔位／垃圾桶／待批准＋計數徽章／帳號列（email＋上次同步／未登入／憑證失效三態）／匯出/匯入/改密／主題三態選擇）、錯誤橫條、needs_reauth 橫幅（warning 色、點擊進登入卡）、Phase×Route 三欄版面與鎖態頁、SignedOut 登入卡（server/email/主密碼＋登入即解鎖）與側欄帳號列三態 |
 | `approvals.rs` | 批准佇列右欄視角（自殼批准中心併入）：每筆＝去敏 summary＋請求時間（`requested_at_ms`，daemon 補欄即顯示）＋單鍵批准/拒絕（官方語意無二次確認，按錯以拒絕補救）；空佇列佔位卡；epoch→UTC 時分純函數 |
 | `list.rs` | 置中搜尋框（Query.text 交 daemon FTS；掛頂部列）、標籤 chips 行＋排序/重新整理（中欄工具列）、排序選單、44px 列（型別磚單色字形、選中列淡藍底＋藍指示條）、未同步膠囊、垃圾桶條目顯示刪除時間、`virtual_list` |
-| `detail.rs` | 右欄詳情面板：官方表單感——大名稱＋型別磚，分節與官方同序（帳密／驗證碼／備註／自訂欄位／附件／資訊），欄位為淺灰圓角值塊（label 12 粗灰在上、值 14 塊內、複製鈕塊右側），布爾欄渲染開關樣；垃圾桶條目動作改還原／永久刪除；密碼遮罩 →「顯示密碼」發 Get(Reveal)，明文只存 `revealed` 訊號、離開詳情即清；TOTP 按鈕發 Use:TotpCode＋倒數細进度條（≤5 秒轉 warning）；附件列＝檔名＋大小＋下載／刪除，節尾內聯上傳編輯器 |
+| `detail.rs` | 右欄詳情面板：官方表單感——大名稱＋型別磚，分節與官方同序（帳密／驗證碼／備註／自訂欄位／附件／資訊），欄位為淺灰圓角值塊（label 12 粗灰在上、值 14 塊內、複製鈕塊右側），布爾欄渲染開關樣；垃圾桶條目動作改還原／永久刪除；密碼遮罩 →「顯示密碼」發 Get(Reveal)，明文只存 `revealed` 訊號、離開詳情即清；**編輯態＝同骨架原地變形**（`Route::Edit` 時名稱/帳號/密碼/標籤/備註值塊就地變同幾何輸入框、網址走多列編輯器、自訂欄位換編輯列、頂部鈕變取消/儲存，切換零跳動）；TOTP 進詳情自動取碼（無 seed 整節不渲染、真錯顯示可懂一行）＋倒數細进度條（≤5 秒轉 warning）；附件列＝檔名＋大小＋下載／刪除，節尾內聯上傳編輯器 |
 | `attach.rs` | 附件視圖層純函數：大小格式化、32MiB 本地閘、org 上傳擋附、單飛行狀態機、上傳讀檔／下載落地路徑（`~/Downloads/bitward-attachment-*`，0600 防蓋檔）；往返在 `state.rs` 附件命令，收斂靠事件幫浦 |
-| `form.rs` | 新增/編輯右欄 inline 編輯器（詳情 view↔edit 態翻轉；表頭取消/儲存，髒退出走確認框）：型別切換（登入/加密筆記可選，Card/Identity 佔位；項目型別建立後不可更改——與官方一致，community FR 1148 十年未開）、資料夾下拉（ListFolders）、name/username/password/uri/tags/notes/自訂欄位編輯列；密碼欄附產生器面板 |
+| `form.rs` | 新增右欄 inline 編輯器（Create 專用；編輯態已併入 detail 同骨架 morph）：型別切換（登入/加密筆記可選，Card/Identity 佔位；項目型別建立後不可更改——與官方一致，community FR 1148 十年未開）、資料夾下拉（ListFolders）、name/username/password/**uris 多列編輯器（＋新增列／✕刪列，列身份 key 對齊）**/tags/notes/自訂欄位編輯列；密碼欄附產生器面板。`uris_editor`/`custom_fields_editor`/`folder_dropdown` 為 pub(crate) 供 detail morph 沿用（零複製） |
 | `passgen.rs` | 產生器純狀態機：長度夾取（8–64、預設 20）、字元集開關、policy JSON（`Use:GeneratePassword` 欄名契約）；隨機數在 daemon |
 | `import.rs` | 官方 JSON 匯入器：本地解析吃官方未加密匯出與本 App 匯出兩形態（預覽計數純函數、加密檔擋下），執行走單交易 `VaultCall:Import`（全收或全拒，上限 500） |
 | `export.rs` | 未加密 JSON 匯出：逐筆 Get(Reveal) → `~/Downloads/bitward-export-<UTC>.json`（0600） |

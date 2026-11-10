@@ -712,16 +712,7 @@ fn split(core: AppCore) -> View {
                     match route_cond.route.get() {
                         Route::Approvals => approvals::pane(approvals_build.clone()),
                         Route::Create => form::pane(form_build.clone()),
-                        Route::Edit(_) => {
-                            // 編輯基準（EditPrefilled）到齊前走載入態，
-                            // 避免閃空表單再回填。
-                            if form_build.form.original.get().is_some() {
-                                form::pane(form_build.clone())
-                            } else {
-                                detail::loading()
-                            }
-                        }
-                        Route::Detail(_) => {
+                        Route::Edit(_) | Route::Detail(_) => {
                             if detail_cond.detail.get().is_some() {
                                 detail::pane(detail_build.clone())
                             } else {

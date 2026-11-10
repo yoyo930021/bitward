@@ -11,7 +11,7 @@ use nsh_base::input;
 use nsh_core::prelude::*;
 
 use crate::passgen::GenState;
-use crate::state::{AppCore, Cmd, FieldDraft, Route};
+use crate::state::{AppCore, Cmd, FieldDraft, Route, UriDraft};
 use crate::theme;
 use crate::ui;
 
@@ -128,7 +128,6 @@ fn password_hint(route: Route) -> &'static str {
 fn credentials_block(core: AppCore) -> View {
     let username = core.form.username;
     let password = core.form.password;
-    let uri = core.form.uri;
     let gen_panel = core.form.gen_panel;
     let gen_cond = core.clone();
     let gen_build = core.clone();
@@ -162,18 +161,115 @@ fn credentials_block(core: AppCore) -> View {
             move || gen_cond.form.gen_panel.get().open,
             move || generator(gen_build.clone()),
         ))
-        .child(ui::form_field(
-            "網址",
-            "https://example.com",
-            uri,
-            false,
-            move |v| uri.set(v),
+        .child(uris_editor(core.clone()))
+}
+
+/// 網址多列編輯器（批次 A＃1）：每列＝uri 輸入框＋（create 面）✕刪列；
+/// 「＋ 新增網址」僅 create——編輯面 daemon patch 只有 `uri.<n>` 就地 Set、
+/// 無 AppendUri/RemoveUri，增刪留 tooltip 註記等 daemon 面。列身份走
+/// `UriDraft.key`（編輯列＝基準索引、新增列＝亂數哨兵），diff 按 key 對齊
+/// 不錯位（`uri_sets`，手法同 `field_edits`）。
+pub fn uris_editor(core: AppCore) -> View {
+    let is_create = matches!(core.route.get(), Route::Create);
+    let rows = core.form.uris;
+    let add_rows = rows;
+    let row_rows = rows;
+    let label = view()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .child(
+            text("網址")
+                .text_size(px(theme::TEXT_FIELD_LABEL))
+                .font_weight(FontWeight::MEDIUM)
+                .letter_spacing(px(0.4))
+                .text_color(theme::TEXT_SECONDARY),
+        );
+    let label = if is_create {
+        label.child(ui::text_button_dyn(
+            || "＋ 新增網址".to_owned(),
+            move || add_rows.update(|v| Arc::make_mut(v).push(UriDraft::default())),
+        ))
+    } else {
+        label.child(
+            text("增刪列待 daemon 面")
+                .text_size(px(11.0))
+                .text_color(theme::TEXT_MUTED)
+                .tooltip(ui::tooltip_card("編輯面僅能改值：daemon patch 尚無網址增刪面")),
+        )
+    };
+    view()
+        .flex_col()
+        .gap_1p5()
+        .child(label)
+        .child(each(
+            move || (*rows.get()).clone(),
+            |u: &UriDraft| u.key,
+            move |_item: ReadSignal<UriDraft>, _i: ReadSignal<usize>| {
+                uri_row(row_rows, _item.get().key, is_create)
+            },
+        ))
+}
+
+/// 單列網址：輸入框（按 key 回寫）＋（create 面）✕刪列。
+fn uri_row(rows: Signal<Arc<Vec<UriDraft>>>, key: u32, removable: bool) -> View {
+    let edit = rows;
+    let del = rows;
+    view()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(
+            input()
+                .value(move || {
+                    rows.get()
+                        .iter()
+                        .find(|u| u.key == key)
+                        .map(|u| u.uri.clone())
+                        .unwrap_or_default()
+                })
+                .placeholder("https://example.com".to_owned())
+                .placeholder_color(move || color(theme::TEXT_MUTED))
+                .on_change(move |t: &str| {
+                    edit.update(|v| {
+                        if let Some(u) = Arc::make_mut(v).iter_mut().find(|u| u.key == key) {
+                            u.uri = t.to_owned();
+                        }
+                    });
+                })
+                .h(px(theme::INPUT_H))
+                .px_3()
+                .rounded(px(theme::RADIUS_CONTROL))
+                .border(px(1.0))
+                .border_color(theme::HAIRLINE)
+                .bg(theme::BASE)
+                .text_color(theme::TEXT_PRIMARY)
+                .focus(|s| s.border_color(theme::ACCENT))
+                .flex_1(),
+        )
+        .child(when(
+            move || removable,
+            move || {
+                view()
+                    .w(px(theme::COPY_BTN))
+                    .h(px(theme::COPY_BTN))
+                    .rounded(px(theme::RADIUS_CONTROL))
+                    .flex_row()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme::SURFACE_RAISED))
+                    .on_press(move || {
+                        del.update(|v| Arc::make_mut(v).retain(|u| u.key != key));
+                    })
+                    .child(text("✕").text_size(px(11.0)).text_color(theme::TEXT_MUTED))
+            },
         ))
 }
 
 /// 型別切換列：建立時可選 登入／加密筆記；Card/Identity 佔位 disabled
 /// （daemon 未支援）。編輯模式型別不可改（FieldEdit 無 type 路徑）。
-fn type_switcher(core: AppCore, is_create: bool) -> View {
+pub(crate) fn type_switcher(core: AppCore, is_create: bool) -> View {
     let kind = core.form.kind;
     let l_core = core.clone();
     let n_core = core.clone();
@@ -279,7 +375,7 @@ fn type_chip(
 }
 
 /// 資料夾下拉（ListFolders 鏡像來源）：無資料夾／各夾。選定即關面板。
-fn folder_dropdown(core: AppCore) -> View {
+pub(crate) fn folder_dropdown(core: AppCore) -> View {
     let open = signal(false);
     let folder = core.form.folder_id;
     let label_core = core.clone();
@@ -361,7 +457,7 @@ fn folder_panel(core: AppCore, open: Signal<bool>) -> View {
 
 /// 自訂欄位編輯列：name＋（值或布林開關）＋三態型別選單＋增刪。
 /// 建立與編輯模式都可增刪改型（daemon 批次 3 的 SetType/Append/Remove）。
-fn custom_fields_editor(core: AppCore) -> View {
+pub(crate) fn custom_fields_editor(core: AppCore) -> View {
     let fields = core.form.fields;
     let add_fields = fields;
     let row_fields = fields;
