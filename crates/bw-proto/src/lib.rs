@@ -519,6 +519,15 @@ pub enum PasskeyCall {
         display_name: String,
         item_id: Option<ItemId>,
     },
+    /// 刪除單條憑證（macOS 設定面：GUI 詳情頁 Passkeys 節）。`item_id` 是
+    /// 呼叫端見解（GetPasskeys 列出的歸屬），daemon 以 `find_credential` 的
+    /// 實查為準——兩者不符回 NotFound，不照單刪錯項目。鏡像 removal 走
+    /// counter++ 同款全量 PUT 路徑（`enqueue_passkey_patch`），伺服器
+    /// fido2Credentials 同步收斂（VW PUT 實錄見 e2e settings.sh）。
+    DeletePasskey {
+        item_id: ItemId,
+        credential_id: String,
+    },
 }
 
 /// APNs 推播 token 管理（§1.2 推播路徑正式分發形態）：iOS 端上報 device token，
@@ -548,6 +557,10 @@ pub struct PasskeyEntry {
     /// 舊資料無此欄 → 空字串。
     #[serde(default)]
     pub public_key: String,
+    /// 憑證歸屬項目（macOS 設定面：GUI 詳情頁按 item 過濾＋刪除定位用）。
+    /// 置尾＋`default`：舊 daemon 回包缺欄＝None（JSON 寬容，紀律同 StatusInfo）。
+    #[serde(default)]
+    pub item_id: Option<ItemId>,
 }
 
 /// overlay 操作（tags/pin/last-used）：協定無這些欄位，本地權威（§2.4）。

@@ -550,6 +550,10 @@ impl Hub {
                 PasskeyCall::FinishRegister { .. } => {
                     self.passkey_finish_register(session, pc).await
                 }
+                PasskeyCall::DeletePasskey {
+                    item_id,
+                    credential_id,
+                } => self.passkey_delete(session, *item_id, credential_id).await,
             },
             Call::Push(pc) => match pc {
                 PushCall::RegisterPush { token, platform } => {
@@ -1517,6 +1521,7 @@ fn action_tag(c: &Call) -> String {
         Call::Passkey(PasskeyCall::FinishAssert { .. }) => "Passkey.FinishAssert",
         Call::Passkey(PasskeyCall::BeginRegister { .. }) => "Passkey.BeginRegister",
         Call::Passkey(PasskeyCall::FinishRegister { .. }) => "Passkey.FinishRegister",
+        Call::Passkey(PasskeyCall::DeletePasskey { .. }) => "Passkey.DeletePasskey",
         Call::Push(PushCall::RegisterPush { .. }) => "Push.RegisterPush",
         Call::Push(PushCall::UnregisterPush { .. }) => "Push.UnregisterPush",
         Call::Push(PushCall::ListPush) => "Push.ListPush",

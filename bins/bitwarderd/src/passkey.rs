@@ -239,6 +239,7 @@ impl Hub {
                     user_name: get("userName").to_owned(),
                     rp_id: get("rpId").to_owned(),
                     public_key,
+                    item_id: Some(m.id),
                 };
                 if rp_id.is_none_or(|rp| norm_b64url(&entry.rp_id) == norm_b64url(rp)) {
                     out.push(entry);
@@ -741,6 +742,37 @@ impl Hub {
             .map_err(denied)?;
         self.trigger_drain();
         Ok(())
+    }
+
+    /// DeletePasskey：摘除 `login.fido2Credentials` 單條（鏡像即時改、伺服器
+    /// 走 outbox 全量 PUT 收斂——語意同 counter++ 持久化路徑，VW PUT 收 fido2
+    /// 陣列已由 writepath 實錄背書）。`item_id` 與 `find_credential` 實查不符
+    /// （他端已搬／已刪）回 NotFound，不照單刪錯項目；空陣列原樣留欄
+    /// （官方 jslib 同形，VW 收 `[]` 即清）。
+    pub async fn passkey_delete(
+        &self,
+        session: &str,
+        item_id: ItemId,
+        credential_id: &str,
+    ) -> Result<Response, WtpError> {
+        self.require_unlocked()?;
+        let (item, idx) = self
+            .find_credential(credential_id)?
+            .filter(|(found, _)| *found == item_id)
+            .ok_or(WtpError::NotFound)?;
+        let row = self.store.item(item).map_err(denied)?;
+        let base = row.ok_or(WtpError::NotFound)?.enc_cipher;
+        let mut ours = base.clone();
+        ours["id"] = json!(item.to_string());
+        if let Some(arr) = ours
+            .pointer_mut("/login/fido2Credentials")
+            .and_then(Value::as_array_mut)
+            && idx < arr.len()
+        {
+            arr.remove(idx);
+        }
+        self.enqueue_passkey_patch(session, item, base, ours).await?;
+        Ok(Response::Ok)
     }
 }
 
@@ -1573,6 +1605,52 @@ pub(crate) mod tests {
             .await,
             Err(WtpError::Locked)
         ));
+        drop(hub);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// DeletePasskey：鏡像即時摘除＋outbox 全量 patch 收斂（touched=fido2Credentials）；
+    /// item 歸屬不符回 NotFound（不刪錯項目）；刪後 GetPasskeys 不再列出。
+    #[tokio::test]
+    async fn delete_passkey_clears_mirror_and_enqueues_patch() {
+        let (hub, dir) = unlocked_hub("del").await;
+        let Response::PasskeyAttestation { credential_id, .. } =
+            hub.passkey_register("s", &register_call(None)).await.unwrap()
+        else {
+            panic!("expect attestation");
+        };
+        let Response::Passkeys(entries) = hub.passkey_list(None).unwrap() else {
+            panic!("expect passkeys");
+        };
+        let item = entries[0].item_id.expect("list 帶 item 歸屬");
+        // 歸屬不符：錯 item_id 不動鏡像
+        assert!(matches!(
+            hub.passkey_delete("s", ItemId::new_v4(), &credential_id).await,
+            Err(WtpError::NotFound)
+        ));
+        let due = hub.store.take_due(16).unwrap();
+        for m in &due {
+            hub.store.settle(m.id, bw_store::MutState::Applied).unwrap();
+        }
+        assert!(hub.passkey_delete("s", item, &credential_id).await.is_ok());
+        let row = hub.store.item(item).unwrap().expect("項目仍在");
+        assert!(
+            row.enc_cipher["login"]["fido2Credentials"]
+                .as_array()
+                .is_some_and(|a| a.is_empty()),
+            "鏡像 fido2Credentials 應已摘除"
+        );
+        let due = hub.store.take_due(16).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].payload["op"], "patch");
+        assert_eq!(due[0].payload["touched"][0], "fido2Credentials");
+        assert!(due[0].payload["ours"]["login"]["fido2Credentials"]
+            .as_array()
+            .is_some_and(|a| a.is_empty()));
+        let Response::Passkeys(entries) = hub.passkey_list(None).unwrap() else {
+            panic!("expect passkeys");
+        };
+        assert!(entries.is_empty(), "刪後不再列出");
         drop(hub);
         let _ = std::fs::remove_dir_all(dir);
     }

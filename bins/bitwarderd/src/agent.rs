@@ -288,6 +288,10 @@ impl Hub {
             Call::Passkey(PasskeyCall::FinishRegister { item_id, .. }) => {
                 (Access::Use(UseKind::Passkey), *item_id)
             }
+            // 刪除憑證＝改項目 cipher（fido2Credentials 陣列收斂），item 錨定
+            Call::Passkey(PasskeyCall::DeletePasskey { item_id, .. }) => {
+                (Access::Mutate(MutateOp::Delete), Some(*item_id))
+            }
             // 推播 token 是不透明識別子、非機密（只有持有 daemon 連線者能用它收信令），
             // 註冊/退註取最松級 see:opaque：任何已配對 session 的 see grant 都涵蓋，
             // 裝置不必為裝推播申請 vault 級授權。清單列全部裝置登記，比照 Audit 級。

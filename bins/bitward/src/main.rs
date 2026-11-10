@@ -463,6 +463,13 @@ enum PasskeyCmd {
         #[arg(long)]
         signature: String,
     },
+    /// 刪除單條憑證（鏡像＋伺服器 fido2Credentials 同步收斂）
+    Rm {
+        /// 憑證所在項目 id（`bitward passkey ls --json` 的 item 歸屬）
+        item: String,
+        /// b64url credentialId
+        credential: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1180,6 +1187,10 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             } => Call::Passkey(PasskeyCall::FinishAssert {
                 credential_id: credential.clone(),
                 signature: signature.clone(),
+            }),
+            PasskeyCmd::Rm { item, credential } => Call::Passkey(PasskeyCall::DeletePasskey {
+                item_id: parse_id(item)?,
+                credential_id: credential.clone(),
             }),
         },
         Cmd::Audit { tail, verify } => {
