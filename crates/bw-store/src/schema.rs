@@ -1,5 +1,5 @@
 /// schema 版本；每次加表/改表就 +1 並在本檔補一段遷移 SQL。
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// v1→v2：值搜尋明文索引欄。舊庫 ALTER；新庫 V1 已含，Duplicate column 容忍。
 pub const V2: &str = "ALTER TABLE meta_plain ADD COLUMN username_plain TEXT;
@@ -48,6 +48,10 @@ END;";
 /// schema_version_guard 的可見性。
 pub const V6: &str = "";
 
+/// v6→v7（批次 B 封存支援）：`meta_plain.archived_at`——協定 `archivedDate`
+/// 的鏡像投影欄（有值＝已封存）。逐條 ALTER 容忍 Duplicate column（同 V2 紀律）。
+pub const V7: &str = "ALTER TABLE meta_plain ADD COLUMN archived_at TEXT;";
+
 /// v1：鏡像（密文原樣）+ 明文 metadata 索引（FTS5）+ overlay + outbox +
 /// audit（append-only hash 鏈）+ sessions + blobs 登記 + meta。
 /// 來源：ARCHITECTURE §3.4；欄位語意見 crate NOTES.md。
@@ -73,7 +77,8 @@ CREATE TABLE IF NOT EXISTS meta_plain(
   username_plain TEXT,        -- v2：值搜尋索引（FR 11941），明文僅存於 0600 檔（§2.7 R3）
   password_plain TEXT,        -- 同上
   fields_plain TEXT NOT NULL DEFAULT '[]',  -- v5：自訂欄欄名明文（JSON array；值不入）
-  deleted_at TEXT             -- v5：垃圾桶條目的伺服器 deletedDate；未刪 NULL
+  deleted_at TEXT,             -- v5：垃圾桶條目的伺服器 deletedDate；未刪 NULL
+  archived_at TEXT             -- v7：封存條目的伺服器 archivedDate；未封存 NULL
 );
 
 -- v3（P4b org 共享語意讀側）：/sync 的 organizations[] / collections[] 鏡像。

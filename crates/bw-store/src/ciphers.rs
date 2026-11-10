@@ -418,6 +418,8 @@ fn org_row_from(r: &rusqlite::Row<'_>) -> Result<OrgRow, rusqlite::Error> {
 pub(crate) fn write_cipher(conn: &rusqlite::Connection, id: ItemId, c: &Value) -> StoreResult<()> {
     let deleted_at = c.get("deletedDate").and_then(Value::as_str);
     let deleted = deleted_at.is_some();
+    // v7（封存三態）：archivedDate 有值＝已封存；協定欄位原樣投影（同 deleted）
+    let archived_at = c.get("archivedDate").and_then(Value::as_str);
     let rev = c.get("revisionDate").and_then(Value::as_str);
     let raw = serde_json::to_vec(c)?;
     let mut enc = c.clone();
@@ -435,8 +437,8 @@ pub(crate) fn write_cipher(conn: &rusqlite::Connection, id: ItemId, c: &Value) -
     // v5（垃圾桶三態）：軟刪列保留在 meta_plain（帶 deleted_at），由 query 的
     // `deleted` 過濾——垃圾桶列表要讀得到；硬刪走 `Store::purge` 摘列。
     conn.execute(
-        "INSERT OR REPLACE INTO meta_plain(id, name, uris, kind, folder, org, favorite, updated_at, pending, deleted_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0,?9)",
+        "INSERT OR REPLACE INTO meta_plain(id, name, uris, kind, folder, org, favorite, updated_at, pending, deleted_at, archived_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0,?9,?10)",
         rusqlite::params![
             id.to_string(),
             c.get("name").and_then(Value::as_str),
@@ -447,6 +449,7 @@ pub(crate) fn write_cipher(conn: &rusqlite::Connection, id: ItemId, c: &Value) -
             c.get("favorite").and_then(Value::as_bool).unwrap_or(false) as i64,
             rev,
             deleted_at,
+            archived_at,
         ],
     )?;
     Ok(())

@@ -12,7 +12,7 @@ impl Store {
         let mut sql = String::from(
             "SELECT m.id, m.name, m.uris, m.kind, m.folder, m.org, m.favorite,
                     m.updated_at, m.pending, COALESCE(o.tags, '[]'),
-                    COALESCE(cc.cols, '[]'), m.deleted_at
+                    COALESCE(cc.cols, '[]'), m.deleted_at, m.archived_at
              FROM meta_plain m
              JOIN ciphers c ON c.id = m.id
              LEFT JOIN overlay o ON o.id = m.id
@@ -28,6 +28,12 @@ impl Store {
         match q.deleted {
             Some(true) => sql.push_str(" AND c.deleted = 1"),
             Some(false) | None => sql.push_str(" AND c.deleted = 0"),
+        }
+        // 封存三態（語意見 bw_proto::Query::archived）：主列表預設排除已封存，
+        // 與 deleted 正交合成（封存＋軟刪的列只同時命中各自 true 態的查詢）。
+        match q.archived {
+            Some(true) => sql.push_str(" AND m.archived_at IS NOT NULL"),
+            Some(false) | None => sql.push_str(" AND m.archived_at IS NULL"),
         }
         if let Some(text) = q.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
             match fts_match(text) {
@@ -134,7 +140,7 @@ pub(crate) fn meta_by_id(conn: &Connection, id: bw_proto::ItemId) -> StoreResult
                 m.updated_at, m.pending, COALESCE(o.tags, '[]'),
                 COALESCE((SELECT json_group_array(cx.collection)
                           FROM cipher_collections cx WHERE cx.cipher = m.id), '[]'),
-                m.deleted_at
+                m.deleted_at, m.archived_at
          FROM meta_plain m LEFT JOIN overlay o ON o.id = m.id WHERE m.id = ?1",
     )?;
     stmt.query_row([id.to_string()], row_to_meta)
@@ -172,6 +178,7 @@ fn row_to_meta(row: &Row<'_>) -> Result<ItemMeta, rusqlite::Error> {
         updated_at: row.get::<_, Option<String>>(7)?,
         pending: row.get::<_, i64>(8)? != 0,
         deleted_at: row.get::<_, Option<String>>(11)?,
+        archived_at: row.get::<_, Option<String>>(12)?,
     })
 }
 
@@ -266,6 +273,7 @@ mod tests {
             "pending",
             "tags",
             "deleted_at",
+            "archived_at",
         ];
         for c in cols {
             assert!(

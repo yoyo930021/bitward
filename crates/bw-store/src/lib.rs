@@ -152,6 +152,12 @@ impl Store {
             // v6（附件鏡像）：表在 V1，此處留掛鉤（同 v3/v4 形態）
             conn.execute_batch(schema::V6)?;
         }
+        if version < 7 {
+            // v7（封存投影欄）：逐條 ALTER 容忍 Duplicate column（同 V2 紀律）
+            for stmt in schema::V7.split(';').filter(|s| !s.trim().is_empty()) {
+                let _ = conn.execute_batch(&format!("{stmt};"));
+            }
+        }
         if version < schema::SCHEMA_VERSION {
             conn.execute_batch(&format!(
                 "PRAGMA user_version = {};",

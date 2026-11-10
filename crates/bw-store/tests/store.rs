@@ -1209,3 +1209,51 @@ fn attachments_mirror_and_awaiting_take_due() {
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].state, MutState::Awaiting, "認領保留原態供重試回置");
 }
+
+#[test]
+fn archived_tristate_projection_and_filter() {
+    let (_d, path) = tmp_vault("arch7");
+    let store = Store::open(&path).unwrap();
+    let live = Uuid::new_v4().to_string();
+    let archived = Uuid::new_v4().to_string();
+    let c1 = cipher(&live, "live", "2026-11-01T00:00:00.000Z", false);
+    let mut c2 = cipher(&archived, "arch", "2026-11-01T00:00:00.000Z", false);
+    c2["archivedDate"] = json!("2026-11-10T00:00:00.000000Z");
+    store
+        .apply_sync(&json!({ "ciphers": [c1, c2] }))
+        .unwrap();
+    // 預設與 Some(false)：主列表排除已封存（使用者實錄缺陷的正解）
+    for archived_q in [None, Some(false)] {
+        let hits = store
+            .query(&Query {
+                archived: archived_q,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(hits.len(), 1, "archived={archived_q:?}");
+        assert_eq!(hits[0].id.to_string(), live);
+        assert_eq!(hits[0].archived_at, None);
+    }
+    // Some(true)：獨立檢視，帶封存時刻
+    let only = store
+        .query(&Query {
+            archived: Some(true),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(only.len(), 1);
+    assert_eq!(only[0].id.to_string(), archived);
+    assert_eq!(
+        only[0].archived_at.as_deref(),
+        Some("2026-11-10T00:00:00.000000Z")
+    );
+    // 與 deleted 正交合成：封存＋軟刪＝只命中 archived×true + deleted×true
+    let mixed = store
+        .query(&Query {
+            archived: Some(true),
+            deleted: Some(true),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(mixed.is_empty());
+}

@@ -97,6 +97,10 @@ pub struct ItemMeta {
     /// 投影自 raw 鏡像（協定欄位原樣），不是本地時鐘。
     #[serde(default)]
     pub deleted_at: Option<String>,
+    /// 封存時刻（鏡像 `archivedDate`，ISO 字串）；未封存恆 None。
+    /// 投影紀律同 `deleted_at`：協定欄位原樣，非本地時鐘。
+    #[serde(default)]
+    pub archived_at: Option<String>,
 }
 
 /// 依 `View` 構造的回傳型別：Metadata 下機密欄位在型別上不存在（契約 §2.1）。
@@ -311,6 +315,10 @@ pub struct Query {
     /// Some(true)＝垃圾桶。軟刪項目的 `deleted_at` 見 `ItemMeta`。
     #[serde(default)]
     pub deleted: Option<bool>,
+    /// 封存三態（官方 archivedDate 語意，同 deleted 手法）：None／Some(false)＝
+    /// 排除已封存（主列表預設）；Some(true)＝只列已封存。與 `deleted` 正交合成。
+    #[serde(default)]
+    pub archived: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -395,6 +403,27 @@ pub enum VaultCall {
     /// 清單走既有 ItemView（`attachments` 欄），無獨立 List 呼叫。
     Attachment {
         sub: AttachmentOp,
+    },
+    /// 置尾（同上紀律）：封存／取消封存（官方 `archivedDate` 語意）。
+    /// 線格式查證（VW 1.37.2，2026-11-10）：`PUT /ciphers/{id}/partial` 帶
+    /// archivedDate 回 422（partial 只有 folderId/favorite——既有 quirk 同形），
+    /// **全量 PUT 帶 archivedDate 落庫**且 `/sync` 原樣返回；故實作照
+    /// delete/restore 先例走 outbox 專屬 op，drain 端以即時 theirs 為基底
+    /// 改 archivedDate 後全量 PUT（item key 層原樣隨鏡像帶回，不動金鑰欄）。
+    /// 離線＝入列待推（收斂語意同寫路徑紀律）。
+    SetArchived {
+        id: ItemId,
+        archived: bool,
+    },
+    /// 置尾（同上紀律）：網站圖示代理。daemon 打 `{server}/icons/{host}/icon.png`
+    /// （VW 根路徑，非 /api；查證：未啟用路由的 server 回 404 → 本側轉
+    /// `NotFound`，GUI 退回字母磚）並落盤快取（`data_dir/icons/`，TTL 7 天，
+    /// 同 host 併發單飛去重）。回應 `Response::AttachmentBytes`（PNG/ICO 原樣位元組）。
+    /// 隱私註記：本呼叫會向伺服器請求該 host——伺服器本來就存著含此 host 的
+    /// 項目（icon 請求無新增外洩面）；VW 對解析失敗的 host 回占位 PNG（實錄
+    /// 200＋19×19 gray），故成功分支不保證「該網站真有圖示」。
+    GetIcon {
+        host: String,
     },
 }
 
@@ -1092,6 +1121,7 @@ mod tests {
             updated_at: None,
             pending: false,
             deleted_at: None,
+            archived_at: None,
         }
     }
 
@@ -1463,6 +1493,37 @@ mod tests {
     }
 
     #[test]
+    fn set_archived_and_get_icon_roundtrip() {
+        let idx = |c: &VaultCall| postcard::to_allocvec(c).unwrap()[0];
+        let sa = VaultCall::SetArchived {
+            id: ItemId::new_v4(),
+            archived: true,
+        };
+        let gi = VaultCall::GetIcon {
+            host: "github.com".into(),
+        };
+        // 置尾紀律：兩變體索引在 Attachment 之後，既有變體不動
+        let attachment = VaultCall::Attachment {
+            sub: AttachmentOp::Delete {
+                item_id: ItemId::new_v4(),
+                attachment_id: "a1".into(),
+            },
+        };
+        assert!(idx(&sa) > idx(&attachment));
+        assert!(idx(&gi) > idx(&sa));
+        for c in [sa, gi] {
+            let msg = ClientMsg::Invoke {
+                rid: 18,
+                call: Call::Vault(c),
+            };
+            let j = serde_json::to_vec(&msg).unwrap();
+            assert_eq!(serde_json::from_slice::<ClientMsg>(&j).unwrap().rid(), 18);
+            let b = postcard::to_allocvec(&msg).unwrap();
+            assert_eq!(postcard::from_bytes::<ClientMsg>(&b).unwrap().rid(), 18);
+        }
+    }
+
+    #[test]
     fn error_variants_roundtrip() {
         let e = WtpError::StaleEpoch { seen: 3, now: 5 };
         let j = serde_json::to_string(&e).unwrap();
@@ -1476,6 +1537,7 @@ mod tests {
         assert_eq!(q.collection, None);
         assert_eq!(q.folder, None);
         assert_eq!(q.deleted, None);
+        assert_eq!(q.archived, None);
         let m: ItemMeta = serde_json::from_str(
             r#"{"id":"0f0d0000-0000-4000-8000-0000000000c1","kind":"Login","name":null,
                "uris":[],"folder_id":null,"organization_id":null,"favorite":false,
@@ -1484,6 +1546,7 @@ mod tests {
         .unwrap();
         assert!(m.collections.is_empty());
         assert_eq!(m.deleted_at, None);
+        assert_eq!(m.archived_at, None);
         // 三件套前形態的草稿：folder/fields 欄位缺失 → serde default
         let d: CipherDraft = serde_json::from_str(
             r#"{"kind":"SecureNote","name":"n","username":null,"password":null,
