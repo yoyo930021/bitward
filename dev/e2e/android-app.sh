@@ -562,7 +562,7 @@ hide_ime
 $ADB logcat -c
 tap_text a16-submit "提交"
 # 系統存檔提示（SaveInfo 流的必經步驟）：emulator 是 zh 語系，Save 鈕實錄
-# 文案＝「保存」（描述列「儲存到 Bitward」不可點，别误打）；英文 image 退
+# 文案＝「保存」（描述列「儲存到 Bitward」不可點，別誤打）；英文 image 退
 # 「Save」。点了才會有 onSaveRequest。
 for _ in $(seq 1 12); do
   dump /tmp/android-a16-prompt.xml
@@ -603,7 +603,10 @@ B3() { "$CLI" --sock "$DA/s3" "$@"; }
 echo "$WP" | B3 login --server "$SRV_HOST" --email "$EMAIL" --password-stdin >/dev/null \
   || fail "A16 暫時 daemon 登入失敗"
 B3 sync >/dev/null
-SAVED_ID=$(B3 --json ls --text "io.bitward.android" | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(rows[0]["meta"]["id"] if rows else "")')
+SAVED_ID=$(B3 --json ls --text "io.bitward.android" | python3 -c 'import json,sys
+# 查詢鍵同字串會連 bitward-selftest（uri 同 host）一起命中；按名稱取存檔那筆。
+rows=[r for r in json.load(sys.stdin) if r["meta"].get("name")=="io.bitward.android"]
+print(rows[0]["meta"]["id"] if rows else "")')
 [[ -n "$SAVED_ID" ]] || fail "A16 伺服器鏡像沒有存檔項（push 未送達 VW）"
 REVEAL=$(B3 --json reveal "$SAVED_ID")
 [[ "$REVEAL" == *"\"password\": \"$SAVE_PASS\""* ]] || fail "A16 VW 端 reveal 密碼不對：$REVEAL"

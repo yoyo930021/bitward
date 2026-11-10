@@ -60,7 +60,7 @@ pub fn App() -> impl IntoElement {
     // 明文只存活在這個訊號：詳情頁離開時 set(None) → Zeroizing 歸零。
     // 用 SignalEquals::Never，寫回同值也照樣通知（不讓「值相等」吞掉清零）。
     let plain = signal_with(None::<Revealed>, SignalEquals::Never);
-    // favicon 快取挂根上：列表頁的 effect 寫、詳情磚讀，換頁不丟實圖。
+    // favicon 快取掛根上：列表頁的 effect 寫、詳情磚讀，換頁不丟實圖。
     let icons = Icons::new();
 
     let hub_vault = hub.clone();
