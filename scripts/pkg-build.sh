@@ -82,7 +82,7 @@ cmp -s target/release/bitwarderd "$STAGE/root/Bitward.app/Contents/Helpers/bitwa
 # 從 terminal 直接跑會卡在 secinit（容器歸屬），其真運行環境是 launchd。
 target/release/bitwarderd --service status >/dev/null 2>&1 \
   || { echo "FATAL: bitwarderd 不支援 --service（舊殭屍二進位？）"; exit 1; }
-codesign -f -s "$IDENTITY" $CS_RUNTIME --entitlements bins/bitwarderd/helper.entitlements \
+codesign -f -s "$IDENTITY" $CS_RUNTIME -i io.bitward.dev --entitlements bins/bitwarderd/helper.entitlements \
   "$STAGE/root/Bitward.app/Contents/Helpers/bitwarderd"
 # 沙盒 daemon（SMAppService 目標）：重組嵌套 BitwardDaemon.app（同殭屍保險）
 DA_STAGED="$STAGE/root/Bitward.app/Contents/Helpers/BitwardDaemon.app"

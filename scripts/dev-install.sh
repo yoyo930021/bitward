@@ -32,7 +32,7 @@ ditto "$BUNDLE" /Applications/Bitward.app
 
 echo "==> force-fresh daemon helper (殭屍二進位保險)"
 cp -f target/release/bitwarderd /Applications/Bitward.app/Contents/Helpers/bitwarderd
-codesign -f -s "$IDENTITY" --entitlements bins/bitwarderd/helper.entitlements \
+codesign -f -s "$IDENTITY" -i io.bitward.dev --entitlements bins/bitwarderd/helper.entitlements \
   /Applications/Bitward.app/Contents/Helpers/bitwarderd 2>/dev/null
 # 功能探測（簽章會改 sha，比內容無意義）：舊 binary 不認 --service
 /Applications/Bitward.app/Contents/Helpers/bitwarderd --service status >/dev/null 2>&1 \
