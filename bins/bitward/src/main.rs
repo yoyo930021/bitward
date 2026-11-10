@@ -367,8 +367,8 @@ enum FolderCmd {
 enum SettingsCmd {
     /// 讀取現行設定（輸出 Settings JSON）
     Show,
-    /// 寫入設定：`<json>` 為 Settings 形態 JSON，缺欄＝官方預設
-    Set { json: String },
+    /// 寫入設定：`<payload>` 為 Settings 形態 JSON，缺欄＝官方預設
+    Set { payload: String },
 }
 
 #[derive(Subcommand)]
@@ -1055,9 +1055,9 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
         Cmd::Status => Call::Admin(AdminCall::Diagnostics),
         Cmd::Settings { cmd } => match cmd {
             SettingsCmd::Show => Call::Admin(AdminCall::GetSettings),
-            SettingsCmd::Set { json } => {
-                let s: Settings =
-                    serde_json::from_str(json).map_err(|e| format!("settings JSON 不通：{e}"))?;
+            SettingsCmd::Set { payload } => {
+                let s: Settings = serde_json::from_str(payload)
+                    .map_err(|e| format!("settings JSON 不通：{e}"))?;
                 Call::Admin(AdminCall::SetSettings(s))
             }
         },

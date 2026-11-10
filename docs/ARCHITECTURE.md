@@ -166,6 +166,8 @@ pub enum LockReason { User, Timeout, ServerLogout, KeyRotation, Revoked { by }, 
 
 狀態機是 per-device：`LockEpoch` 與其廣播只覆蓋本裝置的中樞與它的 thin clients，他台裝置鎖定不影響本機（§1.1）。
 
+本機設定面（macOS 設定面補齊，2026-11-10）：`Settings{auto_lock_minutes, clipboard_clear_secs, lock_on_sleep_restart, clear_search_on_lock}` 存 meta 表 JSON 行（本地權威，不落伺服器 policy；serde default＝舊庫缺行讀官方預設 15 分/20 秒/true/true），出口 `Admin:GetSettings/SetSettings` 僅本機 Interactive session 受理。自動鎖定沿用 idle＋hard 雙軌心跳，設定只是政策來源（`set_policy` 已解鎖即刻重算 deadline）；活動定義：任何 BTP Invoke 算活動，**純狀態輪詢豁免**（`Sync.Status`/`Admin.Diagnostics`/`Agent.ListPending`/`Auth.WhoAmI`）——GUI 1.5s 節拍不豁免即永不自鎖（`bitwarderd/settings.rs` 模組頭為真相源）。`lock_on_sleep_restart=false`＝daemon 啟動以封存裝置金鑰自動解鎖（重啟不鎖）；true（預設）＝重啟一律從鎖態起。剪貼簿清除執行在 GUI（複製鈕 N 秒後讀回比對，內容仍是本次值才清空）；鎖定清搜尋同在 GUI（見鎖態轉換清 query 訊號）。URI 判定欄 `login.uris[].match`（官方 null|0..5）走欄位級 leaf 座標 `uri.<n>.match` 明文整數，three_way 可見、同列相撞進收件匣，寫入全 PUT（VW partial 只收 folderId/favorite）。Passkey 刪除 `Passkey:DeletePasskey` 與 counter++ 共用 outbox 全量收斂路徑。驗證：`dev/e2e/settings.sh` 七斷言（預設相容、往返＋值域拒收、1 分鐘閒置實鎖實解、重啟自動解鎖、passkey 刪除 REST 直讀收斂、match 寫入/投影/回落全鏈）。
+
 `with_keys` 閉包是金鑰邊界：其他模組永遠拿不到 `KeyBundle` 實值，只能在閉包內用 → 編譯期排除「金鑰被傳進 thin client / 存進 store / 印進 log」。
 
 ### 2.3 Agent session / grant / 出口淨化
