@@ -131,13 +131,16 @@ pass "A8 全 Call 審計 + hash 鏈 ok（$N_CALLS 筆）"
 # 2026-11-07 macOS demo 實測重啟後 ls 名字未回填的缺陷回歸罩。）
 kill "$DAEMON_PID" 2>/dev/null || true
 wait "$DAEMON_PID" 2>/dev/null || true
-# 舊 daemon 死後 socket 檔可能還掛在那裡（新 daemon 見活口會拒綁）：先清掉。
-rm -f "$SOCK"
+# 殭屍 sock 檔留在原地不外部清——新 daemon 的 stale 偵測要自己癒合（A13 同路徑驗證）。
 BITWARD_DATA_DIR="$PWD/$DATA" ./target/debug/bitwarderd --data-dir "$DATA" --sock "$SOCK" >>"$DATA/log" 2>&1 &
 DAEMON_PID=$!
-for i in $(seq 1 40); do [[ -S "$SOCK" ]] && break; sleep 0.25; done
-[[ -S "$SOCK" ]] || fail "A12 daemon 重啟沒起來（見 $DATA/log）"
-B status >/dev/null || fail "A12 重啟後 CLI 連不上 daemon"
+# 殭屍檔讓 -S 檢查失去意義： readiness 以「連得上」為準。
+UP=0
+for i in $(seq 1 40); do
+  if B status >/dev/null 2>&1; then UP=1; break; fi
+  sleep 0.25
+done
+[[ "$UP" == 1 ]] || fail "A12 daemon 重啟沒起來（見 $DATA/log）"
 B sync >/dev/null || fail "A12 鎖定態 sync 失敗"
 LOCKED_LS=$(B ls) || fail "A12 鎖定態 ls 失敗"
 [[ "$LOCKED_LS" != *github* ]] || fail "A12 前提失效：鎖定態 sync 後名字就已明文（沒被蓋回信封？）"
@@ -152,5 +155,21 @@ ps -axo command | grep -v grep | grep -q "$WP" && fail "A11 argv 洩漏主密碼
 DAEMON_ENV=$(ps -E -p "$DAEMON_PID" -o command= 2>/dev/null || true)
 echo "$DAEMON_ENV" | grep -q "$WP" && fail "A11 daemon env 洩漏" || true
 pass "A11 argv/env 無密碼"
+
+# A13：kill -9 殘留殭屍 sock → 重啟實例不靠外部 rm 直接綁上並可連。
+#（2026-11-10 實錄：launchd KeepAlive 3 秒重生的實例被自己上次留的檔擋死，
+# 綁定失敗靜默放棄 → provider/GUI 對該 sock 永久 ECONNREFUSED。）
+kill -9 "$DAEMON_PID" 2>/dev/null || true
+wait "$DAEMON_PID" 2>/dev/null || true
+[[ -S "$SOCK" ]] || fail "A13 前提失效：kill -9 後殭屍 sock 檔不在"
+BITWARD_DATA_DIR="$PWD/$DATA" ./target/debug/bitwarderd --data-dir "$DATA" --sock "$SOCK" >>"$DATA/log" 2>&1 &
+DAEMON_PID=$!
+HEALED=0
+for i in $(seq 1 40); do
+  if B status >/dev/null 2>&1; then HEALED=1; break; fi
+  sleep 0.25
+done
+[[ "$HEALED" == 1 ]] || fail "A13 殭屍自愈後 CLI 連不上（見 $DATA/log）"
+pass "A13 kill -9 殭屍 sock 自愈（無外部 rm 直接重綁可連）"
 
 echo "READPATH E2E: ALL PASS"

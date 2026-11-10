@@ -94,9 +94,102 @@ fn real_user_home() -> PathBuf {
 /// **沒有別的 live 實例**時才安全——否則第二個實例會把第一個的位址蓋掉，
 /// 第二個退出後所有人拿到 ECONNREFUSED（真機實測：手工前台測試打掛 launchd
 /// daemon）。故每個 socket 配一個 `.lock` 檔持有非阻塞 LOCK_EX 到程序結束。
+/// flock 只擋得住有合作（會拿同一把鎖）的實例；未拿鎖的活聽者（舊版 daemon、
+/// 手工起的一次性實例）由 `sock_has_live_listener` 探測補盲：連得上＝讓步不搶，
+/// 連不到（ECONNREFUSED/ENOENT）＝殭屍檔 → unlink 重綁。
 pub(crate) struct HeldSock {
     pub listener: tokio::net::UnixListener,
     _lock: std::fs::File,
+}
+
+/// 100ms 非阻塞 connect 探測 path 上有無活聽者。保守語意：只有明確的
+/// 「無聽者」訊號（ECONNREFUSED/ENOENT/ENOTSOCK）算死；其餘（權限、逾時、
+/// backlog 塞死）視為活，寧可讓步不可誤殺。
+fn sock_has_live_listener(path: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    // SAFETY: fd 各分支皆 close；sockaddr_un 零初始化後填 sun_path。
+    unsafe {
+        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        if fd < 0 {
+            return true;
+        }
+        libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK);
+        let mut addr: libc::sockaddr_un = std::mem::zeroed();
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let bytes = path.as_os_str().as_bytes();
+        if bytes.len() >= addr.sun_path.len() {
+            libc::close(fd);
+            return false; // 超長路徑 connect 必敗；留給 bind 報原始錯誤
+        }
+        for (i, b) in bytes.iter().enumerate() {
+            addr.sun_path[i] = *b as libc::c_char;
+        }
+        let path_off = addr.sun_path.as_ptr() as usize - &addr as *const _ as usize;
+        let addrlen = (path_off + bytes.len() + 1) as libc::socklen_t;
+        let rc = libc::connect(
+            fd,
+            &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+            addrlen,
+        );
+        if rc == 0 {
+            libc::close(fd);
+            return true;
+        }
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        let alive = match errno {
+            libc::ECONNREFUSED | libc::ENOENT | libc::ENOTSOCK => false,
+            libc::EAGAIN | libc::EINPROGRESS => {
+                // unix 上 EWOULDBLOCK == EAGAIN
+                let mut pfd = libc::pollfd {
+                    fd,
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                let n = libc::poll(&mut pfd, 1, 100);
+                if n <= 0 {
+                    true // 逾時/中斷：聽者可能存在只是慢，保守讓步
+                } else {
+                    let mut so_err: libc::c_int = 0;
+                    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+                    libc::getsockopt(
+                        fd,
+                        libc::SOL_SOCKET,
+                        libc::SO_ERROR,
+                        &mut so_err as *mut _ as *mut libc::c_void,
+                        &mut len,
+                    );
+                    so_err == 0
+                }
+            }
+            _ => true,
+        };
+        libc::close(fd);
+        alive
+    }
+}
+
+/// launchd（SMAppService）形態沒有 StandardErrorPath，stderr 日誌進不了任何
+/// 檔案；綁定失敗落地 `<data_dir>/bind-error.log`（每輪覆寫＝永遠是最新現況，
+/// 成功即刪除），讓「靜默沒綁上」可事後診斷（2026-11-10 實錄：group sock
+/// 未建、GUI 連不上，三天無從查起）。
+pub(crate) fn record_bind_error(
+    data_dir: &std::path::Path,
+    kind: &str,
+    path: &std::path::Path,
+    err: &str,
+) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let _ = std::fs::write(
+        data_dir.join("bind-error.log"),
+        format!("{ts} {kind} bind {} failed: {err}\n", path.display()),
+    );
+}
+
+fn clear_bind_error(data_dir: &std::path::Path) {
+    let _ = std::fs::remove_file(data_dir.join("bind-error.log"));
 }
 
 pub(crate) fn bind_sock(
@@ -121,12 +214,19 @@ pub(crate) fn bind_sock(
     if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(format!("{} 已被運行中的實例佔用", path.display()));
     }
-    match std::fs::remove_file(path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        // 不吞錯：EPERM（如 launchd Spawned 非成員進程碰 group container）
-        // 若靜默放行，下一步就是讓人誤診的 EADDRINUSE。
-        Err(e) => return Err(format!("unlink stale {}: {e}", path.display())),
+    if path.exists() {
+        if sock_has_live_listener(path) {
+            // 活聽者但沒拿我們的 flock（非合作實例）：讓步不搶，
+            // 語意同 flock _busy_ 分支——放棄綁定＋讓呼叫端 warn。
+            return Err(format!("{} 已被運行中的實例佔用", path.display()));
+        }
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // 不吞錯：EPERM（如 launchd Spawned 非成員進程碰 group container）
+            // 若靜默放行，下一步就是讓人誤診的 EADDRINUSE。
+            Err(e) => return Err(format!("unlink stale {}: {e}", path.display())),
+        }
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("sock dir: {e}"))?;
@@ -200,9 +300,16 @@ async fn main() -> Result<(), String> {
         }
     };
     let hub = Hub::open(&data_dir, args.ntfy.clone(), apns).await?;
-    let held = bind_sock(&sock, &data_dir)?;
+    let held = match bind_sock(&sock, &data_dir) {
+        Ok(h) => h,
+        Err(e) => {
+            record_bind_error(&data_dir, "sock", &sock, &e);
+            return Err(e);
+        }
+    };
     let listener = held.listener;
     let _sock_guard = held._lock;
+    clear_bind_error(&data_dir);
     tracing::info!(sock = %sock.display(), "bitwarderd listening");
 
     // 跨機 TLS listener（§1.2）：身分持久化 ⇒ pin 穩定
@@ -248,33 +355,53 @@ async fn main() -> Result<(), String> {
         // 沙盒內外同值且 Group Containers 路由 app-group entitlement 放行。
         let base = real_user_home();
         let group_dir = base.join("Library/Group Containers").join(&group);
-        if std::fs::create_dir_all(&group_dir).is_ok() {
-            let gsock = group_dir.join("daemon.sock");
-            match bind_sock(&gsock, &data_dir.join("run")) {
-                Ok(held) => {
-                    let gl = held.listener;
-                    let flock_guard = held._lock;
-                    tracing::info!(sock = %gsock.display(), "bitwarderd app-group socket listening");
-                    let hub = hub.clone();
-                    tokio::spawn(async move {
-                        let _guard = flock_guard; // flock 隨循環存活：第二實例無法搶佔此位址
+        let gsock = group_dir.join("daemon.sock");
+        let data_dir_g = data_dir.clone();
+        let hub_g = hub.clone();
+        // 綁定失敗（如暫態 EPERM/EACCES、前實例殭屍檔擋路）不再靜默放棄：
+        // 背景每 30 秒重試直到成功或 daemon 退出，並落地 bind-error.log 供
+        // launchd 形態事後診斷（其 stderr 無處可去）。一行一輪，不刷屏。
+        tokio::spawn(async move {
+            let mut first = true;
+            loop {
+                let attempt = std::fs::create_dir_all(&group_dir)
+                    .map_err(|e| format!("mkdir {}: {e}", group_dir.display()))
+                    .and_then(|()| bind_sock(&gsock, &data_dir_g.join("run")));
+                match attempt {
+                    Ok(held) => {
+                        let gl = held.listener;
+                        let _flock_guard = held._lock; // flock 隨循環存活：第二實例無法搶佔此位址
+                        clear_bind_error(&data_dir_g);
+                        tracing::info!(sock = %gsock.display(), "bitwarderd app-group socket listening");
                         loop {
-                            if let Ok((stream, _)) = gl.accept().await {
-                                let hub = hub.clone();
-                                tokio::spawn(async move {
-                                    let uid = bw_btp::peer_uid_from_fd(stream.as_raw_fd()).ok();
-                                    let (rd, wr) = stream.into_split();
-                                    if let Err(e) = serve_conn(rd, wr, hub, uid).await {
-                                        tracing::debug!(err = %e, "group conn ended");
-                                    }
-                                });
+                            match gl.accept().await {
+                                Ok((stream, _)) => {
+                                    let hub = hub_g.clone();
+                                    tokio::spawn(async move {
+                                        let uid = bw_btp::peer_uid_from_fd(stream.as_raw_fd()).ok();
+                                        let (rd, wr) = stream.into_split();
+                                        if let Err(e) = serve_conn(rd, wr, hub, uid).await {
+                                            tracing::debug!(err = %e, "group conn ended");
+                                        }
+                                    });
+                                }
+                                Err(e) => tracing::debug!(err = %e, "group accept"),
                             }
                         }
-                    });
+                    }
+                    Err(e) => {
+                        record_bind_error(&data_dir_g, "app-group", &gsock, &e);
+                        if first {
+                            tracing::warn!(err = %e, sock = %gsock.display(), "app-group socket bind failed; 30 秒後起每輪重試");
+                            first = false;
+                        } else {
+                            tracing::info!(err = %e, "app-group socket bind 仍未成功，續重試");
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    }
                 }
-                Err(e) => tracing::warn!(err = %e, "app-group socket bind failed"),
             }
-        }
+        });
     }
 
     // drain：寫入即推（mpsc 觸發）＋ 背景自動推送常駐輪（退避、收斂發
@@ -584,5 +711,70 @@ impl Hub {
                 features: vec![],
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod sock_tests {
+    use super::bind_sock;
+
+    fn tmp_tagged(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("bw-sock-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[tokio::test]
+    async fn zombie_sock_file_self_heals_without_external_rm() {
+        // kill -9 殘留：檔在（socket inode）但無聽者 → 應 unlink 重綁並可連。
+        let d = tmp_tagged("zombie");
+        let sock = d.join("daemon.sock");
+        let stale = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        drop(stale); // std 不刪檔 → 殭屍檔
+        assert!(sock.exists(), "前提：殭屍檔留下");
+        let held = bind_sock(&sock, &d).expect("殭屍檔應自愈重綁");
+        let _c = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            tokio::net::UnixStream::connect(&sock),
+        )
+        .await
+        .expect("新聽者可連")
+        .expect("connect ok");
+        drop(held);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[tokio::test]
+    async fn live_listener_without_flock_is_not_stolen() {
+        // 非合作式活聽者（沒拿 flock，如舊版 daemon）：讓步不搶、原檔原位續服務。
+        let d = tmp_tagged("live");
+        let sock = d.join("daemon.sock");
+        let foreign = tokio::net::UnixListener::bind(&sock).unwrap();
+        let err = match bind_sock(&sock, &d) {
+            Ok(_) => panic!("活聽者在場時不應綁成功"),
+            Err(e) => e,
+        };
+        assert!(err.contains("佔用"), "應回報佔用而非綁定成功: {err}");
+        let c = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            tokio::net::UnixStream::connect(&sock),
+        )
+        .await
+        .expect("舊聽者仍佔位可連")
+        .expect("connect ok");
+        let (accepted, _) = tokio::time::timeout(std::time::Duration::from_millis(500), foreign.accept())
+            .await
+            .expect("accept 逾時")
+            .expect("連線落在舊聽者而非被搶走");
+        drop((c, accepted, foreign));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn probe_treats_absent_path_as_dead() {
+        assert!(!super::sock_has_live_listener(std::path::Path::new(
+            "/nonexistent-bw-probe/x.sock"
+        )));
     }
 }
