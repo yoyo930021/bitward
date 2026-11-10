@@ -1046,6 +1046,54 @@ fn poll_attachment_row(dir: PathBuf, core: AppCore, ms: u64) {
     });
 }
 
+/// 實拍模式（`NSH_GUI_SHOTS_CANDID`）：真庫零寫入三連拍——主列表（favicon
+/// 實圖、無封存混入）→ 已封存視角 → 詳情查看／編輯 morph 對比。只發讀取
+/// 與視角切換命令，拍完即退，不動庫一筆資料。
+pub fn script_cand(dir: PathBuf, core: AppCore) {
+    let c = core.clone();
+    let d = dir.clone();
+    at(4000, move || {
+        assert!(
+            matches!(c.vault.get(), Some(bw_proto::UnlockStateView::Unlocked { .. })),
+            "實拍前提＝常駐 daemon 解鎖態，實際：{:?}",
+            c.vault.get()
+        );
+        capture(&d, "cand-1-mainlist.png");
+    });
+    let c = core.clone();
+    at(4600, move || c.send(Cmd::ToggleArchived));
+    let d2 = dir.clone();
+    at(5600, move || capture(&d2, "cand-2-archived.png"));
+    let c = core.clone();
+    at(6200, move || {
+        c.send(Cmd::ToggleArchived);
+        let id = c
+            .items
+            .get()
+            .iter()
+            .find(|v| !v.meta.uris.is_empty() && v.meta.kind == bw_proto::ItemKind::Login)
+            .map(|v| v.meta.id);
+        if let Some(id) = id {
+            c.send(Cmd::OpenDetail(id));
+        }
+    });
+    let d3 = dir.clone();
+    at(7400, move || capture(&d3, "cand-3-detail-view.png"));
+    let c = core.clone();
+    at(7800, move || {
+        if let Route::Detail(id) = c.route.get() {
+            c.send(Cmd::OpenEdit(id));
+        }
+    });
+    let d4 = dir.clone();
+    at(9000, move || capture(&d4, "cand-4-detail-edit.png"));
+    at(9500, quit);
+    at(60000, || {
+        eprintln!("bitward-gui: 實拍 60 秒未完成");
+        std::process::exit(1);
+    });
+}
+
 /// 造一筆真 pending：`agent open` 簽發 gated token（reveal:secret 需人工核准），
 /// 再用該 token 發 gated reveal——呼叫在 daemon 阻塞等批准，ListPending 即有筆
 /// （agentpath.sh 同源手法，改由截圖腳本 spawn CLI）。
