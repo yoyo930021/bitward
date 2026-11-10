@@ -258,6 +258,15 @@ impl Hub {
                 self.store.send_remove(id).map_err(denied)?;
                 Ok(Response::Ok)
             }
+            // 實錄（VW 1.37.2）：缺列走 `err!` 預設形態＝400 "Send not found"
+            // （非 404）；同屬「伺服器已不存在」，照收斂摘鏡像列（冪等）。
+            Err(ServerError::Http {
+                status: 400,
+                detail,
+            }) if detail.contains("not found") => {
+                self.store.send_remove(id).map_err(denied)?;
+                Ok(Response::Ok)
+            }
             Err(e) => Err(map_server_err(e)),
         }
     }

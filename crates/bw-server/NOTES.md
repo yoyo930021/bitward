@@ -108,7 +108,7 @@
 | `POST /api/sends` | 文字 send 建立；`type=1` 被擋（"File sends should use /api/sends/file"）；deletionDate>31 天回 400 | 同上 `post_send`/`create_send`；實錄 |
 | `POST /api/sends/file/v2` | 檔案建立第一段：`{fileUploadType:0, url:"/sends/{id}/file/{fileId}", sendResponse}` | 同上 `post_send_file_v2`；官方 https://github.com/bitwarden/server/blob/9ebe16587175b1c0e9208f84397bb75d0d595510/src/Api/Tools/Controllers/SendsController.cs#L165 |
 | `POST {api}/sends/{id}/file/{fileId}` | 第二段 multipart 欄位 `data`；filename 逐字比對 `fileName`（信封字串）、位元組數＝登記 `fileLength`（不符 400） | sends.rs `post_send_file_v2_data`；實錄 |
-| `GET /api/sends/{id}`、`DELETE /api/sends/{id}`、`PUT /api/sends/{id}` | 單取／刪（200 空體）／全量更新（password 有值才重哈希、type 不可變、file data 不動） | sends.rs `get_send`/`delete_send`/`update_send_from_data` |
+| `GET /api/sends/{id}`、`DELETE /api/sends/{id}`、`PUT /api/sends/{id}` | 單取／刪（200 空體；**缺列回 400 "Send not found"**——VW `err!` 預設狀態非 404，實錄）／全量更新（password 有值才重哈希、type 不可變、file data 不動） | 同上 `get_send`/`delete_send`/`update_send_from_data` |
 | `PUT /api/sends/{id}/remove-password` | 清密碼，回更新後 send（`password:null, authType:2`） | 同上 `put_remove_password`；實錄 |
 | 接收方 `POST /api/sends/access/{accessId}` | 無 bearer；body `{password}`（wire 哈希字串）→ send-access；401 缺、400 錯、404 耗盡/到期/dead | 同上 `post_access_legacy`；實錄三態 |
 | 接收方檔案 `POST /api/sends/{id}/access/file/{fileId}` | 無 bearer；→ `{url}`（5 分鐘簽名 `?t=JWT`）；accessCount 在**下載時**才 +1 | 同上 `post_access_file_legacy`；實錄 |
