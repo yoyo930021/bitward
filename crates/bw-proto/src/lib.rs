@@ -806,6 +806,10 @@ pub enum AdminCall {
     ServerProfile,
     Diagnostics,
     Version,
+    /// 本機設定讀寫（macOS 設定面）：置尾紀律同 Passkey（postcard 變體索引只追加）。
+    /// 僅本機 Interactive session 受理——設定是這台裝置的偏好，跨機裝置不該改到別人。
+    GetSettings,
+    SetSettings(Settings),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -935,6 +939,8 @@ pub enum Response {
     TwoFactorRequest {
         providers: Vec<TwoFactorProviderInfo>,
     },
+    /// `Admin:GetSettings` 回包（本機設定；置尾紀律同上）。
+    Settings(Settings),
 }
 
 /// 伺服器宣告的可用第二因子（daemon 由 `bw-server` 挑戰映射而來的輕量形態）。
@@ -1022,6 +1028,52 @@ pub struct OutboxCounts {
 pub struct AccountInfo {
     pub email: String,
     pub server: String,
+}
+
+/// `Settings::auto_lock_minutes` 的「立即」哨兵（閒置閾值 0：任何一拍心跳即鎖）。
+/// 官方層級值域 1/5/15/30/60/240，0 另為「從不」，故取 u8 上端不重疊值。
+pub const AUTO_LOCK_IMMEDIATE: u8 = 255;
+
+/// 本機設定（macOS 設定面補齊：自動鎖定／剪貼簿清除／重啟鎖定／鎖定清搜尋）。
+/// 存 daemon meta 表 JSON 行（本地權威，不同官方落伺服器 policy）。
+/// 預設＝官方寫死值（查證 2026-11-10：vault timeout 預設 15 分鐘、
+/// clear clipboard 預設 20 秒、desktop「Lock with master password on restart」
+/// 預設開、鎖定清搜尋列預設開）。`serde(default)`：舊庫缺欄逐欄補預設。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    /// 自動鎖定（分鐘）：0=從不、`AUTO_LOCK_IMMEDIATE`=立即、其餘＝閒置分鐘數。
+    pub auto_lock_minutes: u8,
+    /// 剪貼簿清除（秒）：0=從不；官方層級 10/20/40/60。執行在 GUI。
+    pub clipboard_clear_secs: u8,
+    /// 重新啟動後鎖定：true＝daemon 重啟一律從鎖態起（官方預設，使用者手動解鎖）；
+    /// false＝daemon 啟動即以封存裝置金鑰自動解鎖（重啟不鎖）。
+    pub lock_on_sleep_restart: bool,
+    /// 鎖定時清除最近搜尋：true＝GUI 見鎖態轉換即清搜尋字串。
+    pub clear_search_on_lock: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            auto_lock_minutes: 15,
+            clipboard_clear_secs: 20,
+            lock_on_sleep_restart: true,
+            clear_search_on_lock: true,
+        }
+    }
+}
+
+impl Settings {
+    /// 自動鎖定 → 狀態機閒置政策（None＝從不；立即＝零寬閾值）。
+    #[must_use]
+    pub fn idle_timeout(&self) -> Option<std::time::Duration> {
+        match self.auto_lock_minutes {
+            0 => None,
+            AUTO_LOCK_IMMEDIATE => Some(std::time::Duration::ZERO),
+            m => Some(std::time::Duration::from_secs(u64::from(m) * 60)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1153,6 +1205,35 @@ mod tests {
         assert!(!j.contains("\"password\":\""));
         assert!(!j.contains("\"username\":\""));
         assert!(v.password.is_none() && v.username.is_none());
+    }
+
+    /// 本機設定：空 JSON＝官方預設逐欄補齊；新變體（Admin/Response）postcard 往返。
+    #[test]
+    fn settings_defaults_and_roundtrip() {
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s, Settings::default());
+        assert_eq!(s.auto_lock_minutes, 15);
+        assert_eq!(s.clipboard_clear_secs, 20);
+        assert!(s.lock_on_sleep_restart && s.clear_search_on_lock);
+        let partial: Settings = serde_json::from_str(r#"{"auto_lock_minutes":0}"#).unwrap();
+        assert_eq!(partial.clipboard_clear_secs, 20);
+        for call in [
+            Call::Admin(AdminCall::GetSettings),
+            Call::Admin(AdminCall::SetSettings(Settings {
+                auto_lock_minutes: AUTO_LOCK_IMMEDIATE,
+                clipboard_clear_secs: 0,
+                lock_on_sleep_restart: false,
+                clear_search_on_lock: false,
+            })),
+        ] {
+            let bytes = postcard::to_allocvec(&call).unwrap();
+            let back: Call = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(serde_json::to_string(&back).unwrap(), serde_json::to_string(&call).unwrap());
+        }
+        let resp = Response::Settings(Settings::default());
+        let bytes = postcard::to_allocvec(&resp).unwrap();
+        let back: Response = postcard::from_bytes(&bytes).unwrap();
+        assert!(matches!(back, Response::Settings(s) if s == Settings::default()));
     }
 
     #[test]

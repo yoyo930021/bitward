@@ -9,6 +9,7 @@ mod datamanage;
 mod hub;
 mod icon;
 mod passkey;
+mod settings;
 mod sync;
 
 use std::path::PathBuf;
@@ -301,6 +302,8 @@ async fn main() -> Result<(), String> {
         }
     };
     let hub = Hub::open(&data_dir, args.ntfy.clone(), apns).await?;
+    // 重啟行為（設定 lock_on_sleep_restart=false 時自動解鎖；預設 true 直接回）。
+    hub.auto_unlock_on_start();
     let held = match bind_sock(&sock, &data_dir) {
         Ok(h) => h,
         Err(e) => {

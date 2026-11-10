@@ -82,11 +82,14 @@ pub struct Hub {
     /// 圖示代理單飛閘（批次 B）：同 host 併發去重——雙重檢查快取，
     /// 閘內只放一發外連（語意同 bw-server refresh_gate）
     pub icon_gate: tokio::sync::Mutex<()>,
+    /// 本機設定快取（macOS 設定面）：真態在 meta 表，這裡是啟動讀入＋
+    /// `SetSettings` 同步的記憶體鏡（政策接線見 settings.rs）。
+    pub settings: std::sync::Mutex<bw_proto::Settings>,
 }
 
 pub type DispatchResult = Result<Response, WtpError>;
 
-fn denied(detail: impl std::fmt::Display) -> WtpError {
+pub(crate) fn denied(detail: impl std::fmt::Display) -> WtpError {
     WtpError::Denied {
         grant_gap: detail.to_string(),
     }
@@ -141,6 +144,7 @@ impl Hub {
             });
         }
         let (drain_tx, drain_rx) = tokio::sync::mpsc::unbounded_channel();
+        let initial_settings = Self::read_settings(&store);
         let hub = Arc::new(Hub {
             data_dir: data_dir.to_path_buf(),
             store: Arc::new(store),
@@ -161,7 +165,10 @@ impl Hub {
             apns,
             tls_pin: std::sync::OnceLock::new(),
             icon_gate: tokio::sync::Mutex::new(()),
+            settings: std::sync::Mutex::new(initial_settings),
         });
+        // 自動鎖定政策接線（settings.rs）：解鎖時的 idle deadline 由設定決定。
+        hub.apply_timeout_policy();
         if let Some(a) = account {
             let client = std::sync::Arc::new(
                 Client::with_options(&a.server, Hub::sync_options()).map_err(|e| e.to_string())?,
@@ -299,7 +306,11 @@ impl Hub {
         sess: &Arc<crate::agent::LiveSession>,
         call: &Call,
     ) -> DispatchResult {
-        self.machine.record_activity();
+        // 活動定義（settings.rs 模組頭）：純狀態輪詢不重計 idle deadline，
+        // 否則 GUI 節拍會把自己餵到永不自動鎖定。
+        if !is_poll_call(call) {
+            self.machine.record_activity();
+        }
         let granted = match self.authorize(sess, call).await {
             Ok(idx) => idx,
             Err(e) => {
@@ -631,6 +642,23 @@ impl Hub {
                 Ok(Response::Profile(p.profile))
             }
             Call::Admin(AdminCall::Diagnostics) => Ok(Response::Status(self.status_info().await)),
+            Call::Admin(AdminCall::GetSettings) => {
+                Self::require_interactive(sess)?;
+                Ok(self.get_settings())
+            }
+            Call::Admin(AdminCall::SetSettings(s)) => {
+                Self::require_interactive(sess)?;
+                self.store_settings(*s)
+            }
+        }
+    }
+
+    /// 本機專屬閘（macOS 設定面）：跨機 Device/Agent session 不得改這台裝置的偏好。
+    fn require_interactive(sess: &crate::agent::LiveSession) -> Result<(), WtpError> {
+        if sess.kind == crate::agent::SessionKind::Interactive {
+            Ok(())
+        } else {
+            Err(denied("此呼叫僅本機 Interactive session 受理"))
         }
     }
 
@@ -1075,7 +1103,7 @@ impl Hub {
     }
 
     /// 明文索引回填（全鏡像，含垃圾桶——官方回收桶列表要顯示解密名稱）。
-    fn reindex_all(&self) -> Result<(), WtpError> {
+    pub(crate) fn reindex_all(&self) -> Result<(), WtpError> {
         let mut ids: Vec<ItemId> = self
             .store
             .query(&Query {
@@ -1514,8 +1542,21 @@ fn action_tag(c: &Call) -> String {
         Call::Admin(AdminCall::ServerProfile) => "Admin.ServerProfile",
         Call::Admin(AdminCall::Diagnostics) => "Admin.Diagnostics",
         Call::Admin(AdminCall::Version) => "Admin.Version",
+        Call::Admin(AdminCall::GetSettings) => "Admin.GetSettings",
+        Call::Admin(AdminCall::SetSettings(_)) => "Admin.SetSettings",
     }
     .to_owned()
+}
+
+/// 純狀態輪詢（自動鎖定的活動豁免清單；定義見 settings.rs 模組頭）。
+fn is_poll_call(c: &Call) -> bool {
+    matches!(
+        c,
+        Call::Sync(SyncCall::Status)
+            | Call::Admin(AdminCall::Diagnostics)
+            | Call::Agent(AgentCall::ListPending)
+            | Call::Auth(AuthCall::WhoAmI)
+    )
 }
 
 fn sensitivity_of_call(c: &Call, resp: Option<&Response>) -> bw_proto::Sensitivity {

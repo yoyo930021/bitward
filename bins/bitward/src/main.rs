@@ -13,8 +13,8 @@ use bw_proto::{
     AdminCall, AgentCall, Auth, AuthCall, Call, CipherDraft, CipherField, CipherFieldKind,
     ClientMsg, FieldEdit, FillCall, ImportItem, ItemId, ItemKind, ItemView, MutationId,
     OverlayOpWire, PROTO_VERSION, PasskeyCall, ProtoVersion, Query, Resolution, Response,
-    ServerMsg, SessionToken, SortKey, SyncCall, TwoFactorInput, TwoFactorProviderInfo, UseCall,
-    VaultCall, View, WtpError,
+    ServerMsg, SessionToken, Settings, SortKey, SyncCall, TwoFactorInput, TwoFactorProviderInfo,
+    UseCall, VaultCall, View, WtpError,
 };
 
 #[derive(Parser)]
@@ -49,6 +49,11 @@ enum Cmd {
     /// 改主密碼：stdin 依序讀入現有、新主密碼兩行（A11：密碼不進 argv）
     ChangePassword,
     Status,
+    /// 本機設定（macOS 設定面）：自動鎖定／剪貼簿清除／重啟鎖定／鎖定清搜尋
+    Settings {
+        #[command(subcommand)]
+        cmd: SettingsCmd,
+    },
     Sync,
     Ls {
         #[arg(long)]
@@ -352,6 +357,14 @@ enum FolderCmd {
     Delete {
         id: String,
     },
+}
+
+#[derive(Subcommand)]
+enum SettingsCmd {
+    /// 讀取現行設定（輸出 Settings JSON）
+    Show,
+    /// 寫入設定：`<json>` 為 Settings 形態 JSON，缺欄＝官方預設
+    Set { json: String },
 }
 
 #[derive(Subcommand)]
@@ -1029,6 +1042,14 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             })
         }
         Cmd::Status => Call::Admin(AdminCall::Diagnostics),
+        Cmd::Settings { cmd } => match cmd {
+            SettingsCmd::Show => Call::Admin(AdminCall::GetSettings),
+            SettingsCmd::Set { json } => {
+                let s: Settings =
+                    serde_json::from_str(json).map_err(|e| format!("settings JSON 不通：{e}"))?;
+                Call::Admin(AdminCall::SetSettings(s))
+            }
+        },
         Cmd::Sync => Call::Sync(SyncCall::Trigger { force: true }),
         Cmd::Ls {
             text,
@@ -1708,6 +1729,10 @@ fn print_response(resp: &Response, json: bool) {
             println!("{}", json!({"credential_id": credential_id}));
         }
         Response::Version(s) => println!("{s}"),
+        // 本機設定：扁平 Settings JSON（e2e/GUI 直讀，無外殼）
+        Response::Settings(s) => {
+            println!("{}", serde_json::to_string_pretty(s).unwrap());
+        }
         Response::Profile(p) => println!("{}", json!(p)),
         Response::Ok => println!("ok"),
         // 展開 newtype variant，jq 路徑直接命中欄位（避免 {"Status":{...}} 外殼）

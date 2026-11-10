@@ -173,6 +173,26 @@ impl Store {
         Ok(meta_u64(&conn, "cursor").unwrap_or(0))
     }
 
+    /// meta 表字串列讀取（本機設定等 JSON blob 的落點）；缺行回 None。
+    pub fn meta_str(&self, key: &str) -> StoreResult<Option<String>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok())
+    }
+
+    /// meta 表字串列寫入（INSERT OR REPLACE：同 key 覆寫，冪等）。
+    pub fn meta_set(&self, key: &str, value: &str) -> StoreResult<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+            rusqlite::params![key, value],
+        )?;
+        Ok(())
+    }
+
     /// 供測試與 e2e：確認檔案權限收斂（0600）。SQLite 可能在後續寫入時重建
     /// `-wal`，故每次交易提交後都呼叫一次。
     #[cfg(unix)]

@@ -16,7 +16,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use bw_proto::{CipherDraft, FieldEdit, ItemId, ItemMeta, Query};
+use bw_proto::{CipherDraft, CipherField, FieldEdit, ItemId, ItemMeta, Query};
 use bw_server::{Client, ClientOptions, DeleteKind, PasswordLogin};
 use bw_store::{MutState, Mutation, MutationDraft, Store};
 use serde::{Deserialize, Serialize};
@@ -68,6 +68,23 @@ pub struct Revealed {
     pub updated_at: Option<String>,
     pub favorite: bool,
     pub pending: bool,
+    /// 備註明文（詳情「備註」節與編輯表單預填用；無備註＝None）。
+    pub notes: Option<String>,
+    /// 鏡像 `folderId` 明文 UUID（未歸屬＝None）；名稱由 [`Hub::folders`] 對映。
+    pub folder_id: Option<String>,
+    /// 自訂欄位（順序同線格式 `fields[]`；hidden 欄值照官方詳情語意給明文，
+    /// 顯示端自行遮罩）。boolean 欄值為 "true"/"false" 字串（jslib 同形）。
+    pub fields: Vec<CipherField>,
+    /// 是否有 TOTP seed（解鎖態判定）：詳情節的「有 seed 才出現」閘門，
+    /// 區隔「無 seed（靜默收合）」與「有 seed 取碼失敗（可懂一行）」。
+    pub totp_available: bool,
+}
+
+/// 資料夾鏡像列（名稱只在解鎖態解密；鎖定態 None＝節點隱藏）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FolderEntry {
+    pub id: String,
+    pub name: Option<String>,
 }
 
 pub struct Hub {
@@ -77,6 +94,9 @@ pub struct Hub {
     device: OnceLock<String>,
     /// drain 單飛：同一時間只有一條 outbox 推送序列（租約之外再加一道保險）。
     drain_lock: tokio::sync::Mutex<()>,
+    /// favicon 單飛（同 daemon icon.rs）：同 host 併發只放一發外連，
+    /// 其餘在閘後命中磁碟快取。
+    icon_gate: tokio::sync::Mutex<()>,
 }
 
 impl Hub {
@@ -89,6 +109,7 @@ impl Hub {
             unlocked: Mutex::new(None),
             device: OnceLock::new(),
             drain_lock: tokio::sync::Mutex::new(()),
+            icon_gate: tokio::sync::Mutex::new(()),
         });
         log::info!("bitward-android hub: dir={}", hub.dir.display());
         Ok(hub)
@@ -253,26 +274,29 @@ impl Hub {
     }
 
     /// 單筆／複數 id 的明文索引回填（寫路徑 enqueue 後就地刷新，搜尋與列表
-    /// 立刻看到新值；與批量回填同一條 `bw_vault::plain_index`）。
+    /// 立刻看到新值；與批量回填同一條 `bw_vault::plain_index`）。內容金鑰
+    /// 逐列解析（新建形態＝item key、舊鏡像＝user key，見 [`cipher_content_key`]）。
     fn reindex_ids(&self, ids: impl IntoIterator<Item = ItemId>) -> Result<(), String> {
         let user_key = {
             let g = self.unlocked.lock().expect("hub mutex poisoned");
             let u = g.as_ref().ok_or("尚未解鎖")?;
             u.user_key.clone()
         };
-        let dec = |s: &str| {
-            bw_crypto::decrypt_bytes(&user_key, s)
-                .ok()
-                .and_then(|b| String::from_utf8(b).ok())
-        };
         for id in ids {
             let Some(row) = self.store.item(id).map_err(|e| e.to_string())? else {
                 continue;
             };
+            let Some(key) = cipher_content_key(&user_key, &row.enc_cipher) else {
+                continue;
+            };
+            let dec = decryptor_with_key(&key);
             let idx = bw_vault::plain_index(&row.enc_cipher, &dec);
-            let _ = self
-                .store
-                .set_plain_meta(id, idx.name.as_deref(), &idx.uris);
+            let _ = self.store.set_plain_meta(
+                id,
+                idx.name.as_deref(),
+                &idx.uris,
+                &idx.field_names,
+            );
             let _ =
                 self.store
                     .set_plain_secrets(id, idx.username.as_deref(), idx.password.as_deref());
@@ -281,13 +305,20 @@ impl Hub {
     }
 
     /// 列表：只讀本地鏡像的 metadata（搜尋走 FTS5／LIKE 退路，語意在 bw-store）。
-    pub fn list(&self, text: &str) -> Vec<ItemMeta> {
+    /// `folder`＝頂部 chip 的資料夾過濾（官方三態：None 全部、
+    /// `Some("")` 未歸屬、`Some(id)` 該夾——口徑同 `Query.folder`）。
+    pub fn list_in(&self, text: &str, folder: Option<&str>) -> Vec<ItemMeta> {
         let q = Query {
             text: (!text.trim().is_empty()).then(|| text.trim().to_owned()),
+            folder: folder.map(str::to_owned),
             limit: u32::MAX,
             ..Default::default()
         };
         self.store.query(&q).unwrap_or_default()
+    }
+
+    pub fn list(&self, text: &str) -> Vec<ItemMeta> {
+        self.list_in(text, None)
     }
 
     /// 單筆 metadata（無明文欄位）。
@@ -338,25 +369,30 @@ impl Hub {
             .item(id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "找不到這筆項目".to_owned())?;
-        // 欄位路徑與 reindex 同源（bw_vault::plain_index）；totp 只有這裡要。
-        let dec = |s: &str| {
-            bw_crypto::decrypt_bytes(&user_key, s)
-                .ok()
-                .and_then(|b| String::from_utf8(b).ok())
-        };
+        let key = cipher_content_key(&user_key, &row.enc_cipher)
+            .ok_or_else(|| "金鑰解析失敗（item key 解不開，請重新同步或重解）".to_owned())?;
+        // 欄位路徑與 reindex 同源（bw_vault::plain_index）；totp/notes/自訂欄
+        // 只有詳情要，走同一個解密閉包。
+        let dec = decryptor_with_key(&key);
         let idx = bw_vault::plain_index(&row.enc_cipher, &dec);
         let totp = row
             .enc_cipher
             .pointer("/login/totp")
             .and_then(Value::as_str)
-            .and_then(dec)
-            .and_then(|seed| {
+            .and_then(|seed_env| {
+                let seed = dec(seed_env)?;
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or_default();
-                bw_crypto::totp_code(&seed, now).ok()
+                bw_crypto::totp_code(seed.trim(), now).ok()
             });
+        let notes = row
+            .enc_cipher
+            .get("notes")
+            .and_then(Value::as_str)
+            .and_then(&dec);
+        let fields = field_rows(&row.enc_cipher, &dec);
         Ok(Revealed {
             name: meta.name.clone().unwrap_or_else(|| "(未命名)".to_owned()),
             username: idx.username,
@@ -368,7 +404,121 @@ impl Hub {
             updated_at: meta.updated_at.clone(),
             favorite: meta.favorite,
             pending: meta.pending,
+            notes,
+            folder_id: meta.folder_id.map(|f| f.to_string()),
+            fields,
+            totp_available: row
+                .enc_cipher
+                .pointer("/login/totp")
+                .and_then(Value::as_str)
+                .is_some(),
         })
+    }
+
+    /// 資料夾鏡像清單（ListFolders 等位物：`Store::folder_list` ＋解鎖態解密
+    /// 名稱；鎖定態回空——列表 chip 與表單下拉都只在解鎖態出現）。
+    pub fn folders(&self) -> Vec<FolderEntry> {
+        let user_key = match self.unlocked_user_key() {
+            Some(k) => k,
+            None => return Vec::new(),
+        };
+        self.store
+            .folder_list()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| FolderEntry {
+                id: r.id.to_string(),
+                name: r.name.as_deref().and_then(|n| {
+                    bw_crypto::decrypt_bytes_with_key(user_key.as_bytes(), n)
+                        .ok()
+                        .and_then(|b| String::from_utf8(b).ok())
+                }),
+            })
+            .collect()
+    }
+
+    /// TOTP 現算（UseCall::TotpCode 等位物，語意同 daemon `totp()`）：
+    /// 無 seed＝可懂錯字串（UI 靜默收合節）；有 seed 解不開＝另一條錯。
+    /// 回 `(code, valid_for_secs)`，倒數由 UI 心跳遞減、跨週期重取。
+    pub fn totp_code(&self, id: ItemId) -> Result<(String, u32), String> {
+        let user_key = self.unlocked_user_key().ok_or("尚未解鎖")?;
+        let row = self
+            .store
+            .item(id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "找不到這筆項目".to_owned())?;
+        let Some(seed_env) = row
+            .enc_cipher
+            .pointer("/login/totp")
+            .and_then(Value::as_str)
+        else {
+            return Err("此項目沒有 TOTP seed".to_owned());
+        };
+        let key = cipher_content_key(&user_key, &row.enc_cipher)
+            .ok_or("金鑰解析失敗（item key 解不開）")?;
+        let seed = decryptor_with_key(&key)(seed_env).ok_or("TOTP seed 解不開")?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default();
+        let code = bw_crypto::totp_code(seed.trim(), now).map_err(|e| e.to_string())?;
+        Ok((code, (30 - now % 30) as u32))
+    }
+
+    /// favicon 取圖（daemon `icon.rs` 的 in-process 等位物）：磁碟快取命中
+    /// （TTL 7 天）直接回 data URI；miss → 單飛閘＋雙重檢查 → 打伺服器
+    /// `{base}icons/{host}/icon.png`（root 路徑，VW 實錄）→ 原子落盤 → 回包。
+    /// 404／非法 host／未解鎖（無 client）＝None，UI 退字母磚。
+    pub async fn icon_data_uri(&self, host: &str) -> Option<String> {
+        if !valid_icon_host(host) {
+            return None;
+        }
+        let dir = self.dir.join("icons");
+        let file = dir.join(format!("{host}.png"));
+        if fresh_icon_cache(&file, ICON_TTL_MS, self.now_ms()) {
+            if let Ok(bytes) = std::fs::read(&file)
+                && let Some(uri) = icon_data_uri(&bytes)
+            {
+                return Some(uri);
+            }
+        }
+        let client = self.unlocked_client()?;
+        let _gate = self.icon_gate.lock().await;
+        if fresh_icon_cache(&file, ICON_TTL_MS, self.now_ms()) {
+            if let Ok(bytes) = std::fs::read(&file)
+                && let Some(uri) = icon_data_uri(&bytes)
+            {
+                return Some(uri);
+            }
+        }
+        let bytes = match client.fetch_icon(host).await {
+            Ok(b) => b,
+            Err(e) => {
+                log::debug!("icon: {host} 取圖失敗：{e}");
+                return None;
+            }
+        };
+        if bytes.is_empty() {
+            return None;
+        }
+        let uri = icon_data_uri(&bytes)?;
+        if std::fs::create_dir_all(&dir).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            }
+            let tmp = dir.join(format!("{host}.png.partial"));
+            if std::fs::write(&tmp, &bytes).is_ok() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+                }
+                let _ = std::fs::rename(&tmp, &file);
+            }
+        }
+        Some(uri)
     }
 
     /// 鎖定：丟棄 user key（Drop 即清零）與 token；鏡像與帳號檔留著。
@@ -402,6 +552,11 @@ impl Hub {
     /// 推送收斂後本地 id 由 `remap_item` 換成伺服器 id（與 daemon A7 同路徑）。
     pub fn create(&self, draft: &CipherDraft) -> Result<ItemId, String> {
         let user_key = self.unlocked_user_key().ok_or("尚未解鎖")?;
+        if let Some(f) = &draft.folder_id
+            && uuid::Uuid::parse_str(f).is_err()
+        {
+            return Err(format!("folderId 需為 UUID 字串，got {f:?}"));
+        }
         let id = uuid::Uuid::new_v4();
         let cipher = encrypt_login_draft(&user_key, draft, id);
         self.store
@@ -426,7 +581,10 @@ impl Hub {
     }
 
     /// 編輯：欄位級 patch（path 文法＝`bw_proto::FieldEdit` 權威定義）。
-    /// 未列出的欄位原樣保留（鏡像無損往返，不变量 8）。
+    /// 未列出的欄位原樣保留（鏡像無損往返，不变量 8）。預驗＋ours 構造＋
+    /// touched 詞彙全部對齊 daemon `write_patch`：leaf 值走 `apply_merged`、
+    /// 陣列增刪走 field/uri ops（先刪由大而小、再附加落尾）、內容金鑰逐列
+    /// 解析（新建形態＝item key）。
     pub fn patch(&self, id: ItemId, edits: &[FieldEdit]) -> Result<(), String> {
         let user_key = self.unlocked_user_key().ok_or("尚未解鎖")?;
         let row = self
@@ -445,14 +603,67 @@ impl Hub {
             return Err("組織共享項目暫不支援編輯".to_owned());
         }
         let base = row.enc_cipher;
+        validate_edits(&base, edits)?;
+        let key = cipher_content_key(&user_key, &base)
+            .ok_or("金鑰解析失敗（item key 解不開，請重新同步或重解）")?;
+        let enc = |v: &str| {
+            bw_crypto::encrypt_bytes_key(&key, v.as_bytes()).unwrap_or_default()
+        };
         let map: bw_vault::FieldMap = edits
             .iter()
-            .map(|e| (e.path.clone(), e.value.clone()))
+            .filter_map(|e| match e {
+                FieldEdit::Set { path, value } => Some((path.clone(), value.clone())),
+                FieldEdit::SetType { index, kind } => Some((
+                    format!("field.{index}.type"),
+                    Some(bw_vault::type_word(kind.wire() as i64)?.to_string()),
+                )),
+                _ => None,
+            })
             .collect();
-        let ours = bw_vault::apply_merged(&base, &map, &|v| {
-            bw_crypto::encrypt_bytes_key(user_key.as_bytes(), v.as_bytes()).unwrap_or_default()
-        });
-        let touched: Vec<&str> = edits.iter().map(|e| e.path.as_str()).collect();
+        let ours = bw_vault::apply_merged(&base, &map, &enc);
+        // 陣列形態操作（Set 型 leaf 做不到的增刪）：先刪後附加，全部落在
+        // ours 副本上（daemon apply_field_ops/apply_uri_ops 同族紀律）。
+        let removes_f: Vec<usize> = edits
+            .iter()
+            .filter_map(|e| match e {
+                FieldEdit::RemoveField { index } => Some(*index as usize),
+                _ => None,
+            })
+            .collect();
+        let appends_f: Vec<&CipherField> = edits
+            .iter()
+            .filter_map(|e| match e {
+                FieldEdit::AppendField { field } => Some(field),
+                _ => None,
+            })
+            .collect();
+        let removes_u: Vec<usize> = edits
+            .iter()
+            .filter_map(|e| match e {
+                FieldEdit::RemoveUri { index } => Some(*index as usize),
+                _ => None,
+            })
+            .collect();
+        let appends_u: Vec<&str> = edits
+            .iter()
+            .filter_map(|e| match e {
+                FieldEdit::AppendUri { uri } => Some(uri.as_str()),
+                _ => None,
+            })
+            .collect();
+        let ours = apply_field_ops(ours, &removes_f, &appends_f, &enc);
+        let ours = apply_uri_ops(ours, &removes_u, &appends_u, &enc);
+        let touched: Vec<String> = edits
+            .iter()
+            .map(|e| match e {
+                FieldEdit::Set { path, .. } => path.clone(),
+                FieldEdit::SetType { index, .. } => format!("field.{index}.type"),
+                FieldEdit::AppendField { .. } => "field.append".to_string(),
+                FieldEdit::RemoveField { index } => format!("field.remove.{index}"),
+                FieldEdit::AppendUri { .. } => "uri.append".to_string(),
+                FieldEdit::RemoveUri { index } => format!("uri.remove.{index}"),
+            })
+            .collect();
         let raw = self.store.raw(id).map_err(|e| e.to_string())?;
         let rev = row_rev_of(&raw);
         self.store
@@ -467,6 +678,66 @@ impl Hub {
         self.reindex_ids([id])?;
         log::info!("hub: patch {id}（待推送）");
         Ok(())
+    }
+
+    /// AutofillService 儲存真寫入（onSaveRequest 落地端，JNI 橋呼叫）：
+    /// - `uri` 是 web host、origin 或 app package（孤島從 AssistStructure 取
+    ///   webDomain／package，語意同填充查詢鍵）；
+    /// - 既有項目（同 host 候選 × 同帳號）→ 密碼不同才 patch（欄位級存活），
+    ///   相同＝unchanged 零寫入（冪等：重複提交不產生第二筆 outbox）；
+    /// - 查無組合 → create 一筆 Login（名稱取 host/package、uri 落 https:// 形態）。
+    /// 本地交易先行＝離線也成功，「待推送」由既有 drain 收斂；回 (id, 動作)。
+    pub fn save_from_autofill(
+        &self,
+        uri: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<(ItemId, &'static str), String> {
+        if !self.is_unlocked() {
+            return Err("尚未解鎖".to_owned());
+        }
+        let key = uri.trim();
+        if key.is_empty() {
+            return Err("儲存需要網址或套件名".to_owned());
+        }
+        let candidates = self.candidates_for(key, 10);
+        for (id, _) in candidates {
+            let Ok(r) = self.reveal(id) else { continue };
+            if r.username.as_deref().unwrap_or("") != username {
+                continue;
+            }
+            if r.password.as_ref().map(|p| p.as_str()).unwrap_or("") == password {
+                return Ok((id, "unchanged"));
+            }
+            // 密碼改了（改密流）：只動 password 欄，其餘欄位級存活。
+            self.patch(
+                id,
+                &[FieldEdit::Set {
+                    path: "password".into(),
+                    value: Some(password.to_owned()),
+                }],
+            )?;
+            return Ok((id, "updated"));
+        }
+        let name = host_of(key).unwrap_or_else(|| key.to_owned());
+        let url = if key.contains("://") {
+            key.to_owned()
+        } else {
+            format!("https://{key}")
+        };
+        let id = self.create(&CipherDraft {
+            kind: bw_proto::ItemKind::Login,
+            name,
+            username: (!username.is_empty()).then(|| username.to_owned()),
+            password: (!password.is_empty()).then(|| password.to_owned()),
+            totp: None,
+            uris: vec![url],
+            notes: None,
+            favorite: false,
+            folder_id: None,
+            fields: Vec::new(),
+        })?;
+        Ok((id, "created"))
     }
 
     /// 刪除：軟刪（tombstone）。鏡像立刻標 `deletedDate`＝列表即刻消失，
@@ -594,20 +865,28 @@ impl Hub {
             .get("ours")
             .cloned()
             .unwrap_or_else(|| base_enc.clone());
+        // 寫側與基準共用同一枚內容金鑰（enqueue 時就按 base 的 `key` 欄解析）；
+        // theirs 是伺服器現態，可能已被他端換鑰重建——各自獨立解析。
+        let Some(our_key) = cipher_content_key(user_key, &base_enc) else {
+            log::error!("drain: patch {} 基準 item key 解不開，回 queued", m.item);
+            let _ = self.store.settle(m.id, MutState::Queued);
+            return false;
+        };
+        let their_key = cipher_content_key(user_key, &theirs);
         let enc = |v: &str| {
-            bw_crypto::encrypt_bytes_key(user_key.as_bytes(), v.as_bytes()).unwrap_or_default()
+            bw_crypto::encrypt_bytes_key(&our_key, v.as_bytes()).unwrap_or_default()
         };
         let body = if m.base_rev.is_some() && their_rev == m.base_rev {
             ours_enc
         } else {
-            let dec = |s: &str| {
-                bw_crypto::decrypt_bytes(user_key, s)
-                    .ok()
-                    .and_then(|b| String::from_utf8(b).ok())
+            let dec = decryptor_with_key(&our_key);
+            let dec_theirs = match &their_key {
+                Some(k) => decryptor_with_key(k),
+                None => decryptor_with_key(&our_key),
             };
             let base = bw_vault::flatten(&base_enc, &dec);
             let ours = bw_vault::flatten(&ours_enc, &dec);
-            let theirs_m = bw_vault::flatten(&theirs, &dec);
+            let theirs_m = bw_vault::flatten(&theirs, &dec_theirs);
             match bw_vault::three_way(&base, &ours, &theirs_m) {
                 bw_vault::Merge::Push(map) => {
                     if map.is_empty() {
@@ -671,11 +950,97 @@ impl Hub {
     }
 }
 
-/// CipherDraft → 信封形態的 login cipher（與 daemon `encrypt_draft` 同形態：
-/// 機密欄走 `2.iv|ct|mac` 信封、uris 整陣列、favorite 明碼）。
+/// 鏡像 `fields[]` → 明文 `CipherField` 列（詳情節與編輯預填用；信封解不開
+/// 的單欄跳過，容忍漂移同 plain_index）。
+fn field_rows(cipher: &Value, dec: &dyn Fn(&str) -> Option<String>) -> Vec<CipherField> {
+    cipher
+        .get("fields")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|f| {
+                    let name = f.get("name").and_then(Value::as_str).and_then(dec)?;
+                    let kind = match f.get("type").and_then(Value::as_i64) {
+                        Some(1) => bw_proto::CipherFieldKind::Hidden,
+                        Some(2) => bw_proto::CipherFieldKind::Boolean,
+                        _ => bw_proto::CipherFieldKind::Text,
+                    };
+                    Some(CipherField {
+                        name,
+                        value: f.get("value").and_then(Value::as_str).and_then(dec),
+                        kind,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 快取有效期：7 天（同 daemon icon.rs：圖示極少變動）。
+const ICON_TTL_MS: u64 = 7 * 24 * 3600 * 1000;
+
+/// host 白名單校驗（快取檔名直接拼 `icons/{host}.png`，不擋路徑穿越＝
+/// 讓呼叫端寫任意檔；口徑同 daemon `valid_host`）。
+fn valid_icon_host(host: &str) -> bool {
+    let ok = !host.is_empty()
+        && host.len() <= 253
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+        && !host.starts_with(['.', '-'])
+        && !host.ends_with(['.', '-'])
+        && !host.contains("..");
+    ok && !host.starts_with('*')
+}
+
+/// 快取新鮮度：檔存在且 mtime 距今 < ttl（同 daemon `fresh_cache`）。
+fn fresh_icon_cache(path: &std::path::Path, ttl_ms: u64, now: u64) -> bool {
+    path.metadata()
+        .and_then(|m| m.modified())
+        .map(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .map(|d| now.saturating_sub(d.as_millis() as u64) < ttl_ms)
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+/// 位元組 → `data:` URI（magic 決定 MIME，同 macOS `icon_data_uri`：
+/// VW 的 icon 代理可能回 PNG 或站方 ICO，解不了的形態回 None＝字母磚）。
+fn icon_data_uri(bytes: &[u8]) -> Option<String> {
+    use base64::Engine;
+    let mime = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "image/png"
+    } else if bytes.starts_with(&[0x00, 0x00, 0x01, 0x00]) {
+        "image/x-icon"
+    } else {
+        return None;
+    };
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Some(format!("data:{mime};base64,{b64}"))
+}
+
+/// 從 uri 字串取 host（同 macOS `state::host_of`：favicon 查詢鍵；
+/// 無點且非 localhost 的（app package、`about:` 等）回 None＝字母磚）。
+pub fn host_of(uri: &str) -> Option<String> {
+    let rest = uri.split_once("://").map(|(_, r)| r).unwrap_or(uri);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let hostport = authority.rsplit('@').next().unwrap_or("");
+    let host = hostport.split(':').next().unwrap_or("").trim().to_ascii_lowercase();
+    if host.is_empty() || (!host.contains('.') && host != "localhost") {
+        return None;
+    }
+    Some(host)
+}
+
+/// CipherDraft → 信封形態 cipher（與 daemon `encrypt_draft` 同形態：每枚隨機
+/// 64B item key（enc‖mac），`key` 欄存 user key 包的它、內容欄全用 item key
+/// 加密——新建項目對官方客戶端與我們都原生；uris 整陣列、folderId 明碼、
+/// fields[] 官方形態、favorite 明碼）。
 fn encrypt_login_draft(uk: &bw_crypto::UserKey, d: &CipherDraft, id: ItemId) -> Value {
-    let enc =
-        |s: &str| bw_crypto::encrypt_bytes_key(uk.as_bytes(), s.as_bytes()).unwrap_or_default();
+    let mut ik = vec![0u8; 64];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut ik);
+    let enc = |s: &str| bw_crypto::encrypt_bytes_key(&ik, s.as_bytes()).unwrap_or_default();
     let mut c = json!({
         "type": match d.kind {
             bw_proto::ItemKind::Login => 1,
@@ -685,10 +1050,29 @@ fn encrypt_login_draft(uk: &bw_crypto::UserKey, d: &CipherDraft, id: ItemId) -> 
         },
         "name": enc(&d.name),
         "favorite": d.favorite,
+        "key": bw_crypto::encrypt_bytes_key(uk.as_bytes(), &ik).unwrap_or_default(),
         "id": id.to_string(),
     });
+    if let Some(f) = &d.folder_id {
+        c["folderId"] = json!(f);
+    }
     if let Some(n) = &d.notes {
         c["notes"] = json!(enc(n));
+    }
+    if !d.fields.is_empty() {
+        let fields: Vec<Value> = d
+            .fields
+            .iter()
+            .map(|f| {
+                json!({
+                    "name": enc(&f.name),
+                    "value": f.value.as_deref().map(enc),
+                    "linkedId": null,
+                    "type": f.kind.wire(),
+                })
+            })
+            .collect();
+        c["fields"] = Value::Array(fields);
     }
     let mut login = serde_json::Map::new();
     if let Some(u) = &d.username {
@@ -712,6 +1096,173 @@ fn encrypt_login_draft(uk: &bw_crypto::UserKey, d: &CipherDraft, id: ItemId) -> 
         c["login"] = Value::Object(login);
     }
     c
+}
+
+/// 單筆 cipher 的內容加密金鑰（三態解析器，與 daemon `cipher_decrypt_key`
+/// 同口徑，Android 無 org 共享寫入路徑所以候選只有 user key）：
+/// - 帶 `key` 欄＝新建形態：item key（64B enc‖mac，或 legacy 32B）以 user
+///   key 包存欄，內容欄全用 item key 加密；
+/// - 無 `key` 欄＝舊內容直掛 user key（本 app 2026-11-08 前的既有鏡像）。
+/// 解不開回 None（金鑰漂移≠空字串，呼叫端容忍跳過）。
+fn cipher_content_key(uk: &bw_crypto::UserKey, cipher: &Value) -> Option<Zeroizing<Vec<u8>>> {
+    match cipher.get("key").and_then(Value::as_str) {
+        Some(env) => bw_crypto::decrypt_bytes_with_key(uk.as_bytes(), env)
+            .ok()
+            .filter(|ik| ik.len() == 32 || ik.len() == 64)
+            .map(Zeroizing::new),
+        None => Some(Zeroizing::new(uk.as_bytes().to_vec())),
+    }
+}
+
+/// 依解析出的內容金鑰構造欄位解密閉包（形態同 daemon `cipher_field_decryptor`
+/// 的个人項目分支；單欄解不開回 None，容忍漂移）。
+fn decryptor_with_key(
+    key: &Zeroizing<Vec<u8>>,
+) -> impl Fn(&str) -> Option<String> + '_ {
+    move |s: &str| {
+        bw_crypto::decrypt_bytes_with_key(key, s)
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+    }
+}
+
+/// 三件套路徑預驗（入列前擋，不讓越界編輯靜默蒸發；口徑同 daemon
+/// `write_patch` 預驗段）：`field.<n>.<leaf>` 的 n 必須落在現有 fields[] 內、
+/// folderId 值為 UUID、SetType/RemoveField 按 index 同紀律、Append 要內容。
+fn validate_edits(base: &Value, edits: &[FieldEdit]) -> Result<(), String> {
+    let n_fields = base
+        .get("fields")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let n_uris = base
+        .pointer("/login/uris")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    for e in edits {
+        match e {
+            FieldEdit::SetType { index, .. } | FieldEdit::RemoveField { index } => {
+                if (*index as usize) >= n_fields {
+                    return Err(format!("field.{index} 越界：本項目只有 {n_fields} 個自訂欄位"));
+                }
+            }
+            FieldEdit::RemoveUri { index } => {
+                if (*index as usize) >= n_uris {
+                    return Err(format!("uri.{index} 越界：本項目只有 {n_uris} 列網址"));
+                }
+            }
+            FieldEdit::AppendUri { uri } => {
+                if uri.trim().is_empty() {
+                    return Err("新增網址列需要內容".to_owned());
+                }
+            }
+            FieldEdit::AppendField { field } => {
+                if field.name.is_empty() {
+                    return Err("新增自訂欄需要欄名".to_owned());
+                }
+            }
+            FieldEdit::Set { path, value } => {
+                if let Some(rest) = path.strip_prefix("field.") {
+                    let (id_s, leaf) = rest.rsplit_once('.').unwrap_or((rest, ""));
+                    if !matches!(leaf, "name" | "value" | "type") {
+                        return Err(format!("欄位路徑需 field.<n>.name|value|type，got {path:?}"));
+                    }
+                    let n = id_s
+                        .parse::<usize>()
+                        .map_err(|_| format!("field 索引需為數字，got {id_s:?}"))?;
+                    if n >= n_fields {
+                        return Err(format!("field.{n} 越界：本項目只有 {n_fields} 個自訂欄位"));
+                    }
+                    if leaf == "type"
+                        && let Some(v) = value.as_deref()
+                        && bw_vault::wire_of_type_word(v).is_none()
+                    {
+                        return Err(format!("field type 值域 text|hidden|boolean，got {v:?}"));
+                    }
+                }
+                if path == "folderId"
+                    && let Some(v) = value.as_deref()
+                    && uuid::Uuid::parse_str(v).is_err()
+                {
+                    return Err(format!("folderId 需為 UUID 字串，got {v:?}"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// fields[] 陣列操作（daemon `apply_field_ops` 等位物）：removes 由大而小
+/// 先刪（免位移），appends 依序附加（官方形態 name/value 信封、linkedId null、
+/// type 整數）。兩組皆空＝原值不動。
+fn apply_field_ops(
+    mut ours: Value,
+    removes: &[usize],
+    appends: &[&CipherField],
+    enc: &dyn Fn(&str) -> String,
+) -> Value {
+    if removes.is_empty() && appends.is_empty() {
+        return ours;
+    }
+    let obj = ours.as_object_mut().expect("cipher must be object");
+    let fields = obj
+        .entry("fields")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !fields.is_array() {
+        *fields = Value::Array(Vec::new());
+    }
+    let arr = fields.as_array_mut().expect("fields must be array");
+    remove_indices(arr, removes);
+    for f in appends {
+        arr.push(json!({
+            "name": enc(&f.name),
+            "value": f.value.as_deref().map(enc),
+            "linkedId": null,
+            "type": f.kind.wire(),
+        }));
+    }
+    ours
+}
+
+/// `login.uris[]` 陣列操作（daemon `apply_uri_ops` 等位物）：官方形態
+/// `{uri:<信封>, match:null}`；無 login 块的材料化、刪除降序紀律同族。
+fn apply_uri_ops(
+    mut ours: Value,
+    removes: &[usize],
+    appends: &[&str],
+    enc: &dyn Fn(&str) -> String,
+) -> Value {
+    if removes.is_empty() && appends.is_empty() {
+        return ours;
+    }
+    let obj = ours.as_object_mut().expect("cipher must be object");
+    let login = obj.entry("login").or_insert_with(|| json!({}));
+    if !login.is_object() {
+        *login = json!({});
+    }
+    let login = login.as_object_mut().expect("login must be object");
+    let uris = login
+        .entry("uris")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !uris.is_array() {
+        *uris = Value::Array(Vec::new());
+    }
+    let arr = uris.as_array_mut().expect("uris must be array");
+    remove_indices(arr, removes);
+    for u in appends {
+        arr.push(json!({ "uri": enc(u), "match": null }));
+    }
+    ours
+}
+
+/// 索引刪除共同段：越界索引寬容跳過，降序執行免位移（同 daemon）。
+fn remove_indices(arr: &mut Vec<Value>, removes: &[usize]) {
+    let mut dels: Vec<usize> = removes.iter().copied().filter(|i| *i < arr.len()).collect();
+    dels.sort_unstable_by(|a, b| b.cmp(a));
+    for i in dels {
+        arr.remove(i);
+    }
 }
 
 fn cipher_id(c: &Value) -> Option<ItemId> {
@@ -877,6 +1428,8 @@ mod tests {
             uris: vec!["https://added.example.com".to_owned()],
             notes: None,
             favorite: false,
+            folder_id: None,
+            fields: Vec::new(),
         }
     }
 
@@ -918,7 +1471,7 @@ mod tests {
         let id = hub.create(&draft("e2e-added")).expect("create ok");
         hub.patch(
             id,
-            &[FieldEdit {
+            &[FieldEdit::Set {
                 path: "password".to_owned(),
                 value: Some("e2epass2".to_owned()),
             }],
@@ -970,5 +1523,173 @@ mod tests {
         assert_eq!(&s[10..11], "T");
         assert_eq!(&s[19..20], "Z");
         assert!(s[..4].parse::<u32>().expect("year") >= 2025);
+    }
+
+    #[test]
+    fn create_uses_item_key_envelope_and_roundtrips() {
+        // 新建形態（daemon encrypt_draft 同形）：`key` 欄在、內容欄用 item key
+        // 加密；reveal／reindex 走解析器讀得回——官方客戶端拿到同一個鏡像也解得開。
+        let (hub, dir) = unlocked_hub("itemkey");
+        let fid = uuid::Uuid::new_v4().to_string();
+        let id = hub
+            .create(&CipherDraft {
+                name: "ik-probe".to_owned(),
+                notes: Some("私密備註".to_owned()),
+                folder_id: Some(fid.clone()),
+                fields: vec![CipherField {
+                    name: "PIN".to_owned(),
+                    value: Some("1234".to_owned()),
+                    kind: bw_proto::CipherFieldKind::Hidden,
+                }],
+                ..draft("ik-probe")
+            })
+            .expect("create ok");
+        let row = hub.store.item(id).expect("store").expect("row");
+        assert!(
+            row.enc_cipher.get("key").and_then(Value::as_str).is_some(),
+            "新建應帶 item key 包裝欄"
+        );
+        assert_eq!(
+            row.enc_cipher.get("folderId").and_then(Value::as_str),
+            Some(fid.as_str()),
+            "folderId 明文落欄"
+        );
+        let r = hub.reveal(id).expect("reveal");
+        assert_eq!(r.notes.as_deref(), Some("私密備註"));
+        assert_eq!(r.fields.len(), 1);
+        assert_eq!(r.fields[0].name, "PIN");
+        assert_eq!(r.fields[0].value.as_deref(), Some("1234"));
+        assert!(r.folder_id.is_some());
+        // 明文索引含欄名（搜尋找得到 PIN）。
+        assert_eq!(hub.list("PIN").len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn patch_array_ops_append_and_remove_uri_and_field() {
+        let (hub, dir) = unlocked_hub("arrayops");
+        let id = hub.create(&draft("arr")).expect("create");
+        hub.patch(
+            id,
+            &[
+                FieldEdit::AppendUri {
+                    uri: "https://second.example.com".to_owned(),
+                },
+                FieldEdit::AppendField {
+                    field: CipherField {
+                        name: "会员号".to_owned(),
+                        value: Some("m-1".to_owned()),
+                        kind: bw_proto::CipherFieldKind::Text,
+                    },
+                },
+            ],
+        )
+        .expect("append ok");
+        let r = hub.reveal(id).expect("reveal");
+        assert_eq!(r.uris.len(), 2);
+        assert_eq!(r.uris[1], "https://second.example.com");
+        assert_eq!(r.fields.len(), 1);
+        // 越界刪除被預驗擋下（靜默蒸發＝缺陷）。
+        assert!(
+            hub.patch(id, &[FieldEdit::RemoveUri { index: 9 }])
+                .err()
+                .expect("越界應回錯")
+                .contains("越界")
+        );
+        hub.patch(id, &[FieldEdit::RemoveUri { index: 0 }])
+            .expect("remove ok");
+        let r = hub.reveal(id).expect("reveal");
+        assert_eq!(r.uris, vec!["https://second.example.com".to_owned()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_from_autofill_creates_patches_and_is_idempotent() {
+        let (hub, dir) = unlocked_hub("afsave");
+        let (id, act) = hub
+            .save_from_autofill("added.example.com", "newbie", "pw1")
+            .expect("save");
+        assert_eq!(act, "created");
+        assert_eq!(hub.list("").len(), 1);
+        // 同組合同密碼：冪等，不再入列（重複提交不產生第二筆 outbox）。
+        let (same, act) = hub
+            .save_from_autofill("https://added.example.com/login", "newbie", "pw1")
+            .expect("resave");
+        assert_eq!(same, id);
+        assert_eq!(act, "unchanged");
+        assert_eq!(hub.store.depth().expect("depth").queued, 1);
+        // 同組合新密碼：patch 欄位級存活（帳號與網址不動、密碼換值）。
+        let (_, act) = hub
+            .save_from_autofill("added.example.com", "newbie", "pw2")
+            .expect("respw");
+        assert_eq!(act, "updated");
+        let r = hub.reveal(id).expect("reveal");
+        assert_eq!(r.password.as_ref().map(|p| p.as_str()), Some("pw2"));
+        assert_eq!(r.username.as_deref(), Some("newbie"));
+        assert_eq!(r.uris, vec!["https://added.example.com".to_owned()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn totp_code_present_and_absent() {
+        let (hub, dir) = unlocked_hub("totp");
+        let id = hub
+            .create(&CipherDraft {
+                totp: Some("JBSWY3DPEHPK3PXP".to_owned()),
+                ..draft("totp-probe")
+            })
+            .expect("create");
+        let (code, valid_for) = hub.totp_code(id).expect("code");
+        assert_eq!(code.len(), 6);
+        assert!(code.chars().all(|c| c.is_ascii_digit()));
+        assert!((1..=30).contains(&valid_for));
+        // 無 seed：可懂錯字串（UI 依此靜默收合節）。
+        let other = hub.create(&draft("no-totp")).expect("create2");
+        assert!(hub.totp_code(other).err().expect("err").contains("沒有 TOTP"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn icon_host_whitelist_and_data_uri_sniff() {
+        assert!(valid_icon_host("github.com"));
+        assert!(!valid_icon_host("../etc/passwd"));
+        assert!(!valid_icon_host("a/b"));
+        assert!(!valid_icon_host("*.example.com"));
+        assert!(valid_icon_host("io.bitward.android")); // 含點 package 名可當檔名
+        let png = [0x89u8, b'P', b'N', b'G', 1, 2, 3];
+        assert!(icon_data_uri(&png).expect("png").starts_with("data:image/png;base64,"));
+        let ico = [0x00u8, 0x00, 0x01, 0x00, 9];
+        assert!(icon_data_uri(&ico).expect("ico").starts_with("data:image/x-icon;base64,"));
+        assert!(icon_data_uri(b"garbage").is_none());
+        assert_eq!(host_of("https://GitHub.com/x"), Some("github.com".to_owned()));
+        assert_eq!(host_of("myapp"), None);
+        assert_eq!(
+            host_of("io.bitward.android"),
+            Some("io.bitward.android".to_owned())
+        );
+    }
+
+    #[test]
+    fn folders_locked_empty_and_list_in_folder() {
+        let (hub, dir) = unlocked_hub("folders");
+        // 鏡像有資料夾欄但表為空：解鎖態回空清單（不是鎖定的空，語意一致）。
+        assert!(hub.folders().is_empty());
+        let fid = uuid::Uuid::new_v4().to_string();
+        hub.store
+            .folder_put(uuid::Uuid::parse_str(&fid).unwrap(), &json!({
+                "id": fid,
+                "name": format!("2.aa|bb|cc"),
+            }))
+            .expect("folder put");
+        hub.create(&CipherDraft {
+            folder_id: Some(fid.clone()),
+            ..draft("in-folder")
+        })
+        .expect("create");
+        hub.create(&draft("no-folder")).expect("create2");
+        assert_eq!(hub.list_in("", Some(&fid)).len(), 1);
+        assert_eq!(hub.list_in("", Some("")).len(), 1);
+        assert_eq!(hub.list_in("", None).len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

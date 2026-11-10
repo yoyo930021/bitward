@@ -17,6 +17,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 zeroize = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
+# favicon data URI 與新建項目的隨機 item key（同根 workspace 版本）
+base64 = "0.22"
+rand = "0.8"
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "macros",

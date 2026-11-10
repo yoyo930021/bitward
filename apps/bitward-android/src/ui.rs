@@ -637,30 +637,32 @@ pub fn editor_modal(
                     uris: uri_v.map(|u| vec![u]).unwrap_or_default(),
                     notes: None,
                     favorite: false,
+                    folder_id: None,
+                    fields: Vec::new(),
                 })
                 .map(|_| ()),
             Editor::Edit(id) => {
                 let mut edits: Vec<FieldEdit> = Vec::new();
                 if n != base_name {
-                    edits.push(FieldEdit {
+                    edits.push(FieldEdit::Set {
                         path: "name".into(),
                         value: Some(n),
                     });
                 }
                 if user_v != base_user {
-                    edits.push(FieldEdit {
+                    edits.push(FieldEdit::Set {
                         path: "username".into(),
                         value: user_v,
                     });
                 }
                 if pass_v != base_pass {
-                    edits.push(FieldEdit {
+                    edits.push(FieldEdit::Set {
                         path: "password".into(),
                         value: pass_v,
                     });
                 }
                 if uri_v != base_uri {
-                    edits.push(FieldEdit {
+                    edits.push(FieldEdit::Set {
                         path: "uri.0".into(),
                         value: uri_v,
                     });
