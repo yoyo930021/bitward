@@ -349,3 +349,13 @@ zh，系統存檔提示實錄節點＝標題「要将密码和用户名保存到
 變，自動化要嘛固定 emulator 語系、要嘛按钮角色（非描述列）定位**；本腳本
 改認「保存」優先、英文「Save」退路。修後實測鏈：`probe commit requested →
 onSaveRequest → jni: save q=io.bitward.android action=created → save ok`。
+
+### A16/A17 實錄四：`input text` 長字串截尾（13 字符壁）
+
+兩輪連跑實錄：f1 的 username（19 字元）落庫只剩前 13 字、f2 的 seed（16 字元）
+同型截斷——A17 的碼值等值斷言抓到（052789 不在完整 seed ±1h 任何視窗，且
+host/emulator 時鐘 skew＝0，排除引擎問題：app 老實存了截斷 seed、TOTP 引擎
+照它正確出碼）。根因＝打字期間面板/焦點事件吞掉尾段字元（同 IME 陷阱家族，
+短字串≤8 字元四輪未見）。修＝`type_verify`：打完 dump 驗層級現值，不實
+MOVE_END＋30×DEL 清欄重打一次；A15 seed、A16 username 接入。斷言保持嚴格
+等值（这正是它該抓的）。
