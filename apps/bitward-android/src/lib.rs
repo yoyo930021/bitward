@@ -12,6 +12,7 @@
 pub mod hub;
 #[cfg(target_os = "android")]
 mod jni;
+pub mod theme;
 pub mod ui;
 
 use std::sync::{Arc, LazyLock};
