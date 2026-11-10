@@ -439,6 +439,10 @@ pub enum VaultCall {
     },
 }
 
+/// 弱密碼列管門檻：`password_score` **低於**此值進報告（zxcvbn 口徑 0–2＝可猜）。
+/// daemon 過濾與 GUI 圖例共用同一個數，不在兩處重述。
+pub const WEAK_PASSWORD_THRESHOLD: u8 = 3;
+
 /// 報告面（VaultCall::Reports 子孫；置尾紀律同宿主）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Reports {

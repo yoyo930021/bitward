@@ -239,6 +239,14 @@ enum Cmd {
     },
     /// 去重報告（同 host+username 群集）
     Dupes,
+    /// 報告儀表板（重用密碼／弱密碼／項目歷史）
+    Reports {
+        /// reuse | weak | history
+        what: String,
+        /// history 的項目 id（其餘子命令忽略）
+        #[arg(long)]
+        id: Option<String>,
+    },
     /// 合併重複項：保留 KEEP，軟刪其餘，tags 聯集
     Merge {
         keep: String,
@@ -1459,6 +1467,18 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             },
         }),
         Cmd::Dupes => Call::Vault(VaultCall::FindDuplicates),
+        Cmd::Reports { what, id } => {
+            let sub = match (what.as_str(), id.as_deref()) {
+                ("reuse", _) => bw_proto::Reports::PasswordReuse,
+                ("weak", _) => bw_proto::Reports::WeakPasswords,
+                ("history", Some(i)) => bw_proto::Reports::CipherHistory { id: parse_id(i)? },
+                ("history", None) => return Err("reports history 需要 --id".into()),
+                other => {
+                    return Err(format!("reports 子命令值域 reuse|weak|history，got {other:?}"));
+                }
+            };
+            Call::Vault(VaultCall::Reports { sub })
+        }
         Cmd::Merge { keep, dupes } => Call::Vault(VaultCall::Merge {
             keep: parse_id(keep)?,
             dupes: dupes

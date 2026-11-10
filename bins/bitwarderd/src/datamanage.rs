@@ -112,6 +112,153 @@ impl Hub {
         Ok(Response::DupGroups(groups))
     }
 
+    /// 弱密碼報告：鏡像全量解密打分（`bw_crypto::password_score`，zxcvbn 同口徑
+    /// 分級語意、非本體——取捨見 strength.rs 模組頭）。只在解鎖態算（未解鎖
+    /// `Locked`）、明文只活在 `with_keys` 閉包內、回包只含 id/name/score——
+    /// 結果不落盤（A11：無明文殘留面）。`WEAK_PASSWORD_THRESHOLD` 以下列管，
+    /// 無密碼欄的 login（純 TOTP 条目）跳過不評——沒密碼不是弱密碼。
+    pub fn reports_weak_passwords(&self) -> Result<Response, WtpError> {
+        self.require_unlocked()?;
+        let metas = self
+            .store
+            .query(&bw_proto::Query {
+                kind: Some(bw_proto::ItemKind::Login),
+                limit: u32::MAX,
+                ..Default::default()
+            })
+            .map_err(denied)?;
+        let org_keys = self.org_key_map();
+        let mut rows: Vec<Value> = Vec::new();
+        for m in metas {
+            let row = match self.store.item(m.id) {
+                Ok(Some(r)) => r,
+                _ => continue,
+            };
+            if row
+                .enc_cipher
+                .pointer("/login/password")
+                .and_then(Value::as_str)
+                .is_none()
+            {
+                continue;
+            }
+            let scored = self.machine.with_keys(|kb| {
+                // 金鑰不出閉包（不變量 3）；解不開（org 未派生等）跳過比誤評準。
+                let dec = self.cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
+                let pw = row
+                    .enc_cipher
+                    .pointer("/login/password")
+                    .and_then(Value::as_str)
+                    .and_then(&dec)?;
+                Some(bw_crypto::password_score(&pw))
+            });
+            let Ok(Some(score)) = scored else { continue };
+            if score < bw_proto::WEAK_PASSWORD_THRESHOLD {
+                rows.push(json!({
+                    "id": m.id.to_string(),
+                    "name": m.name,
+                    "score": score,
+                }));
+            }
+        }
+        rows.sort_by(|a, b| {
+            let k = |r: &Value| {
+                (
+                    r["score"].as_i64().unwrap_or(0),
+                    r["name"].as_str().unwrap_or("").to_lowercase(),
+                )
+            };
+            k(a).cmp(&k(b))
+        });
+        Ok(Response::Json(json!({
+            "threshold": bw_proto::WEAK_PASSWORD_THRESHOLD,
+            "items": rows,
+        })))
+    }
+
+    /// 項目版本歷史：代理 `GET /ciphers/{id}/history`（官方舊版線格式，條目自帶
+    /// 各版本 `key` 信封——`cipher_decrypt_key` 三態解析器直接吃條目物件，同鏡像
+    /// 座標系）。線格式查證（2026-11-10，交付記錄）：
+    /// - **Vaultwarden 1.37.2 未實裝本路由**：dev 容器（1.37.2）實測
+    ///   `GET /api/ciphers/{id}/history` 回 404（帶不帶 bearer 同），原始碼
+    ///   `src/api/core/ciphers.rs` routes! 全表與 db 層 grep 均無 cipher history。
+    ///   故本呼叫在 VW 上走 `supported:false` 分支，GUI 歷史節收合。
+    /// - 官方雲現行 OpenAPI（bitwarden-sdk-internal 生成 ciphers_api.rs，58 op）
+    ///   亦無歷史端點（版本歷史屬 2023 年前舊雲形態）。
+    /// 404/405 → `supported:false`（同 `is_route_missing_err` 慣例；鏡像存在的
+    ///   項目在實裝路由的 server 上 404＝條目不存在，兩態語意皆為「無歷史可看」）。
+    /// **唯讀**：查證無任何 server 端「從歷史還原」端點（官方 web vault 的
+    /// restore 是用歷史值重建整筆後 `PUT /ciphers/{id}`，非獨立路由）——
+    /// 還原屬寫路徑改造，本批不硬做，回包 `restoreSupported:false` 註記。
+    pub async fn reports_cipher_history(&self, id: ItemId) -> Result<Response, WtpError> {
+        let server = self.server.read().await;
+        let h = server.as_ref().ok_or_else(|| denied("離線：歷史資料源在伺服器"))?;
+        let unsupported = || {
+            Response::Json(json!({
+                "supported": false,
+                "restoreSupported": false,
+                "versions": [],
+            }))
+        };
+        let raw = match h.client.cipher_history(id).await {
+            Ok(v) => v,
+            Err(bw_server::ServerError::Http { status: 404 | 405, .. }) => {
+                return Ok(unsupported());
+            }
+            Err(e) => return Err(crate::hub::map_server_err(e)),
+        };
+        let entries: Vec<Value> = match raw.get("data").and_then(Value::as_array) {
+            Some(a) => a.clone(),
+            None => Vec::new(),
+        };
+        let org_keys = self.org_key_map();
+        let mut versions: Vec<Value> = Vec::new();
+        for e in entries {
+            let (name, uri_count) = self
+                .machine
+                .with_keys(|kb| {
+                    let dec = self.cipher_field_decryptor(kb, &e, &org_keys);
+                    let name = e
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .and_then(&dec)
+                        .unwrap_or_default();
+                    // `data`＝該版本欄位 JSON 的信封字串；uri 數只取長度不出口欄位值。
+                    let uris = e
+                        .get("data")
+                        .and_then(Value::as_str)
+                        .and_then(&dec)
+                        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                        .and_then(|j| {
+                            j.pointer("/login/uris")
+                                .and_then(Value::as_array)
+                                .map(|a| a.len())
+                        })
+                        .unwrap_or(0);
+                    (name, uris)
+                })
+                .map_err(|_| WtpError::Locked)?;
+            versions.push(json!({
+                "id": e.get("id").and_then(Value::as_str).unwrap_or_default(),
+                "creationDate": e.get("creationDate").and_then(Value::as_str).unwrap_or_default(),
+                "name": name,
+                "uriCount": uri_count,
+            }));
+        }
+        // 新到舊（官方歷史頁同序）；creationDate 是 ISO-8601，字串序即時間序。
+        versions.sort_by(|a, b| {
+            b["creationDate"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(a["creationDate"].as_str().unwrap_or(""))
+        });
+        Ok(Response::Json(json!({
+            "supported": true,
+            "restoreSupported": false,
+            "versions": versions,
+        })))
+    }
+
     /// 合併：tags 聯集進 keep（本地），dupes 走 outbox 軟刪（§2.4 唯一寫路徑）。
     pub async fn merge_dupes(
         &self,

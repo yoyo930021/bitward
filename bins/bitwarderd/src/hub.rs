@@ -511,6 +511,13 @@ impl Hub {
                 self.write_set_archived(session, *id, *archived).await
             }
             Call::Vault(VaultCall::GetIcon { host }) => self.get_icon(host).await,
+            Call::Vault(VaultCall::Reports { sub }) => match sub {
+                bw_proto::Reports::PasswordReuse => self.duplicates(),
+                bw_proto::Reports::WeakPasswords => self.reports_weak_passwords(),
+                bw_proto::Reports::CipherHistory { id } => {
+                    self.reports_cipher_history(*id).await
+                }
+            },
             Call::Use(UseCall::TotpCode { id }) => self.totp(*id),
             Call::Use(UseCall::GeneratePassword { policy }) => {
                 let opts = bw_crypto::PasswordOptions {
@@ -1526,6 +1533,15 @@ fn action_tag(c: &Call) -> String {
         }) => "Vault.Attachment.Delete",
         Call::Vault(VaultCall::SetArchived { .. }) => "Vault.SetArchived",
         Call::Vault(VaultCall::GetIcon { .. }) => "Vault.GetIcon",
+        Call::Vault(VaultCall::Reports { sub: bw_proto::Reports::PasswordReuse }) => {
+            "Vault.Reports.PasswordReuse"
+        }
+        Call::Vault(VaultCall::Reports {
+            sub: bw_proto::Reports::WeakPasswords,
+        }) => "Vault.Reports.WeakPasswords",
+        Call::Vault(VaultCall::Reports {
+            sub: bw_proto::Reports::CipherHistory { .. },
+        }) => "Vault.Reports.CipherHistory",
         Call::Passkey(PasskeyCall::GetPasskeys { .. }) => "Passkey.GetPasskeys",
         Call::Passkey(PasskeyCall::RegisterPasskey { .. }) => "Passkey.RegisterPasskey",
         Call::Passkey(PasskeyCall::AssertPasskey { .. }) => "Passkey.AssertPasskey",
@@ -1623,6 +1639,9 @@ fn sensitivity_of_call(c: &Call, resp: Option<&Response>) -> bw_proto::Sensitivi
         Call::Vault(VaultCall::SetArchived { .. }) | Call::Vault(VaultCall::GetIcon { .. }) => {
             Identity
         }
+        // 報告出口全部去敏（id 群集／分數／日期＋名稱＋uri 計數），解密只發生在
+        // daemon 打分閉包內——比照 FindDuplicates 的 Identity 級
+        Call::Vault(VaultCall::Reports { .. }) => Identity,
         Call::Use(UseCall::TotpCode { .. })
         | Call::Use(UseCall::Run { .. })
         | Call::Use(UseCall::ResolveRef { .. })

@@ -268,6 +268,14 @@ impl Hub {
             Call::Vault(VaultCall::GetIcon { .. }) => {
                 (Access::See(bw_proto::Sensitivity::Identity), None)
             }
+            // 報告出口全部去敏（id 群集／分數／日期＋名稱＋uri 計數）——比照
+            // FindDuplicates 的 See(Identity)；歷史錨定 item 供 item 級 grant 判定
+            Call::Vault(VaultCall::Reports {
+                sub: bw_proto::Reports::CipherHistory { id },
+            }) => (Access::See(bw_proto::Sensitivity::Identity), Some(*id)),
+            Call::Vault(VaultCall::Reports { .. }) => {
+                (Access::See(bw_proto::Sensitivity::Identity), None)
+            }
             // passkey 分級（契約 §4）：列表＝Metadata（Identity floor）；
             // Register/Assert 取用私鑰＝Use(UseKind::Passkey)（用而不讀，同 totp 級）
             Call::Passkey(PasskeyCall::GetPasskeys { .. }) => {
@@ -762,6 +770,9 @@ pub fn item_of(call: &Call) -> Option<uuid::Uuid> {
             | bw_proto::AttachmentOp::Delete { item_id, .. } => *item_id,
         }),
         Call::Vault(VaultCall::SetArchived { id, .. }) => Some(*id),
+        Call::Vault(VaultCall::Reports {
+            sub: bw_proto::Reports::CipherHistory { id },
+        }) => Some(*id),
         Call::Vault(VaultCall::Delete { ids }) => ids.first().copied(),
         Call::Passkey(PasskeyCall::RegisterPasskey {
             item_id: Some(id), ..
