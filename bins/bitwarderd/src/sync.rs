@@ -307,10 +307,15 @@ impl Hub {
         archived: bool,
     ) -> Result<Response, WtpError> {
         self.require_unlocked()?;
-        let mut mirror = {
-            let row = self.store.item(id).map_err(denied)?;
-            row.ok_or(WtpError::NotFound)?.enc_cipher
-        };
+        let row = self.store.item(id).map_err(denied)?;
+        let row = row.ok_or(WtpError::NotFound)?;
+        if row.deleted {
+            // 垃圾桶項目先還原再談封存：enc_cipher 鏡像不含 deletedDate
+            // （write_cipher 剝除紀律），直接蓋 archivedDate 會把 deleted
+            // 標記洗掉＝軟刪復活，語意不正確。
+            return Err(denied("垃圾桶項目需先 restore 才能改封存狀態"));
+        }
+        let mut mirror = row.enc_cipher;
         if let Some(o) = mirror.as_object_mut() {
             if archived {
                 o.insert("archivedDate".into(), json!(chrono_now()));
@@ -1799,5 +1804,11 @@ mod tests {
         hub.write_set_archived("s2", id, false).await.unwrap();
         let m = hub.store.meta(id).unwrap().unwrap();
         assert_eq!(m.archived_at, None, "取消封存清欄");
+        // 垃圾桶閘：軟刪項目改封存會洗掉 deleted 標記（鏡像不含
+        // deletedDate），必須擋下語意才正確
+        hub.write_delete("s3", &[id]).await.unwrap();
+        let err = hub.write_set_archived("s4", id, true).await.unwrap_err();
+        assert!(matches!(&err, WtpError::Denied { grant_gap } if grant_gap.contains("restore")),
+            "{err:?}");
     }
 }
