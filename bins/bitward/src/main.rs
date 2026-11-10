@@ -13,7 +13,8 @@ use bw_proto::{
     AdminCall, AgentCall, Auth, AuthCall, Call, CipherDraft, CipherField, CipherFieldKind,
     ClientMsg, FieldEdit, FillCall, ImportItem, ItemId, ItemKind, ItemView, MutationId,
     OverlayOpWire, PROTO_VERSION, PasskeyCall, ProtoVersion, Query, Resolution, Response,
-    ServerMsg, SessionToken, SortKey, SyncCall, UseCall, VaultCall, View, WtpError,
+    ServerMsg, SessionToken, SortKey, SyncCall, TwoFactorInput, TwoFactorProviderInfo, UseCall,
+    VaultCall, View, WtpError,
 };
 
 #[derive(Parser)]
@@ -38,7 +39,8 @@ enum Cmd {
         server: String,
         #[arg(long)]
         email: String,
-        /// "-" 或 unset ＝從 stdin 讀主密碼（pinentry 式）
+        /// 從 stdin 讀主密碼（第一行；pinentry 式）。帳號開 2FA 時，
+        /// 同一流依序再收「因子編號、6 位驗證碼」兩行（提示走 stderr）。
         #[arg(long)]
         password_stdin: bool,
     },
@@ -618,16 +620,13 @@ async fn run() -> Result<(), String> {
         eprintln!("AutoType: 準備倒數 3 秒後注入按鍵，請切到目標視窗");
     }
     let rid = 1u64;
-    write_client(&mut wr, &ClientMsg::Invoke { rid, call })
+    write_client(&mut wr, &ClientMsg::Invoke { rid, call: call.clone() })
         .await
         .map_err(|e| e.to_string())?;
-    let reply = loop {
-        match read_server(&mut rd).await.map_err(|e| e.to_string())? {
-            ServerMsg::Reply { rid: r, outcome } if r == rid => break outcome,
-            ServerMsg::Event { .. } => continue,
-            other => return Err(format!("unexpected {other:?}")),
-        }
-    };
+    let mut reply = await_reply(&mut rd, rid).await?;
+    if matches!(args.cmd, Cmd::Login { .. }) {
+        reply = login_2fa_rounds(&mut rd, &mut wr, &call, reply, rid).await?;
+    }
     match reply {
         Ok(resp) => {
             if let Cmd::Attach {
@@ -665,6 +664,130 @@ fn proto_mismatch(peer: u16) -> Option<String> {
     } else {
         None
     }
+}
+
+type BoxRd = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+type BoxWr = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
+type Reply = Result<Response, WtpError>;
+
+async fn await_reply(rd: &mut BoxRd, rid: u64) -> Result<Reply, String> {
+    loop {
+        match read_server(rd).await.map_err(|e| e.to_string())? {
+            ServerMsg::Reply { rid: r, outcome } if r == rid => return Ok(outcome),
+            ServerMsg::Event { .. } => continue,
+            other => return Err(format!("unexpected {other:?}")),
+        }
+    }
+}
+
+/// 登入 2FA 回合：daemon 回 TwoFactorRequest → stderr 列因子、stdin 收
+/// 「因子編號＋6 位碼」→ 原樣重發 Login（password 再送一次，hash 由 daemon
+/// 重算；本機線明文紀律同第一步）。碼錯時 VW 回「Invalid TOTP code」錯誤
+/// （非新挑戰）→ 原樣返回讓末段顯示原文，使用者重跑 login 即可。
+async fn login_2fa_rounds(
+    rd: &mut BoxRd,
+    wr: &mut BoxWr,
+    first: &Call,
+    reply: Reply,
+    mut rid: u64,
+) -> Result<Reply, String> {
+    let mut reply = reply;
+    let Call::Auth(AuthCall::Login {
+        server,
+        email,
+        password,
+        api_key,
+        ..
+    }) = first
+    else {
+        unreachable!("login_2fa_rounds 只接 Login call");
+    };
+    for _ in 0..5 {
+        let providers = match &reply {
+            Ok(Response::TwoFactorRequest { providers }) if !providers.is_empty() => {
+                providers.clone()
+            }
+            _ => return Ok(reply),
+        };
+        eprintln!("此帳號需要第二因子驗證。可用因子：");
+        for p in &providers {
+            let gate = if TwoFactorProviderInfo::is_supported(p.provider) {
+                String::new()
+            } else {
+                "（此因子尚未支援）".to_owned()
+            };
+            let hint = p
+                .hint
+                .as_deref()
+                .map(|h| format!("：{h}"))
+                .unwrap_or_default();
+            eprintln!(
+                "  [{}] {}{hint}{gate}",
+                p.provider,
+                TwoFactorProviderInfo::label(p.provider)
+            );
+        }
+        let default = providers
+            .iter()
+            .find(|p| TwoFactorProviderInfo::is_supported(p.provider))
+            .map(|p| p.provider);
+        match default {
+            Some(d) => eprintln!("選擇因子編號（預設 {d}）："),
+            None => eprintln!("選擇因子編號："),
+        }
+        let pick_line = read_line_stdin()?;
+        let pick = match pick_line.trim() {
+            "" => default,
+            s => s
+                .parse::<i32>()
+                .ok()
+                .filter(|n| providers.iter().any(|p| p.provider == *n)),
+        };
+        let Some(pick) = pick else {
+            eprintln!("輸入無效：請輸入上面列出的因子編號");
+            reply = Ok(Response::TwoFactorRequest {
+                providers: providers.clone(),
+            });
+            continue;
+        };
+        if !TwoFactorProviderInfo::is_supported(pick) {
+            eprintln!(
+                "此因子尚未支援：{}（請改選手機驗證器或 Email）",
+                TwoFactorProviderInfo::label(pick)
+            );
+            reply = Ok(Response::TwoFactorRequest {
+                providers: providers.clone(),
+            });
+            continue;
+        }
+        eprintln!("輸入 6 位驗證碼：");
+        let code = read_line_stdin()?;
+        let code = code.trim().to_owned();
+        if code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
+            eprintln!("驗證碼格式不對：需要 6 位數字");
+            reply = Ok(Response::TwoFactorRequest {
+                providers: providers.clone(),
+            });
+            continue;
+        }
+        rid += 1;
+        let next = Call::Auth(AuthCall::Login {
+            server: server.clone(),
+            email: email.clone(),
+            password: password.clone(),
+            api_key: api_key.clone(),
+            two_factor: Some(TwoFactorInput {
+                provider: pick,
+                token: code,
+                remember: false,
+            }),
+        });
+        write_client(wr, &ClientMsg::Invoke { rid, call: next })
+            .await
+            .map_err(|e| e.to_string())?;
+        reply = await_reply(rd, rid).await?;
+    }
+    Err("第二因子嘗試次數過多（5 次）；請重試 login".into())
 }
 
 /// `pair join` 後的跨機身分檔：remotes/<profile>.json
@@ -852,12 +975,9 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             email,
             password_stdin,
         } => {
+            // 只取第一行＝主密碼；後續行留給 2FA 回合（選因子、驗證碼）。
             let pw = if *password_stdin {
-                let mut s = String::new();
-                std::io::stdin()
-                    .read_to_string(&mut s)
-                    .map_err(|e| e.to_string())?;
-                Some(s.trim_end_matches('\n').to_owned())
+                Some(read_line_stdin()?)
             } else {
                 None
             };
