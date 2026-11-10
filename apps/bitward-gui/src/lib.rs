@@ -173,6 +173,8 @@ pub fn App() -> impl IntoElement {
     if let Some(dir) = std::env::var_os("NSH_GUI_SHOTS").map(PathBuf::from) {
         if std::env::var_os("NSH_GUI_SHOTS_DRAIN").is_some() {
             shots::script_drain(dir, core.clone());
+        } else if std::env::var_os("NSH_GUI_SHOTS_LOGIN").is_some() {
+            shots::script_login(dir, core.clone());
         } else {
             shots::script(dir, core.clone());
         }

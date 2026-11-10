@@ -210,6 +210,71 @@ fn poll_drained(dir: PathBuf, core: AppCore, ms: u64) {
     });
 }
 
+/// 登入卡驗收流（`NSH_GUI_SHOTS_LOGIN`，批次 8）：前提＝daemon 為 SignedOut
+/// （gui-login.sh 起乾淨 data-dir daemon＋dev-register 只在 server 端建帳）。
+/// 44 空卡（佔位提示）→ 填欄（env 帶真憑證）→ 45 填入態 → SubmitLogin →
+/// 輪詢 Unlocked（登入即解鎖）→ 46 進庫＋帳號列 email → 偽造 needs_reauth
+/// → 47 橫幅＋警告色帳號列 → 收復原並退出。90 秒 failsafe 硬退（斷言紅
+/// 不掛驱动程序）。
+pub fn script_login(dir: PathBuf, core: AppCore) {
+    let server = std::env::var("BW_TEST_SERVER").unwrap_or_default();
+    let email = std::env::var("BW_TEST_EMAIL").unwrap_or_default();
+    let pw = std::env::var("BW_TEST_PASSWORD").unwrap_or_default();
+    let c = core.clone();
+    let d = dir.clone();
+    at(3000, move || {
+        assert!(
+            matches!(c.vault.get(), Some(bw_proto::UnlockStateView::SignedOut)),
+            "登入流前提＝daemon SignedOut，實際：{:?}",
+            c.vault.get()
+        );
+        capture(&d, "shot-44-login-card.png");
+    });
+    let c = core.clone();
+    at(3600, move || {
+        c.login.server.set(server);
+        c.login.email.set(email);
+        c.login.password.set(pw);
+    });
+    let d = dir.clone();
+    at(4200, move || capture(&d, "shot-45-login-filled.png"));
+    let c = core.clone();
+    at(4600, move || c.send(Cmd::SubmitLogin));
+    poll_unlocked(dir, core, 6000);
+    at(90000, || {
+        eprintln!("bitward-gui: login e2e 90 秒未完成（掛在輪詢？）");
+        std::process::exit(1);
+    });
+}
+
+fn poll_unlocked(dir: PathBuf, core: AppCore, ms: u64) {
+    let d = dir.clone();
+    let c = core.clone();
+    at(ms, move || {
+        if !matches!(c.vault.get(), Some(bw_proto::UnlockStateView::Unlocked { .. })) {
+            if ms < 60000 {
+                poll_unlocked(dir, core, ms + 1000);
+            }
+            return;
+        }
+        // 登入成功回包應回填帳號列 email（Status 寬容欄實測）。
+        let email_ok = c.acct_email.get().is_some();
+        capture(&d, "shot-46-vault-after-login.png");
+        let c2 = core.clone();
+        at(ms + 1200, move || c2.needs_reauth.set(true));
+        let d2 = dir.clone();
+        let c3 = core.clone();
+        at(ms + 2200, move || {
+            assert!(c3.needs_reauth.get());
+            capture(&d2, "shot-47-reauth-banner.png");
+        });
+        at(ms + 2800, move || {
+            assert!(email_ok, "登入成功後帳號列應回填 email（status 資訊）");
+        });
+        at(ms + 3200, quit);
+    });
+}
+
 /// 由目前列表訊號找名字完全相符的項目視圖。
 fn find_view(core: &AppCore, name: &str) -> Option<bw_proto::ItemView> {
     core.items

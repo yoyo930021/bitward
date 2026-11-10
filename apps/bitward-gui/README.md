@@ -47,7 +47,7 @@ cd apps/bitward-gui
 BITWARD_GUI_SOCK=<repo>/dev/e2e/demo/s NSH_GUI_SHOTS=$PWD nsh run --target macos
 ```
 
-依指令序列跑完整驗收流並寫 `shot-1..23、26..43-*.png`（24/25 見下）後退出：列表全量（三欄骨架、
+依指令序列跑完整驗收流並寫 `shot-1..23、26..43-*.png`（24/25 徽章流、44..47 登入流見下）後退出：列表全量（三欄骨架、
 型別磚、未同步膠囊，右欄空態為「選取一個項目」佔位）→ 搜尋 "GitHub" →
 詳情遮罩 → 詳情 revealed → 新增編輯器（右欄 inline）→ 真送新增（Create+AddTag）
 → TOTP 拒絕路徑（無 seed → 錯誤橫條）→ 排序下拉 → 標籤 chips 選取 →
@@ -86,6 +86,21 @@ BITWARD_GUI_SOCK=<drain-daemon.sock> NSH_GUI_SHOTS=$PWD NSH_GUI_SHOTS_DRAIN=1 \
   nsh run --target macos
 ```
 
+### 登入卡與憑證失效證據（`NSH_GUI_SHOTS_LOGIN`）
+
+批次 8 補上 SignedOut 的登入入口（使用者實測回報：「打開顯示未登入，卻沒有登入的地方」）。
+`dev/e2e/gui-login.sh` 一鍵起獨立環境：自起 VOLATILE VW 容器（`bitward-vw-login`，:18096）＋
+全新 data-dir daemon（真 SignedOut 世界）＋`dev-register` 只在 server 端建帳（不寫 daemon 狀態），
+再由 GUI 卡上完成一輪**真登入**：`shot-44-login-card.png`（空卡：伺服器 URL 佔位、email、主密碼
+secure 欄、API key 小字提示）→ 填入 → `shot-45-login-filled.png` → `Auth:Login{password:Some}` →
+hub 登入即解鎖 → `shot-46-vault-after-login.png`（進庫＋帳號列回填 email）→ 偽造 `needs_reauth`
+→ `shot-47-reauth-banner.png`（頂部 warning 橫幅＋側欄帳號列警告色，點擊進登入卡）。
+demo daemon／`bitward-vw-demo` 不受影響。
+
+```sh
+dev/e2e/gui-login.sh   # 產 apps/bitward-gui/shot-44..47-*.png，全綠印 GUI-LOGIN: ALL PASS
+```
+
 注意：垃圾桶與資料夾需要 daemon 支援 `Query.deleted`／`Query.folder` 三態與
 `ListFolders`／`Vault:Restore`／`Vault:Purge`（主線三件套已落地）；批次 2c 的
 編輯欄位增刪改型與原子匯入需要 `FieldEdit::SetType/AppendField/RemoveField`
@@ -111,7 +126,7 @@ access token 壽命約 2 小時；daemon 自 4c 起**自動續期**（401 出口
 |---|---|
 | `btp.rs` | BTP 精簡同步 client：u32 LE 長度前綴 + JSON 幀、`Hello{Enroll pair_code:null}`→`Welcome`→`Invoke`/`Reply`；鎖撤銷（A6）自動重連重 Enroll 一次；`listen` 事件監聽連線（wants 訂閱，OutboxDrained/VaultChanged 交 state 幫浦） |
 | `state.rs` | 應用狀態機：`AppCore`（訊號集）+ `Cmd` 命令佇列 + 唯一 `reduce`；UI handler 只投遞命令，worker 執行緒只回傳命令，訊號全在引擎執行緒寫入；`watch_events` 事件幫浦（斷線 1s 重連；`EventsRefresh` 連詳情一起重取） |
-| `lib.rs` | 根元件 `App`：命令幫浦（`set_interval` 50ms + `batch`）、TOTP 心跳（1s 引擎計時器）、批准佇列節拍（1.5s 輪詢，照殼節奏）、主題 effect（`theme_mode`→`set_color_scheme`，即時翻轉不重建視窗；`theme.txt` 持久化）、頂部列（置中搜尋＋新增項目）、左側欄（我的密碼庫＋資料夾樹／已共享佔位／垃圾桶／待批准＋計數徽章／同步列／匯出/匯入/改密／主題三態選擇）、錯誤橫條、Phase×Route 三欄版面與鎖態頁 |
+| `lib.rs` | 根元件 `App`：命令幫浦（`set_interval` 50ms + `batch`）、TOTP 心跳（1s 引擎計時器）、批准佇列節拍（1.5s 輪詢，照殼節奏）、主題 effect（`theme_mode`→`set_color_scheme`，即時翻轉不重建視窗；`theme.txt` 持久化）、頂部列（置中搜尋＋新增項目）、左側欄（我的密碼庫＋資料夾樹／已共享佔位／垃圾桶／待批准＋計數徽章／帳號列（email＋上次同步／未登入／憑證失效三態）／匯出/匯入/改密／主題三態選擇）、錯誤橫條、needs_reauth 橫幅（warning 色、點擊進登入卡）、Phase×Route 三欄版面與鎖態頁、SignedOut 登入卡（server/email/主密碼＋登入即解鎖）與側欄帳號列三態 |
 | `approvals.rs` | 批准佇列右欄視角（自殼批准中心併入）：每筆＝去敏 summary＋請求時間（`requested_at_ms`，daemon 補欄即顯示）＋單鍵批准/拒絕（官方語意無二次確認，按錯以拒絕補救）；空佇列佔位卡；epoch→UTC 時分純函數 |
 | `list.rs` | 置中搜尋框（Query.text 交 daemon FTS；掛頂部列）、標籤 chips 行＋排序/重新整理（中欄工具列）、排序選單、44px 列（型別磚單色字形、選中列淡藍底＋藍指示條）、未同步膠囊、垃圾桶條目顯示刪除時間、`virtual_list` |
 | `detail.rs` | 右欄詳情面板：官方表單感——大名稱＋型別磚，分節與官方同序（帳密／驗證碼／備註／自訂欄位／附件／資訊），欄位為淺灰圓角值塊（label 12 粗灰在上、值 14 塊內、複製鈕塊右側），布爾欄渲染開關樣；垃圾桶條目動作改還原／永久刪除；密碼遮罩 →「顯示密碼」發 Get(Reveal)，明文只存 `revealed` 訊號、離開詳情即清；TOTP 按鈕發 Use:TotpCode＋倒數細进度條（≤5 秒轉 warning）；附件列＝檔名＋大小＋下載／刪除，節尾內聯上傳編輯器 |
@@ -122,7 +137,7 @@ access token 壽命約 2 小時；daemon 自 4c 起**自動續期**（401 出口
 | `export.rs` | 未加密 JSON 匯出：逐筆 Get(Reveal) → `~/Downloads/bitward-export-<UTC>.json`（0600） |
 | `theme.rs` | 設計 tokens：視圖層唯一顏色與尺寸真相源，禁散落 hex／魔數。**雙槽色板**（light＝官方淺色皮：白底、#175DDC 藍、6px 小圓角；dark＝藍紫暗色皮），語意色、文字三級、密度常量（三欄寬/列高/字級/留白/開關幾何）；外觀由 `set_color_scheme` 三態驅動、樣式閉包即時翻轉 |
 | `ui.rs` | 共用小元件：按鈕（primary 藍實色/ghost/destructive）、型別磚（單色字形，monogram 退役）、徽章、表單欄、下拉列、模態殼（absolute 鋪滿 + 置中白卡）、確認/改密模態、複製鈕 |
-| `shots.rs` | `NSH_GUI_SHOTS` 自我截圖器（AppKit `cacheDisplayInRect` 路徑，不需 TCC；objc2 經 `nsh_platform_macos` 再匯取）；`NSH_GUI_SHOTS_DRAIN` 徽章收斂時間軸 |
+| `shots.rs` | `NSH_GUI_SHOTS` 自我截圖器（AppKit `cacheDisplayInRect` 路徑，不需 TCC；objc2 經 `nsh_platform_macos` 再匯取）；`NSH_GUI_SHOTS_DRAIN` 徽章收斂時間軸；`NSH_GUI_SHOTS_LOGIN` 登入卡時間軸（gui-login.sh 驅動） |
 
 導航是 `Route` 狀態機 + `when` 區塊——不用 `nav_stack`（spike FINDINGS
 卡點 4：macOS dev host 不渲染）。
