@@ -365,3 +365,48 @@ onSaveRequest → jni: save q=io.bitward.android action=created → save ok`。
 - A15 seed（nsh 表單欄）留 `type_verify`：分段打＋dump 驗現值＋不實清欄重打，
   兩輪不實**硬 fail**（絕不讓失真值溜進下游斷言變成難定位的遠端不符）。
 - 短字串（≤8 字元，如 e2euser/e2epass）六輪未見改寫，維持直打。
+
+### A16 實錄五：extras 通道兩處非等價（定位失配＋存檔 UI 不發）
+
+extras 改動後 A16 首次真跑即掛，根因兩條，都是「setText 與手打語意等價」
+前提的漏洞：
+
+1. **hint 定位失效**：空 EditText 的 accessibility 兜底會把 hint 現形成
+   `text`（`getTextForAccessibility`），所以舊流程 `tap_text "probe-pass"`
+   點得動；預填後欄位非空，text＝現值（密碼欄＝圓點），hint 只在 `hint`
+   屬性，`center_of`（認 text）找不到節點。修＝改 `tap_edittext_of` 按序
+   定位（與 A13 遮罩欄同款教訓）。
+2. **存檔 UI 必要條件＝「必要欄現值不同於 session 初始快照」**：setText 在
+   onCreate 完成、早於 focus 起的 autofill session，初始快照即最終值。AOSP
+   `Session.showSaveLocked`（android16-release，`found a change`/`with no
+   changes, comes no responsibilities` 日誌親驗）按 required ids 比對
+   current vs initial：預填態 commit 回 `showing save UI? false`，
+   `onSaveRequest` 不發。**net-zero 騙不過它**：focus 後補打一字元再刪除
+   （14→15→14），日誌回「id … is part of dataset but initial value didn't
+   change」——比的是現值與初始值，不是事件計數。（中場曾誤判「補打再刪可行」，
+   係一輪 DEL 未落的僥倖綠，連跑兩輪即現形。）
+   修＝探針改 **singleTop 二段式**：空欄啟動→focus（session 以空值開局）→
+   第二次 `am start --es` 經 `onNewIntent` setText＝淨變更，入庫值＝extras
+   原值、零 IME 依賴。手動實錄：`found a change on required …: null =>
+   [19_chars]/[13_chars] → 保存鈕 → onSaveRequest → jni: save
+   action=created → save ok`。
+
+教訓：**退役輸入通道要連同「系統靠值差異工作」的部分一起等價**——autofill
+存檔流讀的不只欄位現值，還有「現值與 session 初始快照的差」；uiautomator 的
+text 欄是 accessibility 合成值，欄位狀態（空/非空）會改它的來源，定位別拿
+hint 的現形通道當座標系。
+
+### A17 實錄六：斷言運算元用錯截斷（引擎一直無辜）
+
+A16 修綠後 A17 首次真跑即紅。排查鏈：app 顯示碼 770097 不在「完整 seed ±2h」
+任何視窗→疑似 seed 損壞→直接拉 device DB（run-as tar vault.db＋wal）離線解密
+信封：`login.totp` 解出 **正是** `JBSWY3DPEHPK3PXP`（本地鏡像無損）。再核對
+引擎：`base32_decode`＝RFC 標準字母表、`hotp`＝RFC 6238 動態截斷（offset＝
+末 nibble、`&0x7fffffff`）。而 e2e 的 python 運算元取 `d[-4:]` 當 4 bytes——
+**不是 RFC 截斷**，與引擎永不同值；把 seed 用引擎同款動態截斷重算，
+770097＝window 59811026 的正確碼，分毫不差。修＝運算元改 `o=d[-1]&0xF`
+動態截斷。教訓：**等值斷言的兩端要嘛同源自寫、要嘛各自對 KAT**——實錄四
+「±1h 掃描排除引擎」的方法學其實也用了錯運算元（當時 seed 確有損壞，結論
+碰巧仍對）；斷言失敗先驗斷言本體。另注：VW 端 `totp_available:false`——server sync 回應不含 `login.totp`
+（push 是否帶到無從直接觀察；本地鏡像經欄位級合併存活，A17 只依賴本地碼值，
+不受擾）。此觀察屬 daemon/Hub 面既有邊界，本批不动。

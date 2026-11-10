@@ -564,13 +564,23 @@ $ADB shell settings put secure autofill_service "$AF_SVC"
 $ADB shell settings put secure current_autofill_service "$AF_SVC"
 sleep 2
 $ADB logcat -c
+# 二段式落地（探針 singleTop）：先空欄啟動、focus 密碼欄開出 autofill session
+# （初始快照＝空值），再經第二次 am start 用 intent extras 走 onNewIntent
+# setText＝session 內的淨變更。為何不能啟動時一次預填完（實錄）：存檔 UI 判定
+# 「必要欄現值不同於 session 初始快照」，預填早於 focus 則 commit 永遠
+# 「with no changes」、onSaveRequest 不發（findings 實錄五）。
+$ADB shell am start -n "$PKG/.AutofillProbeActivity" >/dev/null 2>&1
+sleep 2
+# 空欄才有 accessibility 兜底把 hint 現形成 text；預填後 hint 只在 hint 屬性，
+# 一律按序定位（tap_edittext_of 同款教訓）。
+dump /tmp/android-a16-pass.xml
+tap_edittext_of /tmp/android-a16-pass.xml 1
 $ADB shell am start -n "$PKG/.AutofillProbeActivity" \
   --es user "$SAVE_USER" --es pass "$SAVE_PASS" >/dev/null 2>&1
 sleep 2
 # 預填值先驗再走流程（intent extras 落地＝確定性；IME 打字通道已退役）。
 dump /tmp/android-a16-prefill.xml
 has_text /tmp/android-a16-prefill.xml "$SAVE_USER" || fail "A16 預填帳號沒進欄位"
-tap_text a16-pass "probe-pass"
 for _ in $(seq 1 15); do
   $ADB logcat -d | grep -q 'saveinfo=true' && break
   sleep 1
@@ -646,7 +656,8 @@ import base64,hmac,struct,time,hashlib
 seed=base64.b32decode('JBSWY3DPEHPK3PXP')
 t=int(time.time())//30
 d=hmac.new(seed,struct.pack('>Q',t),hashlib.sha1).digest()
-print('%06d' % (struct.unpack('>I',d[-4:])[0] % 1000000))")
+o=d[-1]&0xF  # RFC 6238 動態截斷（實錄：拿 d[-4:] 當 offset 的土產寫法與 bw-crypto 引擎永不同值）
+print('%06d' % ((struct.unpack('>I',d[o:o+4])[0]&0x7fffffff) % 1000000))")
   dump /tmp/android-a17-code.xml
   grep -q "text=\"$C\"" /tmp/android-a17-code.xml && { CODE=$C; break; }
   sleep 1
