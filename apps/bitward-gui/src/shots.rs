@@ -409,7 +409,9 @@ fn find_view(core: &AppCore, name: &str) -> Option<bw_proto::ItemView> {
 /// 開關樣落地）→ 附件生命週期（上傳確認/收斂在列/下載落地/刪除確認）→
 /// 批准佇列（gated session 造真 pending：41 佇列有筆＋時間欄斷言、42 批准後
 /// 清空＋徽章消失）→ 髒退出閘（編輯器弄髒被導航攔下走確認框，shot-43，
-/// 拒絕留 edit、確認放棄完成重投）→ 暗色皮自查三張（列表/詳情/新增器，SetTheme(Dark) 即時翻轉不重建視窗），
+/// 拒絕留 edit、確認放棄完成重投）→ 已封存視角（封存→主列表消失→視角帶時間可見→
+/// 取消回主列表，shot-52）→ favicon 實圖（GitHub 測試詳情＋列表圖示磚，shot-53）→
+/// 暗色皮自查三張（列表/詳情/新增器，SetTheme(Dark) 即時翻轉不重建視窗），
 /// 各步存一張 shot-N-*.png 後結束行程。時序裕量對齊
 /// spike（Background
 /// session 無 vsync 可等，固定 sleep；本地 daemon 往返 <50ms）。
@@ -883,13 +885,49 @@ pub fn script(dir: PathBuf, core: AppCore) {
     let c = core.clone();
     at(61200, move || {
         assert!(matches!(c.route.get(), Route::List), "放棄編輯應完成被攔的導航");
+        // —— 已封存視角（批次 C）：封存 → 主列表消失 → 節點視角可見 → 取消回主列表 ——
+        if let Some(id) = find_id(&c, "E2E 驗證項目改名") {
+            c.send(Cmd::SetArchived { id, archived: true });
+        }
+    });
+    let c = core.clone();
+    at(62000, move || {
+        assert!(
+            find_id(&c, "E2E 驗證項目改名").is_none(),
+            "封存後主列表不應再見該項目"
+        );
+        c.send(Cmd::ToggleArchived);
+    });
+    let c = core.clone();
+    let d = dir.clone();
+    at(62900, move || {
+        let row = find_view(&c, "E2E 驗證項目改名");
+        assert!(
+            row.as_ref().is_some_and(|v| v.meta.archived_at.is_some()),
+            "已封存視角應含該項目且帶封存時間"
+        );
+        capture(&d, "shot-52-archived-view.png");
+        if let Some(id) = row.map(|v| v.meta.id) {
+            c.send(Cmd::SetArchived { id, archived: false });
+        }
+    });
+    let c = core.clone();
+    at(63800, move || {
+        c.send(Cmd::ToggleArchived);
+    });
+    let c = core.clone();
+    at(64500, move || {
+        assert!(
+            find_id(&c, "E2E 驗證項目改名").is_some(),
+            "取消封存應回到主列表"
+        );
         if let Some(id) = find_id(&c, "2b 筆記範例") {
             c.send(Cmd::OpenDetail(id));
         }
     });
     // 附件列要等背景推送收斂（drain tick 5s＋推送＋VaultChanged 重取），
     // 用輪詢取代死時間：出現即拍，40 秒未現即斷言失敗。
-    poll_attachment_row(dir, core, 63600);
+    poll_attachment_row(dir, core, 66600);
 }
 
 /// 輪詢詳情附件列收斂；出現後串接下載→刪除確認→收尾。
@@ -972,26 +1010,39 @@ fn poll_attachment_row(dir: PathBuf, core: AppCore, ms: u64) {
             assert!(c9.pending.get().is_empty(), "批准後佇列應清空、徽章消失");
             capture(&d2, "shot-42-approvals-cleared.png");
         });
-        // —— 暗色皮自查三張（列表／詳情／模態）；收尾復原 system 預設 ——
+        // —— favicon 實圖幀（批次 C）：清單早已請求並快取 icons，開詳情作证 ——
         let c10 = core.clone();
-        at(ms + 8800, move || c10.send(Cmd::SetTheme(Appearance::Dark)));
-        let d3 = dir.clone();
-        at(ms + 9400, move || capture(&d3, "shot-38-dark-list.png"));
+        at(ms + 8600, move || {
+            c10.send(Cmd::OpenList);
+            if let Some(id) = find_id(&c10, "GitHub 測試") {
+                c10.send(Cmd::OpenDetail(id));
+            }
+        });
+        let df = dir.clone();
+        at(ms + 9300, move || capture(&df, "shot-53-favicon.png"));
+        // —— 暗色皮自查三張（列表／詳情／新增器）；收尾復原 system 預設 ——
         let c11 = core.clone();
-        at(ms + 9600, move || {
-            if let Some(id) = find_id(&c11, "2b 筆記範例") {
-                c11.send(Cmd::OpenDetail(id));
+        at(ms + 9900, move || {
+            c11.send(Cmd::SetTheme(Appearance::Dark));
+            c11.send(Cmd::OpenList);
+        });
+        let d3 = dir.clone();
+        at(ms + 10500, move || capture(&d3, "shot-38-dark-list.png"));
+        let c12 = core.clone();
+        at(ms + 10700, move || {
+            if let Some(id) = find_id(&c12, "2b 筆記範例") {
+                c12.send(Cmd::OpenDetail(id));
             }
         });
         let d4 = dir.clone();
-        at(ms + 10200, move || capture(&d4, "shot-39-dark-detail.png"));
-        let c12 = core.clone();
-        at(ms + 10400, move || c12.send(Cmd::OpenCreate));
-        let d5 = dir.clone();
-        at(ms + 11000, move || capture(&d5, "shot-40-dark-modal.png"));
+        at(ms + 11300, move || capture(&d4, "shot-39-dark-detail.png"));
         let c13 = core.clone();
-        at(ms + 11300, move || c13.send(Cmd::SetTheme(Appearance::System)));
-        at(ms + 11700, quit);
+        at(ms + 11500, move || c13.send(Cmd::OpenCreate));
+        let d5 = dir.clone();
+        at(ms + 12100, move || capture(&d5, "shot-40-dark-modal.png"));
+        let c14 = core.clone();
+        at(ms + 12400, move || c14.send(Cmd::SetTheme(Appearance::System)));
+        at(ms + 12800, quit);
     });
 }
 
