@@ -101,6 +101,22 @@ demo daemon／`bitward-vw-demo` 不受影響。
 dev/e2e/gui-login.sh   # 產 apps/bitward-gui/shot-44..47-*.png，全綠印 GUI-LOGIN: ALL PASS
 ```
 
+### 登入第二因子證據（`NSH_GUI_SHOTS_LOGIN2FA`）
+
+批次 8b：帳號開 Authenticator(TOTP) 2FA 後，daemon 把伺服器挑戰映射成
+`Response::TwoFactorRequest{providers}`（不吞成死字串），GUI 登入卡**原地**進第二步：
+因子單選＋6 位碼欄＋記住此裝置＋「完成登入」。`dev/e2e/login2fa.sh` 一鍵跑全鏈：
+真 VW（`bitward-vw-2fa`，:18097）經 API 開 2FA → **CLI** 兩步登入（stdin 依序收
+密碼／因子／碼）→ 錯碼被拒且錯誤可懂 → **GUI** 兩步登入：`shot-48-login-2fa-step.png`
+（因子清單＋驗證碼欄）→ 碼於填入時刻現算（shots 內建 TOTP，免預計算撞邊界）→
+`shot-49-vault-after-2fa.png`（進庫＋鏡像非空）。兩段皆斷言 `status` Unlocked＋items≥1。
+挑戰不在 daemon 跨呼叫快取：第二步由呼叫端重發 `Login{password+two_factor}`
+（hash 可決定性重算，daemon 保持無狀態；理由見 `hub::login` 註解）。
+
+```sh
+dev/e2e/login2fa.sh    # 產 shot-48/49，全綠印 LOGIN2FA: ALL PASS（需 docker＋python3＋jq）
+```
+
 注意：垃圾桶與資料夾需要 daemon 支援 `Query.deleted`／`Query.folder` 三態與
 `ListFolders`／`Vault:Restore`／`Vault:Purge`（主線三件套已落地）；批次 2c 的
 編輯欄位增刪改型與原子匯入需要 `FieldEdit::SetType/AppendField/RemoveField`
@@ -137,7 +153,7 @@ access token 壽命約 2 小時；daemon 自 4c 起**自動續期**（401 出口
 | `export.rs` | 未加密 JSON 匯出：逐筆 Get(Reveal) → `~/Downloads/bitward-export-<UTC>.json`（0600） |
 | `theme.rs` | 設計 tokens：視圖層唯一顏色與尺寸真相源，禁散落 hex／魔數。**雙槽色板**（light＝官方淺色皮：白底、#175DDC 藍、6px 小圓角；dark＝藍紫暗色皮），語意色、文字三級、密度常量（三欄寬/列高/字級/留白/開關幾何）；外觀由 `set_color_scheme` 三態驅動、樣式閉包即時翻轉 |
 | `ui.rs` | 共用小元件：按鈕（primary 藍實色/ghost/destructive）、型別磚（單色字形，monogram 退役）、徽章、表單欄、下拉列、模態殼（absolute 鋪滿 + 置中白卡）、確認/改密模態、複製鈕 |
-| `shots.rs` | `NSH_GUI_SHOTS` 自我截圖器（AppKit `cacheDisplayInRect` 路徑，不需 TCC；objc2 經 `nsh_platform_macos` 再匯取）；`NSH_GUI_SHOTS_DRAIN` 徽章收斂時間軸；`NSH_GUI_SHOTS_LOGIN` 登入卡時間軸（gui-login.sh 驅動） |
+| `shots.rs` | `NSH_GUI_SHOTS` 自我截圖器（AppKit `cacheDisplayInRect` 路徑，不需 TCC；objc2 經 `nsh_platform_macos` 再匯取）；`NSH_GUI_SHOTS_DRAIN` 徽章收斂時間軸；`NSH_GUI_SHOTS_LOGIN` 登入卡時間軸（gui-login.sh 驅動）；`NSH_GUI_SHOTS_LOGIN2FA` 登入第二步時間軸（login2fa.sh 驅動，碼填入時刻現算） |
 
 導航是 `Route` 狀態機 + `when` 區塊——不用 `nav_stack`（spike FINDINGS
 卡點 4：macOS dev host 不渲染）。
