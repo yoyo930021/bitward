@@ -78,6 +78,19 @@ pub struct Revealed {
     /// 是否有 TOTP seed（解鎖態判定）：詳情節的「有 seed 才出現」閘門，
     /// 區隔「無 seed（靜默收合）」與「有 seed 取碼失敗（可懂一行）」。
     pub totp_available: bool,
+    /// 各網址列的 match 判定（鏡像 `login.uris[].match` 明文整數；順序對齊
+    /// `uris`，缺欄/null＝None 預設）。編輯表單 match 下拉的差量基準
+    /// （同 macOS `ItemView` 的 `uri_matches` 投影）。
+    pub uri_matches: Vec<Option<u8>>,
+}
+
+/// 網站圖示快取態（形態同 macOS `state::IconState`）：缺席＝尚未請求；
+/// `Loading` 即單飛令牌（同 host 併發只發一次取圖）。`Ready` 存 data: URI。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IconState {
+    Loading,
+    Ready(String),
+    Failed,
 }
 
 /// 資料夾鏡像列（名稱只在解鎖態解密；鎖定態 None＝節點隱藏）。
@@ -412,6 +425,7 @@ impl Hub {
                 .pointer("/login/totp")
                 .and_then(Value::as_str)
                 .is_some(),
+            uri_matches: uri_match_rows(&row.enc_cipher),
         })
     }
 
@@ -438,21 +452,25 @@ impl Hub {
     }
 
     /// TOTP 現算（UseCall::TotpCode 等位物，語意同 daemon `totp()`）：
-    /// 無 seed＝可懂錯字串（UI 靜默收合節）；有 seed 解不開＝另一條錯。
-    /// 回 `(code, valid_for_secs)`，倒數由 UI 心跳遞減、跨週期重取。
-    pub fn totp_code(&self, id: ItemId) -> Result<(String, u32), String> {
+    /// 無 seed＝`Ok(None)`（合法態，UI 靜默收合節，不借錯字串表達）；
+    /// 有 seed 解不開＝Err。回 `(code, valid_for_secs)`，
+    /// 倒數由 UI 心跳遞減、跨週期重取。
+    pub fn totp_code(&self, id: ItemId) -> Result<Option<(String, u32)>, String> {
         let user_key = self.unlocked_user_key().ok_or("尚未解鎖")?;
         let row = self
             .store
             .item(id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "找不到這筆項目".to_owned())?;
+            .map_err(|e| e.to_string())?;
+        let row = match row {
+            Some(r) => r,
+            None => return Err("找不到這筆項目".to_owned()),
+        };
         let Some(seed_env) = row
             .enc_cipher
             .pointer("/login/totp")
             .and_then(Value::as_str)
         else {
-            return Err("此項目沒有 TOTP seed".to_owned());
+            return Ok(None);
         };
         let key = cipher_content_key(&user_key, &row.enc_cipher)
             .ok_or("金鑰解析失敗（item key 解不開）")?;
@@ -462,7 +480,7 @@ impl Hub {
             .map(|d| d.as_secs())
             .unwrap_or_default();
         let code = bw_crypto::totp_code(seed.trim(), now).map_err(|e| e.to_string())?;
-        Ok((code, (30 - now % 30) as u32))
+        Ok(Some((code, (30 - now % 30) as u32)))
     }
 
     /// favicon 取圖（daemon `icon.rs` 的 in-process 等位物）：磁碟快取命中
@@ -617,6 +635,12 @@ impl Hub {
                     format!("field.{index}.type"),
                     Some(bw_vault::type_word(kind.wire() as i64)?.to_string()),
                 )),
+                // match 走 leaf 座標系（uri.<n>.match）明文整數：three_way
+                // 看得見判定改動（同 daemon write_patch 口徑）。
+                FieldEdit::SetUriMatch { index, match_type } => Some((
+                    format!("uri.{index}.match"),
+                    match_type.map(|m| m.to_string()),
+                )),
                 _ => None,
             })
             .collect();
@@ -662,6 +686,7 @@ impl Hub {
                 FieldEdit::RemoveField { index } => format!("field.remove.{index}"),
                 FieldEdit::AppendUri { .. } => "uri.append".to_string(),
                 FieldEdit::RemoveUri { index } => format!("uri.remove.{index}"),
+                FieldEdit::SetUriMatch { index, .. } => format!("uri.{index}.match"),
             })
             .collect();
         let raw = self.store.raw(id).map_err(|e| e.to_string())?;
@@ -736,6 +761,7 @@ impl Hub {
             favorite: false,
             folder_id: None,
             fields: Vec::new(),
+            uri_matches: Vec::new(),
         })?;
         Ok((id, "created"))
     }
@@ -950,6 +976,19 @@ impl Hub {
     }
 }
 
+/// 鏡像 `login.uris[].match` 明文整數投影（順序對齊 uris；缺欄/null＝None）。
+fn uri_match_rows(cipher: &Value) -> Vec<Option<u8>> {
+    cipher
+        .pointer("/login/uris")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .map(|u| u.get("match").and_then(Value::as_u64).map(|m| m as u8))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// 鏡像 `fields[]` → 明文 `CipherField` 列（詳情節與編輯預填用；信封解不開
 /// 的單欄跳過，容忍漂移同 plain_index）。
 fn field_rows(cipher: &Value, dec: &dyn Fn(&str) -> Option<String>) -> Vec<CipherField> {
@@ -1088,7 +1127,10 @@ fn encrypt_login_draft(uk: &bw_crypto::UserKey, d: &CipherDraft, id: ItemId) -> 
         let uris: Vec<Value> = d
             .uris
             .iter()
-            .map(|u| json!({"uri": enc(u), "match": null}))
+            .enumerate()
+            .map(|(i, u)| {
+                json!({"uri": enc(u), "match": d.uri_matches.get(i).copied().flatten().map(|m| m as i64)})
+            })
             .collect();
         login.insert("uris".into(), json!(uris));
     }
@@ -1150,6 +1192,15 @@ fn validate_edits(base: &Value, edits: &[FieldEdit]) -> Result<(), String> {
             FieldEdit::RemoveUri { index } => {
                 if (*index as usize) >= n_uris {
                     return Err(format!("uri.{index} 越界：本項目只有 {n_uris} 列網址"));
+                }
+            }
+            FieldEdit::SetUriMatch { index, match_type } => {
+                if (*index as usize) >= n_uris {
+                    return Err(format!("uri.{index} 越界：本項目只有 {n_uris} 列網址"));
+                }
+                // 官方 UriMatchType：null|0..5（值域預驗同 daemon write_patch）。
+                if match_type.is_some_and(|m| m > 5) {
+                    return Err(format!("match 值域 null|0..5，got {match_type:?}"));
                 }
             }
             FieldEdit::AppendUri { uri } => {
@@ -1430,6 +1481,7 @@ mod tests {
             favorite: false,
             folder_id: None,
             fields: Vec::new(),
+            uri_matches: Vec::new(),
         }
     }
 
@@ -1639,13 +1691,13 @@ mod tests {
                 ..draft("totp-probe")
             })
             .expect("create");
-        let (code, valid_for) = hub.totp_code(id).expect("code");
+        let (code, valid_for) = hub.totp_code(id).expect("ok").expect("code");
         assert_eq!(code.len(), 6);
         assert!(code.chars().all(|c| c.is_ascii_digit()));
         assert!((1..=30).contains(&valid_for));
-        // 無 seed：可懂錯字串（UI 依此靜默收合節）。
+        // 無 seed：合法態 Ok(None)（UI 據此靜默收合節，不靠比對錯字串）。
         let other = hub.create(&draft("no-totp")).expect("create2");
-        assert!(hub.totp_code(other).err().expect("err").contains("沒有 TOTP"));
+        assert_eq!(hub.totp_code(other).expect("ok"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -19,8 +19,9 @@ use std::sync::{Arc, LazyLock};
 
 use bw_proto::ItemId;
 use hub::{Hub, Revealed, Snapshot, data_dir};
-use nsh_base::{dialog, nav_page, nav_stack, theme};
+use nsh_base::{nav_page, nav_stack};
 use nsh_core::prelude::*;
+use ui::Icons;
 
 /// 進程內的中樞（開不起來時把錯誤留給 UI 顯示；JNI 橋同享這個實例）。
 pub(crate) static HUB: LazyLock<Result<Arc<Hub>, String>> = LazyLock::new(|| Hub::open(data_dir()));
@@ -41,7 +42,8 @@ fn native(registry: &mut Registry) {
     registry.register::<App>();
 }
 
-/// 根元件：棧底一頁在「登入／金庫列表」兩態間切換，詳情是 push 上去的一頁。
+/// 根元件：棧底一頁在「登入／金庫列表」兩態間切換，詳情與表單是 push
+/// 上去的頁（手機單欄 push 導航；返回鍵語意見 navprobe 實錄）。
 #[component]
 pub fn App() -> impl IntoElement {
     let hub = match HUB.as_ref() {
@@ -51,23 +53,27 @@ pub fn App() -> impl IntoElement {
     let phase = signal(Phase::SignedOut);
     let status = signal(String::new());
     let selected = signal(None::<ItemId>);
-    // 編輯模態的目標（None＝沒開）；`rev` 是寫入後的重算訊號：patch 不改
+    // 編輯頁的目標（None＝沒開）；`rev` 是寫入後的重算訊號：patch 不改
     // 計數、phase 值不動，列表 computed 需要這個獨立扳機。
     let editor = signal(None::<ui::Editor>);
     let rev = signal(0_u64);
     // 明文只存活在這個訊號：詳情頁離開時 set(None) → Zeroizing 歸零。
     // 用 SignalEquals::Never，寫回同值也照樣通知（不讓「值相等」吞掉清零）。
     let plain = signal_with(None::<Revealed>, SignalEquals::Never);
+    // favicon 快取挂根上：列表頁的 effect 寫、詳情磚讀，換頁不丟實圖。
+    let icons = Icons::new();
 
     let hub_vault = hub.clone();
     let hub_login = hub.clone();
     let hub_detail = hub.clone();
     let hub_edit = hub.clone();
+    let icons_vault = icons.clone();
+    let icons_detail = icons;
 
     view()
         .flex_1()
-        .bg(move || theme().background)
-        .text_color(move || theme().foreground)
+        .bg(crate::theme::BASE)
+        .text_color(crate::theme::TEXT_PRIMARY)
         .child(
             nav_stack()
                 .flex_1()
@@ -83,6 +89,7 @@ pub fn App() -> impl IntoElement {
                                     selected,
                                     editor,
                                     rev,
+                                    icons_vault.clone(),
                                 )
                             },
                         )
@@ -93,23 +100,24 @@ pub fn App() -> impl IntoElement {
                     move || selected.get().is_some(),
                     move || {
                         let id = selected.get().unwrap_or_default();
-                        ui::detail_page(hub_detail.clone(), id, selected, plain, editor, phase, rev)
+                        ui::detail_page(
+                            hub_detail.clone(),
+                            id,
+                            selected,
+                            plain,
+                            editor,
+                            phase,
+                            rev,
+                            icons_detail.clone(),
+                        )
+                    },
+                ))
+                // 編輯＝全頁表單（push 在棧上；FAB／詳情「編輯」都走這條）。
+                .child(when(
+                    move || editor.get().is_some(),
+                    move || {
+                        ui::editor_page(hub_edit.clone(), editor, phase, selected, plain, rev)
                     },
                 )),
         )
-        // 編輯模態：覆蓋整個棧（navprobe 實測 `dialog()` 在 Android 渲染正常，
-        // 且系統返回鍵不會誤 pop 底下的頁面）。
-        .child(when(
-            move || editor.get().is_some(),
-            move || {
-                dialog().child(ui::editor_modal(
-                    hub_edit.clone(),
-                    editor,
-                    phase,
-                    selected,
-                    plain,
-                    rev,
-                ))
-            },
-        ))
 }
