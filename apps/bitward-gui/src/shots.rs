@@ -1065,8 +1065,10 @@ pub fn script_cand(dir: PathBuf, core: AppCore) {
     let d2 = dir.clone();
     at(5600, move || capture(&d2, "cand-2-archived.png"));
     let c = core.clone();
-    at(6200, move || {
-        c.send(Cmd::ToggleArchived);
+    at(6200, move || c.send(Cmd::ToggleArchived));
+    let c = core.clone();
+    at(7600, move || {
+        // 退出封存的 ListLoaded 已回（4600→6200→回包），此時才找得到主榜項目。
         let id = c
             .items
             .get()
@@ -1078,16 +1080,16 @@ pub fn script_cand(dir: PathBuf, core: AppCore) {
         }
     });
     let d3 = dir.clone();
-    at(7400, move || capture(&d3, "cand-3-detail-view.png"));
+    at(8800, move || capture(&d3, "cand-3-detail-view.png"));
     let c = core.clone();
-    at(7800, move || {
+    at(9200, move || {
         if let Route::Detail(id) = c.route.get() {
             c.send(Cmd::OpenEdit(id));
         }
     });
     let d4 = dir.clone();
-    at(9000, move || capture(&d4, "cand-4-detail-edit.png"));
-    at(9500, quit);
+    at(10600, move || capture(&d4, "cand-4-detail-edit.png"));
+    at(11200, quit);
     at(60000, || {
         eprintln!("bitward-gui: 實拍 60 秒未完成");
         std::process::exit(1);
