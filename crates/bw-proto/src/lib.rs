@@ -430,6 +430,31 @@ pub enum VaultCall {
     GetIcon {
         host: String,
     },
+    /// 置尾（同上紀律）：**報告儀表板**三操作（子孫見 `Reports`）。回包全部
+    /// 去敏——重用只回 id 群集（`Response::DupGroups`）、弱密碼只回分數
+    /// （`Response::Json`，明文只在 daemon 打分閉包內存活、不落盤）、
+    /// 歷史只回日期＋解密名稱＋uri 數（名稱出口屬 Identity 級，同列表鏡像）。
+    Reports {
+        sub: Reports,
+    },
+}
+
+/// 報告面（VaultCall::Reports 子孫；置尾紀律同宿主）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum Reports {
+    /// 重用密碼報告：既有 `FindDuplicates` 的 (host, username) 群集投影換形，
+    /// 資料源同一條（`Response::DupGroups`），不另起掃描。
+    PasswordReuse,
+    /// 弱密碼報告：鏡像全量解密打分（需解鎖態；未解鎖回 `Locked`），
+    /// `bw_crypto::password_score` < 3 列管。回應 `Response::Json`
+    /// （{"threshold":3,"items":[{"id","name","score"}]}，分數升序）。
+    WeakPasswords,
+    /// 項目版本歷史：代理伺服器 `GET /api/ciphers/{id}/history`（官方舊版線格式，
+    /// 查證記錄見 daemon `reports_cipher_history`）。VW 1.37.2 未實裝該路由
+    /// （實錄 404）→ 回 {"supported":false,"versions":[]}，GUI 據此收合歷史節。
+    CipherHistory {
+        id: ItemId,
+    },
 }
 
 /// WebAuthn passkey 操作（macOS autofill 契約 §1）：金鑰與業務全在 daemon，

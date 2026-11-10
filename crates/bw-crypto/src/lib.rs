@@ -14,6 +14,7 @@ mod generator;
 mod kdf;
 mod passkey;
 mod rsa;
+mod strength;
 mod totp;
 
 // b64/b64url helper（base64 crate 手寫包裝）：daemon 的 keyValue 明文形態用 b64。
@@ -40,6 +41,7 @@ pub use rsa::{
     OaepHash, RsaKeyPair, decrypt_private_key, generate_rsa_keypair, rsa_decrypt, rsa_encrypt,
     unwrap_org_key, unwrap_org_key_rsa, wrap_org_key,
 };
+pub use strength::password_score;
 pub use totp::{
     Otpauth, TotpAlgorithm, TotpParams, generate_uri as totp_generate_uri, parse_otpauth,
     totp_code_with,
