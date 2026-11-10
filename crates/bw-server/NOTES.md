@@ -99,3 +99,18 @@
 - **不做附件上傳本身**：契约只要「取 URL」；實際位元組推送（含 multipart/PUT 兩態）由呼叫方
   （bw-sync 的 blob 佇列）拿 `AttachmentUpload.url` + `.method` 去做。
 - **沒有 org/collection 管理面**：`docs/research/protocol.md` §3 的 Public API 不在本層（刻意不做）。
+
+## Send 端點（sends.rs）
+
+| 端點 | 形態 | 來源 |
+|---|---|---|
+| `GET /api/sends` | `{data:[send…], object:"list", continuationToken:null}` | https://github.com/dani-garcia/vaultwarden/blob/1.37.2/src/api/core/sends.rs（`get_sends`）；dev 容器實錄 2026-11-10 |
+| `POST /api/sends` | 文字 send 建立；`type=1` 被擋（"File sends should use /api/sends/file"）；deletionDate>31 天回 400 | 同上 `post_send`/`create_send`；實錄 |
+| `POST /api/sends/file/v2` | 檔案建立第一段：`{fileUploadType:0, url:"/sends/{id}/file/{fileId}", sendResponse}` | 同上 `post_send_file_v2`；官方 https://github.com/bitwarden/server/blob/9ebe16587175b1c0e9208f84397bb75d0d595510/src/Api/Tools/Controllers/SendsController.cs#L165 |
+| `POST {api}/sends/{id}/file/{fileId}` | 第二段 multipart 欄位 `data`；filename 逐字比對 `fileName`（信封字串）、位元組數＝登記 `fileLength`（不符 400） | sends.rs `post_send_file_v2_data`；實錄 |
+| `GET /api/sends/{id}`、`DELETE /api/sends/{id}`、`PUT /api/sends/{id}` | 單取／刪（200 空體）／全量更新（password 有值才重哈希、type 不可變、file data 不動） | sends.rs `get_send`/`delete_send`/`update_send_from_data` |
+| `PUT /api/sends/{id}/remove-password` | 清密碼，回更新後 send（`password:null, authType:2`） | 同上 `put_remove_password`；實錄 |
+| 接收方 `POST /api/sends/access/{accessId}` | 無 bearer；body `{password}`（wire 哈希字串）→ send-access；401 缺、400 錯、404 耗盡/到期/dead | 同上 `post_access_legacy`；實錄三態 |
+| 接收方檔案 `POST /api/sends/{id}/access/file/{fileId}` | 無 bearer；→ `{url}`（5 分鐘簽名 `?t=JWT`）；accessCount 在**下載時**才 +1 | 同上 `post_access_file_legacy`；實錄 |
+| `/api/accounts/sends*`、`/api/public/sends*` | **不存在**（實錄 404）——路由在 `sends`，無 accounts/public 前綴 | dev 容器 2026-11-10 直打；官方雲同為 `[Route("sends")]` |
+| send `accessId` | `base64url_nopad(uuid bytes)`；分享 URL＝`{webVault}#/send/{accessId}/{b64url(seed)}` | https://github.com/dani-garcia/vaultwarden/blob/1.37.2/src/db/models/send.rs（`to_json`）；clients `apps/web/.../send-success-drawer-dialog.component.ts`（`getSendUrl()+accessId+"/"+urlB64Key`） |

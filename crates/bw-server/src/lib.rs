@@ -30,6 +30,7 @@ pub mod error;
 pub mod json;
 pub mod notify;
 pub mod profile;
+pub mod sends;
 pub mod vault;
 
 pub use auth::{
@@ -39,6 +40,7 @@ pub use auth::{
 pub use error::{ApiError, ServerError};
 pub use notify::{NotificationMode, Notifications, ServerEvent, UpdateType};
 pub use profile::{Quirk, ServerProbe, ServerUrls, feature};
+pub use sends::SendFileUpload;
 pub use vault::{AttachmentDownload, AttachmentUpload, DeleteKind, NewAttachment, SyncResponse};
 
 pub use bw_proto::{ItemId, ServerKind, ServerProfile};

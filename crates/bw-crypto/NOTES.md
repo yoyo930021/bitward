@@ -75,3 +75,14 @@ hash 為「客戶端 100,001 次 + 伺服器 100,000 次」；https://bitwarden.
 - 官方 `hkdfSalt="bitwarden"`（extract+salt 模式）只用於 Secrets Manager
   機器金鑰（`bitwarden/sdk-sm` 路徑），vault 解鎖路徑不用——勿混用，
   否則解不出 Protected Symmetric Key。
+
+## Send 金鑰鏈（send.rs）
+
+| 參數 | 值 | 來源 |
+|---|---|---|
+| seed 長度 | 16 bytes | https://github.com/bitwarden/sdk-internal `crates/bitwarden-send/src/access.rs`（`SEND_KEY_LEN = 16`） |
+| 拉伸 | PRK=HMAC-SHA256(key="bitwarden-send", msg=seed)；HKDF-SHA256 **Expand-only**、info="send"、L=64（enc‖mac） | https://github.com/bitwarden/sdk-internal `crates/bitwarden-crypto/src/keys/shareable_key.rs`（`derive_shareable_key(seed, "send", Some("send"))`，註解自認同舊 jslib `makeSendKey`） |
+| wire `key` 欄 | seed 位元組以 user key 包的 type-2 信封 | 同上 `send.rs` encrypt：`OctetStreamBytes::from(k).encrypt(ctx, user_key)`；clients `domain/send.ts` decrypt 對照 |
+| 內容欄加密 | name/notes/text.text/file.fileName 用**拉伸後**金鑰直接當 enc/mac（同 item key 用法） | `send.rs` encrypt：`self.name.encrypt(ctx, send_key)` |
+| 取用密碼 | `b64(PBKDF2-HMAC-SHA256(password, salt=seed, 100_000, 32))`，建立與接收同字串上線 | `send.rs`：`pbkdf2(password.as_bytes(), &k, SEND_ITERATIONS)`、`SEND_ITERATIONS=100_000`；VW 1.37.2 實錄：伺服器把收到的字串再走自家 PBKDF2（隨機 salt）落庫、接收方原樣回傳比對（400/401/404 三態見 bw-server/NOTES.md） |
+| KAT | seed `0011…eeff` → 拉伸 `9f48c08e…fb021ba5c`；`password_hash("hunter2")`=`IUfRQWngrzaQ9yDeP5jdidY+TbsIpwLrvaezPw/pemk=` | 本專案獨立實作（python hmac/hashlib）釘選，單測 `stretch_kat_against_official_derivation`／`password_hash_kat` |

@@ -14,6 +14,7 @@ mod generator;
 mod kdf;
 mod passkey;
 mod rsa;
+mod send;
 mod strength;
 mod totp;
 
@@ -41,6 +42,7 @@ pub use rsa::{
     OaepHash, RsaKeyPair, decrypt_private_key, generate_rsa_keypair, rsa_decrypt, rsa_encrypt,
     unwrap_org_key, unwrap_org_key_rsa, wrap_org_key,
 };
+pub use send::{SEND_SEED_LEN, SendKey, unwrap_seed};
 pub use strength::password_score;
 pub use totp::{
     Otpauth, TotpAlgorithm, TotpParams, generate_uri as totp_generate_uri, parse_otpauth,
