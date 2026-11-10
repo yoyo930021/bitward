@@ -161,12 +161,18 @@ enum Cmd {
         /// 附加 hidden 欄 `k=v`，可重複
         #[arg(long = "append-field!")]
         appends_hidden: Vec<String>,
-        /// 附加 boolean 欄 `k=true|false`，可重複
+        /// 附加自訂欄 `k=true|false`，可重複
         #[arg(long = "append-field?")]
         appends_bool: Vec<String>,
         /// 移除自訂欄（0 起 index），可重複
         #[arg(long = "remove-field")]
         removes: Vec<u32>,
+        /// 附加網址列（官方形態新列 match=null），可重複
+        #[arg(long = "append-uri")]
+        append_uris: Vec<String>,
+        /// 移除網址列（0 起 index），可重複
+        #[arg(long = "remove-uri")]
+        remove_uris: Vec<u32>,
         /// 清除欄位，可重複
         #[arg(long = "clear")]
         clears: Vec<String>,
@@ -1236,6 +1242,8 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             appends_hidden,
             appends_bool,
             removes,
+            append_uris,
+            remove_uris,
             clears,
             secret_stdin,
         } => {
@@ -1280,6 +1288,12 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             }
             for r in removes {
                 edits.push(FieldEdit::RemoveField { index: *r });
+            }
+            for u in append_uris {
+                edits.push(FieldEdit::AppendUri { uri: u.clone() });
+            }
+            for r in remove_uris {
+                edits.push(FieldEdit::RemoveUri { index: *r });
             }
             for c in clears {
                 edits.push(FieldEdit::Set {

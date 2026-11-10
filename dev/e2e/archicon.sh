@@ -119,4 +119,28 @@ if D icon "../etc" /tmp/ac-x.png >/dev/null 2>&1; then
 fi
 pass "非法 host（路徑穿越）擋在 daemon 邊界"
 
+# —— 5) uri 陣列操作：編輯增列 → REST 直讀 uris 兩筆 → 刪列收斂 ——
+D new --name uritarget --uri https://one.ac.test >/dev/null
+drained 60 || fail "uritarget 建立未收斂"
+UID_=$(D ls --json | jq -r '.[] | select(.meta.name=="uritarget") | .meta.id')
+D edit "$UID_" --append-uri https://two.ac.test >/dev/null
+drained 60 || fail "uri 增列未推完"
+U1=$(curl -fsS -H "Authorization: Bearer $TOK" "$SRV/api/ciphers/$UID_")
+[[ "$(jq '.login.uris | length' <<<"$U1")" == "2" ]] || fail "REST 端 uris 非兩筆（增列失效）"
+jq -r '.login.uris[1].uri' <<<"$U1" | grep -q '^2\.' || fail "新增 uri 列非信封字串"
+[[ "$(jq '.login.uris[1].match' <<<"$U1")" == "null" ]] || fail "新列 match 非 null（官方形態漂移）"
+# 刪首列後收斂：剩一筆且內容解得回 two（刪錯列會在此現形）
+D edit "$UID_" --remove-uri 0 >/dev/null
+drained 60 || fail "uri 刪列未推完"
+D sync >/dev/null
+U2=$(curl -fsS -H "Authorization: Bearer $TOK" "$SRV/api/ciphers/$UID_")
+[[ "$(jq '.login.uris | length' <<<"$U2")" == "1" ]] || fail "REST 端 uris 未收斂至一筆"
+[[ "$(D get "$UID_" --view masked --json | jq -r '.meta.uris[0]')" == "https://two.ac.test" ]] \
+  || fail "刪後存活列內容錯誤（刪錯列或索引位移）"
+# 越界刪列入列前拒（鏡像不動）
+if D edit "$UID_" --remove-uri 7 >/dev/null 2>&1; then fail "越界 RemoveUri 竟被接受"; fi
+[[ "$(D get "$UID_" --view masked --json | jq '.meta.uris | length')" == "1" ]] \
+  || fail "越界拒絕後鏡像被污染"
+pass "uri 增刪列：REST 直讀兩筆→一筆、存活列內容正確、越界擋在入列前"
+
 echo "ARCHICON E2E: ALL PASS"

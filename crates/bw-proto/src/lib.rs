@@ -703,6 +703,18 @@ pub enum FieldEdit {
     RemoveField {
         index: u32,
     },
+    /// 附加網址列（落 `login.uris[]` 尾；官方形態 `{uri:<信封>, match:null}`）。
+    /// 陣列形態變更＝全 PUT 路徑（查證 2026-11-10：VW partial 端點只收
+    /// folderId/favorite——既有 quirk；bw-sync `uri.<n>` 文法僅 leaf 值編輯，
+    /// 增刪不在該路徑）。欄位級合併把增刪視為 `uri.<n>` 同族索引位移：
+    /// 雙端各自改同索引列＝衝突收件匣（比照 field type×值紀律，不靜默）。
+    AppendUri {
+        uri: String,
+    },
+    /// 移除網址列（按 index；越界回錯）。
+    RemoveUri {
+        index: u32,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1588,6 +1600,10 @@ mod tests {
                 },
             },
             FieldEdit::RemoveField { index: 2 },
+            FieldEdit::AppendUri {
+                uri: "https://new.example".into(),
+            },
+            FieldEdit::RemoveUri { index: 0 },
         ];
         let msg = ClientMsg::Invoke {
             rid: 15,
@@ -1605,6 +1621,11 @@ mod tests {
             } => {
                 assert!(matches!(edits[2], FieldEdit::SetType { index: 1, .. }));
                 assert!(matches!(edits[4], FieldEdit::RemoveField { index: 2 }));
+                assert!(matches!(
+                    &edits[5],
+                    FieldEdit::AppendUri { uri } if uri == "https://new.example"
+                ));
+                assert!(matches!(edits[6], FieldEdit::RemoveUri { index: 0 }));
             }
             other => panic!("expect Patch, got {other:?}"),
         }

@@ -143,6 +143,11 @@ impl Hub {
             .and_then(Value::as_array)
             .map(Vec::len)
             .unwrap_or(0);
+        let n_uris = base
+            .pointer("/login/uris")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0);
         for e in edits {
             match e {
                 FieldEdit::SetType { index, .. } | FieldEdit::RemoveField { index } => {
@@ -150,6 +155,18 @@ impl Hub {
                         return Err(denied(format!(
                             "field.{index} 越界：本項目只有 {n_fields} 個自訂欄位"
                         )));
+                    }
+                }
+                FieldEdit::RemoveUri { index } => {
+                    if (*index as usize) >= n_uris {
+                        return Err(denied(format!(
+                            "uri.{index} 越界：本項目只有 {n_uris} 列網址"
+                        )));
+                    }
+                }
+                FieldEdit::AppendUri { uri } => {
+                    if uri.trim().is_empty() {
+                        return Err(denied("AppendUri 需要網址"));
                     }
                 }
                 FieldEdit::AppendField { field } => {
@@ -216,8 +233,8 @@ impl Hub {
                 };
                 let ours = bw_vault::apply_merged(&base, &map, &enc);
                 // 陣列形態操作（Set 型 leaf 做不到的增刪）：先刪（索引由大而小，
-                // 免位移）後附加，全部落在 ours 副本上。
-                Some(apply_field_ops(
+                // 免位移）後附加，全部落在 ours 副本上。uri 與 field 同族紀律。
+                let ours = apply_field_ops(
                     ours,
                     &edits
                         .iter()
@@ -230,6 +247,24 @@ impl Hub {
                         .iter()
                         .filter_map(|e| match e {
                             FieldEdit::AppendField { field } => Some(field),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                    &enc,
+                );
+                Some(apply_uri_ops(
+                    ours,
+                    &edits
+                        .iter()
+                        .filter_map(|e| match e {
+                            FieldEdit::RemoveUri { index } => Some(*index as usize),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                    &edits
+                        .iter()
+                        .filter_map(|e| match e {
+                            FieldEdit::AppendUri { uri } => Some(uri.as_str()),
                             _ => None,
                         })
                         .collect::<Vec<_>>(),
@@ -250,6 +285,8 @@ impl Hub {
                 FieldEdit::SetType { index, .. } => format!("field.{index}.type"),
                 FieldEdit::AppendField { .. } => "field.append".to_string(),
                 FieldEdit::RemoveField { index } => format!("field.remove.{index}"),
+                FieldEdit::AppendUri { .. } => "uri.append".to_string(),
+                FieldEdit::RemoveUri { index } => format!("uri.remove.{index}"),
             })
             .collect();
         let payload = json!({"op": "patch", "base": base, "ours": ours, "touched": touched});
@@ -1098,11 +1135,7 @@ fn apply_field_ops(
         *fields = Value::Array(Vec::new());
     }
     let arr = fields.as_array_mut().expect("fields must be array");
-    let mut dels: Vec<usize> = removes.iter().copied().filter(|i| *i < arr.len()).collect();
-    dels.sort_unstable_by(|a, b| b.cmp(a));
-    for i in dels {
-        arr.remove(i);
-    }
+    remove_indices(arr, removes);
     for f in appends {
         arr.push(json!({
             "name": enc(&f.name),
@@ -1112,6 +1145,50 @@ fn apply_field_ops(
         }));
     }
     ours
+}
+
+/// `login.uris[]` 陣列操作（批次 uri 版）：官方形態 `{uri:<信封>, match:null}`。
+/// 無 login 块的項目（SecureNote 本體）附加時照 apply_merged 的 login_set 紀律
+/// 材料化 login.uris；刪除由大而小免索引位移。
+fn apply_uri_ops(
+    mut ours: Value,
+    removes: &[usize],
+    appends: &[&str],
+    enc: &dyn Fn(&str) -> String,
+) -> Value {
+    if removes.is_empty() && appends.is_empty() {
+        return ours;
+    }
+    let obj = ours.as_object_mut().expect("cipher must be object");
+    let login = obj
+        .entry("login")
+        .or_insert_with(|| serde_json::json!({}));
+    if !login.is_object() {
+        *login = serde_json::json!({});
+    }
+    let login = login.as_object_mut().expect("login must be object");
+    let uris = login
+        .entry("uris")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !uris.is_array() {
+        *uris = Value::Array(Vec::new());
+    }
+    let arr = uris.as_array_mut().expect("uris must be array");
+    remove_indices(arr, removes);
+    for u in appends {
+        arr.push(json!({ "uri": enc(u), "match": null }));
+    }
+    ours
+}
+
+/// 索引刪除共同段：越界索引寬容跳過（ theirs 收縮由 merge 端處理，
+/// 這裡只守 ours），降序執行免位移。
+fn remove_indices(arr: &mut Vec<Value>, removes: &[usize]) {
+    let mut dels: Vec<usize> = removes.iter().copied().filter(|i| *i < arr.len()).collect();
+    dels.sort_unstable_by(|a, b| b.cmp(a));
+    for i in dels {
+        arr.remove(i);
+    }
 }
 
 fn cipher_id(c: &Value) -> Option<ItemId> {
@@ -1772,6 +1849,67 @@ mod tests {
         // 上限 500 防呆
         let many = vec![bw_proto::ImportItem::default(); 501];
         assert!(hub.write_import("s", &many, false).await.is_err());
+    }
+
+    /// uri 陣列操作（小批 uri 版）：AppendUri 落 `{uri:信封, match:null}`
+    /// 官方形態、RemoveUri 由大而小免位移；越界與空網址入列前拒。
+    #[tokio::test]
+    async fn patch_uri_append_remove_ops() {
+        let (hub, _d) = unlocked_hub("uriops").await;
+        let user = hub
+            .machine
+            .with_keys(|kb| kb.user_key().as_bytes().to_vec())
+            .unwrap();
+        let id = Uuid::new_v4();
+        hub.store
+            .put_mirror(
+                id,
+                &json!({
+                    "id": id.to_string(), "type": 1, "name": enc(&user, "n"),
+                    "login": {"uris": [{"uri": enc(&user, "https://one.test"), "match": null}]}
+                }),
+            )
+            .unwrap();
+        hub.write_patch(
+            "s",
+            id,
+            &[
+                FieldEdit::AppendUri {
+                    uri: "https://two.test".into(),
+                },
+                FieldEdit::AppendUri {
+                    uri: "https://three.test".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        let m = hub.store.item(id).unwrap().unwrap().enc_cipher;
+        let uris = m["login"]["uris"].as_array().unwrap();
+        assert_eq!(uris.len(), 3);
+        assert_eq!(
+            dec(&user, uris[2]["uri"].as_str().unwrap()).as_deref(),
+            Some("https://three.test")
+        );
+        assert!(uris[2]["match"].is_null(), "官方新列形態 match:null");
+        // 刪首列：剩下 two/three 前移
+        hub.write_patch("s", id, &[FieldEdit::RemoveUri { index: 0 }])
+            .await
+            .unwrap();
+        let m = hub.store.item(id).unwrap().unwrap().enc_cipher;
+        let uris = m["login"]["uris"].as_array().unwrap();
+        assert_eq!(uris.len(), 2);
+        assert_eq!(
+            dec(&user, uris[0]["uri"].as_str().unwrap()).as_deref(),
+            Some("https://two.test")
+        );
+        // 預驗：越界 index 與空網址擋在入列前
+        assert!(hub.write_patch("s", id, &[FieldEdit::RemoveUri { index: 9 }]).await.is_err());
+        assert!(
+            hub.write_patch("s", id, &[FieldEdit::AppendUri { uri: "  ".into() }])
+                .await
+                .is_err()
+        );
     }
 
     /// 批次 B 封存：鏡像立即帶 archivedDate（列表即時反映）、outbox 入列
