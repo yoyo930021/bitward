@@ -28,6 +28,7 @@ pub fn pane(core: AppCore) -> View {
     let editing = matches!(core.route.get(), Route::Edit(_));
     let totp_cond = core.clone();
     let pk_cond = core.clone();
+    let hist_cond = core.clone();
     view()
         .flex_col()
         .flex_1()
@@ -66,6 +67,15 @@ pub fn pane(core: AppCore) -> View {
                     {
                         let pk_build = core.clone();
                         move || section("Passkeys", passkey_rows(pk_build.clone()))
+                    },
+                ))
+                .child(when(
+                    // 歷史節（路線 4）：有版本才渲染。回包 `supported:false`
+                    // （VW 等未實裝 history 路由的 server）→ versions 恆空 → 缺席。
+                    move || !crate::reports::history_versions(&hist_cond.history.get()).is_empty(),
+                    {
+                        let hist_build = core.clone();
+                        move || section("歷史", history_rows(hist_build.clone()))
                     },
                 ))
                 .child(section("資訊", info_section(core.clone(), copied))),
@@ -567,6 +577,60 @@ fn passkey_rows(core: AppCore) -> Vec<View> {
                 }))
         })
         .collect()
+}
+
+/// 歷史節（路線 4）：每版本一列＝解密名稱＋時間＋uri 數；唯讀展示。
+/// 資料源 `Reports:CipherHistory`（daemon 代理伺服器端點，各版本名稱以其
+/// 自帶 key 信封解密；查證與不支援語意見 daemon datamanage.rs 註解）。
+/// 伺服器端無「從歷史還原」端點（restoreSupported:false）→ 節尾註記，不硬做。
+fn history_rows(core: AppCore) -> Vec<View> {
+    let report = core.history.get();
+    let mut rows: Vec<View> = crate::reports::history_versions(&report)
+        .into_iter()
+        .map(|e| {
+            let date = e
+                .get("creationDate")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let date: String = date.replacen('T', " ", 1).chars().take(16).collect();
+            let name = e
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("（無法解密）");
+            let uris = e
+                .get("uriCount")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or_default();
+            view()
+                .flex_col()
+                .gap_1()
+                .px_3()
+                .py_2()
+                .rounded(px(theme::RADIUS_BLOCK))
+                .bg(theme::SURFACE)
+                .overflow_hidden()
+                .child(
+                    text(name.to_owned())
+                        .text_size(px(theme::TEXT_FIELD_VALUE))
+                        .text_color(theme::TEXT_PRIMARY)
+                        .number_of_lines(1),
+                )
+                .child(
+                    text(format!("{date} · 網址 {uris} 列"))
+                        .text_size(px(theme::TEXT_PAGE_SUB))
+                        .text_color(theme::TEXT_MUTED),
+                )
+        })
+        .collect();
+    if report.get("restoreSupported").and_then(serde_json::Value::as_bool) != Some(true) {
+        rows.push(view().child(
+            text("版本還原：此伺服器不提供還原端點，歷史為唯讀")
+                .text_size(px(theme::TEXT_PAGE_SUB))
+                .text_color(theme::TEXT_MUTED),
+        ));
+    }
+    rows
 }
 
 /// 單筆附件列。

@@ -1042,7 +1042,7 @@ impl TwoFactorProviderInfo {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DupGroup {
     pub domain: String,
     pub ids: Vec<ItemId>,

@@ -44,6 +44,16 @@ pub enum Route {
     Approvals,
     /// 本機設定檢視（右欄視角，側欄「設定」進入；macOS 設定面）。
     Settings,
+    /// 報告儀表板（右欄視角，側欄「報告」進入；卡面→清單兩層同訊號切換）。
+    Reports,
+}
+
+/// 報告視角的兩態（儀表板卡面／清單）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReportsTab {
+    Cards,
+    Reuse,
+    Weak,
 }
 
 /// 確認對話框（刪除、匯出共用）；`on_confirm` 是確認後要投遞的命令。
@@ -277,6 +287,18 @@ pub enum Cmd {
     /// 本機設定（macOS 設定面）：右欄視角、讀取、改即存。
     OpenSettings,
     FetchSettings,
+    /// 報告儀表板（路線 4）：卡面彙整＋兩份清單＋詳情頁歷史節。
+    OpenReports,
+    ShowReportsTab(ReportsTab),
+    FetchReuse,
+    FetchWeak,
+    ReuseLoaded(Arc<Vec<bw_proto::DupGroup>>),
+    WeakLoaded(Arc<serde_json::Value>),
+    FetchHistory(ItemId),
+    HistoryLoaded {
+        item: ItemId,
+        report: Arc<serde_json::Value>,
+    },
     /// 事件驱动的鎖態刷新（daemon `LockStateChanged` 廣播：自動鎖定沒有
     /// 人按的呼叫，界面只能靠事件看見；Status 屬輪詢豁免、不會餵活計時器）。
     RefreshStatus,
@@ -798,6 +820,12 @@ pub struct AppCore {
     pub settings: Signal<bw_proto::Settings>,
     /// 詳情頁 Passkeys（GetPasskeys 按 item 過濾後的快取；離開詳情即清）。
     pub passkeys: Signal<Arc<Vec<bw_proto::PasskeyEntry>>>,
+    /// 報告儀表板：視角兩態＋兩份報告鏡（daemon 現算、每次進入重取，不落盤）。
+    pub reports_tab: Signal<ReportsTab>,
+    pub reports_reuse: Signal<Arc<Vec<bw_proto::DupGroup>>>,
+    pub reports_weak: Signal<Arc<serde_json::Value>>,
+    /// 詳情頁歷史節（Reports:CipherHistory 回包鏡；離開詳情即清，有才渲染）。
+    pub history: Signal<Arc<serde_json::Value>>,
 }
 
 impl AppCore {
@@ -865,6 +893,10 @@ impl AppCore {
             theme_mode: signal(Appearance::System),
             settings: signal(bw_proto::Settings::default()),
             passkeys: signal(Arc::new(Vec::new())),
+            reports_tab: signal(ReportsTab::Cards),
+            reports_reuse: signal(Arc::new(Vec::new())),
+            reports_weak: signal(Arc::new(serde_json::json!({"threshold": bw_proto::WEAK_PASSWORD_THRESHOLD, "items": []}))),
+            history: signal(Arc::new(serde_json::json!({"supported": false, "versions": []}))),
             form: FormFields {
                 name: signal(String::new()),
                 username: signal(String::new()),
@@ -969,6 +1001,7 @@ impl AppCore {
         self.att_upload_path.set(String::new());
         self.att_upload_open.set(false);
         self.passkeys.set(Arc::new(Vec::new()));
+        self.history.set(Arc::new(serde_json::json!({"supported": false, "versions": []})));
     }
 }
 
@@ -1118,6 +1151,9 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                     // Passkeys 節（有才渲染）：GetPasskeys 按 item 過濾，
                     // 走 quiet 連線（鎖定態回 Locked 屬正常缺席，不閃橫條）。
                     core.send(Cmd::FetchPasskeys(id));
+                    // 歷史節（有才渲染）：代理伺服器端點，VW 等未實裝路由的
+                    // server 回 supported:false＋空 versions → 整節缺席。
+                    core.send(Cmd::FetchHistory(id));
                 }
             }
         }
@@ -1891,6 +1927,66 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         Cmd::SettingsLoaded(v) => {
             core.settle();
             core.settings.set(v);
+        }
+        Cmd::OpenReports => {
+            core.leave_detail();
+            core.sort_menu.set(false);
+            core.route.set(Route::Reports);
+            core.reports_tab.set(ReportsTab::Cards);
+            core.send(Cmd::FetchReuse);
+            core.send(Cmd::FetchWeak);
+        }
+        Cmd::ShowReportsTab(tab) => {
+            core.reports_tab.set(tab);
+        }
+        Cmd::FetchReuse => {
+            // 重用掃描需金鑰（daemon 端 with_keys）：鎖定態回錯屬正常缺席，
+            // 走 quiet 不閃橫條（卡面以「需解鎖」佔位語意呈現）。
+            core.ipc_quiet(|s| match s.call(&Call::Vault(VaultCall::Reports {
+                sub: bw_proto::Reports::PasswordReuse,
+            })) {
+                Ok(Response::DupGroups(g)) => Cmd::ReuseLoaded(Arc::new(g)),
+                _ => Cmd::ReuseLoaded(Arc::new(Vec::new())),
+            });
+        }
+        Cmd::FetchWeak => {
+            core.ipc_quiet(|s| match s.call(&Call::Vault(VaultCall::Reports {
+                sub: bw_proto::Reports::WeakPasswords,
+            })) {
+                Ok(Response::Json(v)) => Cmd::WeakLoaded(Arc::new(v)),
+                _ => Cmd::WeakLoaded(Arc::new(serde_json::json!({
+                    "threshold": bw_proto::WEAK_PASSWORD_THRESHOLD, "items": []
+                }))),
+            });
+        }
+        Cmd::ReuseLoaded(g) => {
+            core.settle();
+            core.reports_reuse.set(g);
+        }
+        Cmd::WeakLoaded(v) => {
+            core.settle();
+            core.reports_weak.set(v);
+        }
+        Cmd::FetchHistory(id) => {
+            // 代理伺服器端點：離線／路由缺席都回 supported:false 形態；
+            // 傳輸級失敗靜默（歷史是詳情頁配角，不搶錯誤橫條）。
+            core.ipc_quiet(move |s| match s.call(&Call::Vault(VaultCall::Reports {
+                sub: bw_proto::Reports::CipherHistory { id },
+            })) {
+                Ok(Response::Json(v)) => Cmd::HistoryLoaded {
+                    item: id,
+                    report: Arc::new(v),
+                },
+                _ => Cmd::HistoryLoaded {
+                    item: id,
+                    report: Arc::new(serde_json::json!({"supported": false, "versions": []})),
+                },
+            });
+        }
+        Cmd::HistoryLoaded { item, report } => {
+            if matches!(core.route.get(), Route::Detail(i) | Route::Edit(i) if i == item) {
+                core.history.set(report);
+            }
         }
         Cmd::RefreshStatus => {
             core.ipc_quiet(|s| match s.call(&Call::Sync(SyncCall::Status)) {
