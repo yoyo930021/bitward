@@ -164,13 +164,11 @@ fn credentials_block(core: AppCore) -> View {
         .child(uris_editor(core.clone()))
 }
 
-/// 網址多列編輯器（批次 A＃1）：每列＝uri 輸入框＋（create 面）✕刪列；
-/// 「＋ 新增網址」僅 create——編輯面 daemon patch 只有 `uri.<n>` 就地 Set、
-/// 無 AppendUri/RemoveUri，增刪留 tooltip 註記等 daemon 面。列身份走
-/// `UriDraft.key`（編輯列＝基準索引、新增列＝亂數哨兵），diff 按 key 對齊
-/// 不錯位（`uri_sets`，手法同 `field_edits`）。
+/// 網址多列編輯器（批次 A＃1＋C）：每列＝uri 輸入框＋✕刪列、＋ 新增網址。
+/// 列身份走 `UriDraft.key`（編輯 prefilled 列＝基準索引、新增列＝亂數哨兵），
+/// diff 按 key 對齊不錯位（`uri_edits`：值改 Set、刪列 RemoveUri 遞減、
+/// 新列 AppendUri 落尾——daemon 892c15b 面）。
 pub fn uris_editor(core: AppCore) -> View {
-    let is_create = matches!(core.route.get(), Route::Create);
     let rows = core.form.uris;
     let add_rows = rows;
     let row_rows = rows;
@@ -184,20 +182,11 @@ pub fn uris_editor(core: AppCore) -> View {
                 .font_weight(FontWeight::MEDIUM)
                 .letter_spacing(px(0.4))
                 .text_color(theme::TEXT_SECONDARY),
-        );
-    let label = if is_create {
-        label.child(ui::text_button_dyn(
+        )
+        .child(ui::text_button_dyn(
             || "＋ 新增網址".to_owned(),
             move || add_rows.update(|v| Arc::make_mut(v).push(UriDraft::default())),
-        ))
-    } else {
-        label.child(
-            text("增刪列待 daemon 面")
-                .text_size(px(11.0))
-                .text_color(theme::TEXT_MUTED)
-                .tooltip(ui::tooltip_card("編輯面僅能改值：daemon patch 尚無網址增刪面")),
-        )
-    };
+        ));
     view()
         .flex_col()
         .gap_1p5()
@@ -206,13 +195,13 @@ pub fn uris_editor(core: AppCore) -> View {
             move || (*rows.get()).clone(),
             |u: &UriDraft| u.key,
             move |_item: ReadSignal<UriDraft>, _i: ReadSignal<usize>| {
-                uri_row(row_rows, _item.get().key, is_create)
+                uri_row(row_rows, _item.get().key)
             },
         ))
 }
 
-/// 單列網址：輸入框（按 key 回寫）＋（create 面）✕刪列。
-fn uri_row(rows: Signal<Arc<Vec<UriDraft>>>, key: u32, removable: bool) -> View {
+/// 單列網址：輸入框（按 key 回寫）＋✕刪列。
+fn uri_row(rows: Signal<Arc<Vec<UriDraft>>>, key: u32) -> View {
     let edit = rows;
     let del = rows;
     view()
@@ -247,24 +236,21 @@ fn uri_row(rows: Signal<Arc<Vec<UriDraft>>>, key: u32, removable: bool) -> View 
                 .focus(|s| s.border_color(theme::ACCENT))
                 .flex_1(),
         )
-        .child(when(
-            move || removable,
-            move || {
-                view()
-                    .w(px(theme::COPY_BTN))
-                    .h(px(theme::COPY_BTN))
-                    .rounded(px(theme::RADIUS_CONTROL))
-                    .flex_row()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme::SURFACE_RAISED))
-                    .on_press(move || {
-                        del.update(|v| Arc::make_mut(v).retain(|u| u.key != key));
-                    })
-                    .child(text("✕").text_size(px(11.0)).text_color(theme::TEXT_MUTED))
-            },
-        ))
+        .child(
+            view()
+                .w(px(theme::COPY_BTN))
+                .h(px(theme::COPY_BTN))
+                .rounded(px(theme::RADIUS_CONTROL))
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::SURFACE_RAISED))
+                .on_press(move || {
+                    del.update(|v| Arc::make_mut(v).retain(|u| u.key != key));
+                })
+                .child(text("✕").text_size(px(11.0)).text_color(theme::TEXT_MUTED)),
+        )
 }
 
 /// 型別切換列：建立時可選 登入／加密筆記；Card/Identity 佔位 disabled

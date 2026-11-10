@@ -343,6 +343,8 @@ fn sidebar(core: AppCore) -> View {
     let tree_row = core.clone();
     let trash_sel = core.clone();
     let trash_press = core.clone();
+    let arch_sel = core.clone();
+    let arch_press = core.clone();
     let app_sel = core.clone();
     let app_press = core.clone();
     let app_cnt = core.clone();
@@ -419,6 +421,14 @@ fn sidebar(core: AppCore) -> View {
             || {},
             true,
             Some("組織共享：待 daemon 資料源就緒後開放"),
+            || 0,
+        ))
+        .child(side_item(
+            "已封存".to_owned(),
+            move || arch_sel.filter.get().archived,
+            move || arch_press.send(Cmd::ToggleArchived),
+            false,
+            None,
             || 0,
         ))
         .child(side_item(

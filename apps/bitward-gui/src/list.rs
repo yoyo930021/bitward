@@ -8,6 +8,7 @@ use bw_proto::{ItemView, SortKey};
 use nsh_base::input;
 use nsh_core::prelude::*;
 
+use crate::state;
 use crate::state::{AppCore, Cmd, Route};
 use crate::theme;
 use crate::ui;
@@ -355,7 +356,18 @@ fn row(core: AppCore, at: Position) -> View {
                     }
                 }),
         )
-        .child(ui::type_tile(
+        .child(ui::icon_tile(
+            core.clone(),
+            {
+                let hc = core.clone();
+                move || {
+                    hc.items
+                        .get()
+                        .get(at.index())
+                        .and_then(|v| v.meta.uris.first())
+                        .and_then(|u| state::host_of(u))
+                }
+            },
             move || {
                 kind_core
                     .items
@@ -446,6 +458,10 @@ fn is_selected(core: &AppCore, at: Position) -> bool {
 fn subtitle(item: &ItemView) -> String {
     if let Some(t) = item.meta.deleted_at.as_deref() {
         return format!("已刪除 · {t}");
+    }
+    // 已封存視角（批次 C）：列上顯示封存時間（archived_at）。
+    if let Some(t) = item.meta.archived_at.as_deref() {
+        return format!("已封存 · {t}");
     }
     match item.meta.uris.first() {
         Some(uri) => uri.clone(),

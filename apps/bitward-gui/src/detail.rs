@@ -139,6 +139,7 @@ fn section_dyn(title: &'static str, build: impl Fn() -> Vec<View> + 'static) -> 
 /// 頂部 identity：大 monogram 退役，改型別磚＋大名稱＋網址連結＋動作群。
 fn identity_header(core: AppCore, editing: bool) -> View {
     let name_core = core.clone();
+    let icon_core = core.clone();
     let uri_core = core.clone();
     let uri_open = core.clone();
     let actions_core = core.clone();
@@ -149,7 +150,15 @@ fn identity_header(core: AppCore, editing: bool) -> View {
         .gap_3()
         .px_8()
         .py_4()
-        .child(ui::type_tile(
+        .child(ui::icon_tile(
+            icon_core.clone(),
+            move || {
+                icon_core
+                    .detail
+                    .get()
+                    .and_then(|d| d.meta.uris.first().cloned())
+                    .and_then(|u| state::host_of(&u))
+            },
             move || {
                 name_core
                     .detail
@@ -229,10 +238,10 @@ fn identity_header(core: AppCore, editing: bool) -> View {
                 ),
         )
         .child(dynamic(move || {
-            let trashed = actions_core
-                .detail
-                .get()
-                .is_some_and(|d| d.meta.deleted_at.is_some());
+            let d = actions_core.detail.get();
+            let trashed = d.as_ref().is_some_and(|d| d.meta.deleted_at.is_some());
+            let archived = d.as_ref().is_some_and(|d| d.meta.archived_at.is_some());
+            let item_id = d.as_ref().map(|d| d.meta.id);
             let edit = actions_core.clone();
             let del = actions_core.clone();
             if trashed {
@@ -252,6 +261,12 @@ fn identity_header(core: AppCore, editing: bool) -> View {
                             purge.send(Cmd::AskPurge(id));
                         }
                     }))
+                    .child(
+                        // daemon 語意：垃圾桶內禁直接封存（422）→ UI 前置擋下。
+                        ui::button("封存", ui::Btn::Ghost, || {})
+                            .opacity(0.45)
+                            .tooltip(ui::tooltip_card("先還原再封存")),
+                    )
             } else if editing {
                 // 編輯態頂部鈕：取消（髒走確認框）／儲存（diff 送出）。
                 let cancel = actions_core.clone();
@@ -267,6 +282,8 @@ fn identity_header(core: AppCore, editing: bool) -> View {
                         save.send(Cmd::SubmitForm)
                     }))
             } else {
+                let arch = actions_core.clone();
+                let unarch = actions_core.clone();
                 view()
                     .flex_row()
                     .items_center()
@@ -276,6 +293,22 @@ fn identity_header(core: AppCore, editing: bool) -> View {
                             edit.send(Cmd::OpenEdit(id));
                         }
                     }))
+                    .child(
+                        // 已封存項目改「取消封存」；其餘給「封存」入口（批次 C）。
+                        if archived {
+                            ui::button("取消封存", ui::Btn::Ghost, move || {
+                                if let (Some(id), Route::Detail(_)) = (item_id, unarch.route.get()) {
+                                    unarch.send(Cmd::SetArchived { id, archived: false });
+                                }
+                            })
+                        } else {
+                            ui::button("封存", ui::Btn::Ghost, move || {
+                                if let (Some(id), Route::Detail(_)) = (item_id, arch.route.get()) {
+                                    arch.send(Cmd::SetArchived { id, archived: true });
+                                }
+                            })
+                        },
+                    )
                     .child(ui::button("刪除", ui::Btn::Ghost, move || {
                         if let Route::Detail(id) = del.route.get() {
                             del.send(Cmd::AskDelete(id));

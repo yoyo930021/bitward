@@ -10,6 +10,7 @@ use bw_proto::ItemKind;
 use nsh_base::{input, theme};
 use nsh_core::prelude::*;
 
+use crate::state;
 use crate::state::{AppCore, Cmd, Confirm};
 use crate::theme;
 
@@ -426,6 +427,33 @@ pub fn type_glyph(kind: ItemKind) -> &'static str {
         ItemKind::Identity => "⚷\u{fe0e}",
         ItemKind::SecureNote => "✎\u{fe0e}",
     }
+}
+
+/// 網站圖示磚（批次 C）：host 快取 Ready＝實圖圓角磚；否則字母型別磚。
+/// 「先字母後換圖」：Loading/Failed 都走字母退路，不空白、不閃爍。
+pub fn icon_tile(
+    core: AppCore,
+    host: impl Fn() -> Option<String> + 'static,
+    kind: impl Fn() -> ItemKind + 'static,
+    size: f32,
+    glyph: f32,
+) -> AnyElement {
+    let look = core.clone();
+    dynamic(move || match host().and_then(|h| state::icon_ready(&look, &h)) {
+        Some(uri) => view()
+            .w(px(size))
+            .h(px(size))
+            .rounded(px(size * 0.28))
+            .overflow_hidden()
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .child(image(uri).w(px(size)).h(px(size))),
+        None => {
+            let k = kind();
+            type_tile(move || k, size, glyph)
+        }
+    })
 }
 
 /// 型別磚：淡灰圓角方磚＋單色型別字形（取代 monogram 派生色磚；

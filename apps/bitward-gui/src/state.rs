@@ -9,6 +9,7 @@
 //! - 導航用 `when` 區塊切頁（spike FINDINGS 卡點 4：nav_stack 在 macOS
 //!   dev host 不渲染），Route 是唯一導航真相。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
@@ -78,22 +79,84 @@ pub enum Follow {
 pub struct VaultFilter {
     pub folder: Option<String>,
     pub trash: bool,
+    /// 已封存視角（批次 C）：與垃圾桶／資料夾四態互斥。
+    pub archived: bool,
 }
 
 impl VaultFilter {
-    /// 選資料夾（含未歸屬）：自動退出垃圾桶。`pick_folder(None)`＝回全部項目。
+    /// 選資料夾（含未歸屬）：自動退出垃圾桶與已封存。`pick_folder(None)`＝回全部項目。
     pub fn pick_folder(&mut self, folder: Option<String>) {
         self.folder = folder;
         self.trash = false;
+        self.archived = false;
     }
 
-    /// 垃圾桶切換：進入時退出資料夾（回「全部項目」）。
+    /// 垃圾桶切換：進入時退出資料夾與已封存（回「全部項目」）。
     pub fn toggle_trash(&mut self) {
         self.trash = !self.trash;
         if self.trash {
             self.folder = None;
+            self.archived = false;
         }
     }
+
+    /// 已封存切換：進入時退出資料夾與垃圾桶（四態互斥，同垃圾桶語意）。
+    pub fn toggle_archived(&mut self) {
+        self.archived = !self.archived;
+        if self.archived {
+            self.folder = None;
+            self.trash = false;
+        }
+    }
+}
+
+/// 封存三態查詢（批次 C，同 `deleted_filter` 紀律）：已封存視角 Some(true)，
+/// 主列表 None（不發 Some(false)，舊 daemon 兼容）。
+pub fn archived_filter(archived: bool) -> Option<bool> {
+    archived.then_some(true)
+}
+
+/// 網站圖示快取態（批次 C）：host → 狀態。缺席＝尚未請求；`Loading` 即單飛
+/// 令牌（同 host 併發只發一次 `GetIcon`）。`Ready` 存 data: URI 字串（PNG/ICO
+/// 原樣位元組經 magic 嗅探定 MIME，macOS 端 CGImageSource 兩者皆吃）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IconState {
+    Loading,
+    Ready(String),
+    Failed,
+}
+
+/// magic 嗅探（純函數，單測點）：PNG(`89 50 4E 47`)／ICO(`00 00 01 00`)
+/// 回對應 MIME；其他形態回 None（呼叫端退字母磚，不硬塞未知型別）。
+pub fn sniff_icon(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        Some("image/png")
+    } else if bytes.starts_with(&[0x00, 0x00, 0x01, 0x00]) {
+        Some("image/x-icon")
+    } else {
+        None
+    }
+}
+
+/// 從 uri 字串取 host（純函數，單測點）：去 scheme、userinfo、port、path；
+/// 無點且非 localhost 者視為無效（退回字母磚）。多網址由呼叫端取主 uri。
+pub fn host_of(uri: &str) -> Option<String> {
+    let rest = uri.split_once("://").map(|(_, r)| r).unwrap_or(uri);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let hostport = authority.rsplit('@').next().unwrap_or("");
+    let host = hostport.split(':').next().unwrap_or("").trim().to_ascii_lowercase();
+    if host.is_empty() || (!host.contains('.') && host != "localhost") {
+        return None;
+    }
+    Some(host)
+}
+
+/// 位元組 → `data:` URI（magic 決定 MIME；解不了的形態回 None＝字母磚）。
+pub fn icon_data_uri(bytes: &[u8]) -> Option<String> {
+    use base64::Engine;
+    let mime = sniff_icon(bytes)?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Some(format!("data:{mime};base64,{b64}"))
 }
 
 /// 資料夾鏡像列（ListFolders 投影）：鎖定態 name 為 null → 節點隱藏。
@@ -191,6 +254,18 @@ pub enum Cmd {
     SetTheme(Appearance),
     /// 垃圾桶切換（側欄列；None 視角＝一般列表）。
     ToggleTrash,
+    /// 已封存視角切換（批次 C，四態互斥同垃圾桶）。
+    ToggleArchived,
+    /// 封存／取消封存（daemon `Vault:SetArchived`，官方 archivedDate 語意）。
+    SetArchived {
+        id: ItemId,
+        archived: bool,
+    },
+    /// GetIcon 回包：Ok＝原樣位元組（magic 嗅探定生死）、Err＝字母磚。
+    IconLoaded {
+        host: String,
+        res: Result<Vec<u8>, String>,
+    },
     /// 側欄資料夾節點：None＝全部項目、Some("")＝未歸屬、Some(id)＝該夾。
     ChooseFolder(Option<String>),
     /// 批准中心（批次 6 併入 GUI）：佇列視角、輪詢、單鍵直決。
@@ -390,15 +465,15 @@ impl FormFields {
 }
 
 /// 網址編輯列（批次 A：多網址）。`key`＝基準陣列位置（對齊手法同
-/// `FieldDraft`，刪列/改列不錯位）；`NEW_URI`＝新增列（僅 create 面可送，
-/// daemon patch 目前只有 `uri.<n>` 就地 Set、無 append/remove）。
+/// `FieldDraft`，刪列/改列不錯位）；新增列用亂數哨兵 key（不在基準索引域，
+/// diff 時落入 `AppendUri`，見 `uri_edits`）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UriDraft {
     pub key: u32,
     pub uri: String,
 }
 
-/// 新增列的哨兵 key（見 `UriDraft`）。
+/// 新增列哨兵 key 的取值（語意見 `UriDraft`；實際判別按「key 是否在基準索引域」）。
 pub const NEW_URI: u32 = u32::MAX;
 
 impl Default for UriDraft {
@@ -615,6 +690,8 @@ pub struct AppCore {
     pub folders: Signal<Arc<Vec<FolderEntry>>>,
     /// 待批准佇列（側欄徽章＋右欄佇列視角的共同真相源）。
     pub pending: Signal<Arc<Vec<PendingRow>>>,
+    /// 網站圖示快取（批次 C）：host → 態。單飛＝請求前先插 `Loading`。
+    pub icons: Signal<Arc<HashMap<String, IconState>>>,
     pub sort: Signal<SortKey>,
     pub sort_menu: Signal<bool>,
     pub list_gen: Signal<u64>,
@@ -675,6 +752,7 @@ impl AppCore {
             filter: signal(VaultFilter::default()),
             folders: signal(Arc::new(Vec::new())),
             pending: signal(Arc::new(Vec::new())),
+            icons: signal(Arc::new(HashMap::new())),
             sort: signal(SortKey::Name),
             sort_menu: signal(false),
             list_gen: signal(0),
@@ -900,6 +978,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             if seq == core.list_gen.get() {
                 core.items.set(rows);
                 core.error_text.set(None);
+                request_icons(core);
             }
         }
         // NavForced 已在入口剝殼；走到這裡＝巢狀 Box（不預期），靜默吞掉。
@@ -947,7 +1026,11 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.settle();
             if core.route.get() == Route::Detail(id) {
                 let is_login = row.meta.kind == ItemKind::Login;
+                let host = row.meta.uris.first().and_then(|u| host_of(u));
                 core.detail.set(Some(row));
+                if let Some(h) = host {
+                    request_hosts(core, vec![h]);
+                }
                 // 批次 A：有 seed 與否由 daemon 裁決（投影不帶 seed 存在性），
                 // 進詳情即自動取碼——成功現碼、無 seed 靜默收合、真錯一行。
                 if is_login {
@@ -1389,6 +1472,33 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.route.set(Route::List);
             fetch_list(core);
         }
+        Cmd::ToggleArchived => {
+            core.filter.update(|f| f.toggle_archived());
+            core.leave_detail();
+            core.sort_menu.set(false);
+            core.route.set(Route::List);
+            fetch_list(core);
+        }
+        Cmd::SetArchived { id, archived } => {
+            core.ipc(move |s| match s.call(&Call::Vault(VaultCall::SetArchived { id, archived })) {
+                Ok(Response::Ok) => Cmd::WriteDone { err: None, follow: Follow::List },
+                Ok(other) => Cmd::WriteDone {
+                    err: Some(format!("SetArchived 回應形態不符：{other:?}")),
+                    follow: Follow::List,
+                },
+                Err(e) => Cmd::WriteDone { err: Some(e.display()), follow: Follow::List },
+            });
+        }
+        Cmd::IconLoaded { host, res } => {
+            core.icons.update(|m| {
+                let map = Arc::make_mut(m);
+                let state = match res {
+                    Ok(b) => icon_data_uri(&b).map_or(IconState::Failed, IconState::Ready),
+                    Err(_) => IconState::Failed,
+                };
+                map.insert(host, state);
+            });
+        }
         Cmd::ChooseFolder(folder) => {
             core.filter.update(|f| f.pick_folder(folder));
             core.leave_detail();
@@ -1826,6 +1936,7 @@ pub fn fetch_list(core: &AppCore) {
         sort: core.sort.get(),
         limit: 0,
         deleted: deleted_filter(filter.trash),
+        archived: archived_filter(filter.archived),
         folder: filter.folder.clone(),
         ..Default::default()
     };
@@ -1844,6 +1955,51 @@ pub fn fetch_list(core: &AppCore) {
             Err(e) => Cmd::Failed { err: e.display() },
         }
     });
+}
+
+/// 批次 C favicon：為清單主 uri host 补缺失圖示（單飛＝先插 Loading 再發
+/// `GetIcon`；同 host 併發只一條在途）。失敗/未知形態→字母磚（IconState::Failed）。
+pub fn request_icons(core: &AppCore) {
+    let hosts: Vec<String> = core
+        .items
+        .get()
+        .iter()
+        .filter_map(|v| v.meta.uris.first().and_then(|u| host_of(u)))
+        .collect();
+    request_hosts(core, hosts);
+}
+
+fn request_hosts(core: &AppCore, hosts: Vec<String>) {
+    let mut missing: Vec<String> = Vec::new();
+    core.icons.update(|m| {
+        let map = Arc::make_mut(m);
+        for h in hosts {
+            if !map.contains_key(&h) {
+                map.insert(h.clone(), IconState::Loading);
+                missing.push(h);
+            }
+        }
+    });
+    for host in missing {
+        core.ipc_quiet(move |s| {
+            match s.call(&Call::Vault(VaultCall::GetIcon { host: host.clone() })) {
+                Ok(Response::AttachmentBytes(b)) => Cmd::IconLoaded { host, res: Ok(b) },
+                Ok(other) => Cmd::IconLoaded {
+                    host,
+                    res: Err(format!("GetIcon 回應形態不符：{other:?}")),
+                },
+                Err(e) => Cmd::IconLoaded { host, res: Err(e.display()) },
+            }
+        });
+    }
+}
+
+/// 快取查閱：僅 Ready 回 data URI（Loading/Failed/缺席＝字母磚退路）。
+pub fn icon_ready(core: &AppCore, host: &str) -> Option<String> {
+    match core.icons.get().get(host) {
+        Some(IconState::Ready(uri)) => Some(uri.clone()),
+        _ => None,
+    }
 }
 
 /// 表單送出：Create 走 CipherDraft，Edit 走欄位 diff（FieldEdit）；
@@ -2086,23 +2242,41 @@ pub fn parse_pending(rows: &[serde_json::Value]) -> Vec<PendingRow> {
         .collect()
 }
 
-/// 多網址 diff（純函數，可單測）：以 `key`（基準索引）對齊現況列，值改變者
-/// 發 `uri.<key>` 的 Set（None＝清空該列）。新增列（`NEW_URI`）與刪除在編輯
-/// 面不產 edit（daemon 無 AppendUri/RemoveUri）；create 面走整包 `uris`。
-pub fn uri_sets(orig: &[String], rows: &[UriDraft]) -> Vec<FieldEdit> {
-    rows.iter()
-        .filter_map(|r| {
-            if r.key == NEW_URI {
-                return None;
+/// 多網址 diff（純函數，可單測）：回 (值批, 結構批)。列身份按 `key` 對齊
+/// 基準索引（同 `field_edits` 手法，刪列不錯位）：基準列改值→`uri.<n>` Set；
+/// 基準列消失→`RemoveUri`（索引由大而小，免位移）；新列（key 不在基準）→
+/// `AppendUri`（空白列跳過，daemon 同拒）。結構批與 leaf 批分兩發 Patch，
+/// 天然满足「先值後結構」紀律（AppendUri/RemoveUri 892c15b 落地）。
+pub fn uri_edits(orig: &[String], rows: &[UriDraft]) -> (Vec<FieldEdit>, Vec<FieldEdit>) {
+    let present: std::collections::HashSet<u32> =
+        rows.iter().map(|r| r.key).filter(|k| (*k as usize) < orig.len()).collect();
+    let mut sets = Vec::new();
+    let mut appends = Vec::new();
+    for r in rows {
+        let now = nonblank(r.uri.trim());
+        if let Some(base) = orig.get(r.key as usize).filter(|_| (r.key as usize) < orig.len()) {
+            if now.as_deref() != Some(base.as_str()) {
+                sets.push(FieldEdit::Set {
+                    path: format!("uri.{}", r.key),
+                    value: now,
+                });
             }
-            let base = orig.get(r.key as usize)?;
-            let now = nonblank(r.uri.trim());
-            (now.as_deref() != Some(base.as_str())).then(|| FieldEdit::Set {
-                path: format!("uri.{}", r.key),
-                value: now,
-            })
-        })
-        .collect()
+        } else if now.is_some() {
+            appends.push(FieldEdit::AppendUri {
+                uri: r.uri.trim().to_owned(),
+            });
+        }
+    }
+    let mut removes: Vec<u32> = (0..orig.len() as u32)
+        .filter(|i| !present.contains(i))
+        .collect();
+    removes.sort_by(|a, b| b.cmp(a));
+    let mut structural: Vec<FieldEdit> = removes
+        .into_iter()
+        .map(|index| FieldEdit::RemoveUri { index })
+        .collect();
+    structural.extend(appends);
+    (sets, structural)
 }
 
 /// 表單現值（`edit_delta`／`form_is_dirty` 統一輸入形態；正規化在呼叫端）。
@@ -2142,9 +2316,10 @@ pub fn edit_delta(
             value: f.password.clone(),
         });
     }
-    // 多網址（批次 A）：key 對齊基準逐列 `uri.<n>` Set；新增列在編輯面
-    // 不送出（daemon patch 無 AppendUri，UI 已擋＋tooltip）。
-    leaf.extend(uri_sets(&orig.uris, f.uris));
+    // 多網址（批次 A＃1＋C）：值改併入 leaf 批；增刪列走結構批
+    // （RemoveUri 遞減＋AppendUri 落尾，892c15b 面）。
+    let (u_sets, u_struct) = uri_edits(&orig.uris, f.uris);
+    leaf.extend(u_sets);
     if f.notes != orig.notes {
         leaf.push(FieldEdit::Set {
             path: "notes".into(),
@@ -2160,8 +2335,9 @@ pub fn edit_delta(
     // 自訂欄位：key 對齊做 diff，拆成 leaf（Set）與結構（SetType/
     // Append/Remove）兩批——同欄 type×值改動會被 daemon 判同欄衝突，
     // 分兩批送即迴避（先值後結構）。
-    let (field_leaf, field_struct) = field_edits(&orig.fields, f.drafts);
+    let (field_leaf, mut field_struct) = field_edits(&orig.fields, f.drafts);
     leaf.extend(field_leaf);
+    field_struct.extend(u_struct);
     let (add, remove) = diff_tags(&orig.tags, f.tags);
     (leaf, field_struct, add, remove)
 }
@@ -2248,6 +2424,7 @@ fn nav_interrupts(cmd: &Cmd) -> bool {
             | Cmd::ShowDetailView(_)
             | Cmd::ChooseFolder(_)
             | Cmd::ToggleTrash
+            | Cmd::ToggleArchived
     )
 }
 
@@ -2352,6 +2529,44 @@ pub fn is_unlocked(st: &Option<UnlockStateView>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vault_filter_four_way_exclusion() {
+        let mut f = VaultFilter::default();
+        f.toggle_archived();
+        assert!(f.archived && !f.trash && f.folder.is_none());
+        // 已封存態選資料夾→退封存；選垃圾桶→退封存；互斥四態。
+        f.pick_folder(Some("x".into()));
+        assert!(!f.archived && !f.trash && f.folder.as_deref() == Some("x"));
+        f.toggle_archived();
+        f.toggle_trash();
+        assert!(f.trash && !f.archived && f.folder.is_none());
+        f.toggle_trash();
+        f.toggle_trash();
+        f.toggle_archived();
+        assert!(f.archived && !f.trash, "退出垃圾桶不應殘留封存態交叉污染");
+        assert_eq!(archived_filter(true), Some(true));
+        assert_eq!(archived_filter(false), None, "主列表不發 Some(false)（舊 daemon 兼容）");
+    }
+
+    #[test]
+    fn icon_sniff_and_host_parsing() {
+        // magic 嗅探：PNG／ICO 收，其他形態拒（字母磚退路）。
+        assert_eq!(sniff_icon(&[0x89, b'P', b'N', b'G', 0]), Some("image/png"));
+        assert_eq!(sniff_icon(&[0, 0, 1, 0, 1]), Some("image/x-icon"));
+        assert_eq!(sniff_icon(b"GIF89a"), None);
+        assert_eq!(sniff_icon(&[0x89, b'P']), None, "截斷的 magic 不認");
+        // data URI：PNG 成形、垃圾回 None。
+        let uri = icon_data_uri(&[0x89, b'P', b'N', b'G', 1, 2]).unwrap();
+        assert!(uri.starts_with("data:image/png;base64,"));
+        assert!(icon_data_uri(b"junk").is_none());
+        // host 解析：去 scheme/userinfo/port/path；無點非 localhost 拒。
+        assert_eq!(host_of("https://GitHub.com/x?q=1").as_deref(), Some("github.com"));
+        assert_eq!(host_of("http://user:pw@127.0.0.1:18095/api").as_deref(), Some("127.0.0.1"));
+        assert_eq!(host_of("localhost:3000").as_deref(), Some("localhost"));
+        assert_eq!(host_of("no-host"), None);
+        assert_eq!(host_of("https:///path"), None);
+    }
 
     #[test]
     fn normalize_server_gates_scheme_and_host() {
@@ -2510,32 +2725,41 @@ mod tests {
     }
 
     #[test]
-    fn uri_sets_key_alignment_and_append_gap() {
+    fn uri_edits_key_alignment_and_structural_batches() {
         let orig = vec!["https://a.test".to_owned(), "https://b.test".to_owned()];
-        // 全等基準＝無 edit。
+        // 全等基準＝兩批皆空。
         let same = [
             UriDraft { key: 0, uri: "https://a.test".into() },
             UriDraft { key: 1, uri: "https://b.test".into() },
         ];
-        assert!(uri_sets(&orig, &same).is_empty());
-        // 改第二列→uri.1；順序倒置但 key 對齊→仍各歸原位。
+        let (s, t) = uri_edits(&orig, &same);
+        assert!(s.is_empty() && t.is_empty());
+        // 倒置排列但 key 對齊→只有真改動的列產 Set。
         let swapped = [
             UriDraft { key: 1, uri: "https://b.test".into() },
             UriDraft { key: 0, uri: "https://a2.test".into() },
         ];
-        let edits = uri_sets(&orig, &swapped);
-        assert_eq!(edits.len(), 1);
-        assert!(matches!(&edits[0], FieldEdit::Set{path, value} if path=="uri.0" && value.as_deref()==Some("https://a2.test")));
-        // 清空列＝Set None；新增列（NEW_URI）編輯面不送（daemon 無 AppendUri）。
-        let mut cleared = same.clone();
-        cleared[1].uri = "  ".into();
-        let appended = [UriDraft { key: NEW_URI, uri: "https://c.test".into() }];
-        let e2 = uri_sets(&orig, &[cleared.to_vec(), appended.to_vec()].concat());
-        assert!(matches!(&e2[0], FieldEdit::Set{path, value} if path=="uri.1" && value.is_none()));
-        assert_eq!(e2.len(), 1);
-        // 基準外的幽靈 key（基準列已被他端移除）不產 edit。
-        let ghost = [UriDraft { key: 9, uri: "https://x.test".into() }];
-        assert!(uri_sets(&orig, &ghost).is_empty());
+        let (s, t) = uri_edits(&orig, &swapped);
+        assert!(matches!(&s[..], [FieldEdit::Set{path, value}] if path=="uri.0" && value.as_deref()==Some("https://a2.test")));
+        assert!(t.is_empty());
+        // 清空列值＝Set None；刪列＝RemoveUri 按基準索引、由大而小。
+        let dropped = [UriDraft { key: 0, uri: "https://a.test".into() }];
+        let (s, t) = uri_edits(&orig, &dropped);
+        assert!(s.is_empty());
+        assert!(matches!(&t[..], [FieldEdit::RemoveUri{index}] if *index==1));
+        let dropped_both: [UriDraft; 0] = [];
+        let (_, t) = uri_edits(&orig, &dropped_both);
+        assert!(matches!(&t[..], [FieldEdit::RemoveUri{index:1}, FieldEdit::RemoveUri{index:0}]));
+        // 新增列（key 不在基準）＝AppendUri 落結構批尾端；空白新列跳過。
+        let with_new = [
+            same[0].clone(),
+            same[1].clone(),
+            UriDraft { key: NEW_URI, uri: " https://c.test ".into() },
+            UriDraft { key: NEW_URI.wrapping_sub(1), uri: "   ".into() },
+        ];
+        let (s, t) = uri_edits(&orig, &with_new);
+        assert!(s.is_empty());
+        assert!(matches!(&t[..], [FieldEdit::AppendUri{uri}] if uri=="https://c.test"));
     }
 
     #[test]
