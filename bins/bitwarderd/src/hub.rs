@@ -1006,6 +1006,7 @@ impl Hub {
     ///   的過渡窗（鏡像已改歸屬、`key` 仍舊包法）也解得開。全解不開 → None。
     /// - 無 `key` 欄（舊項目/自家 CLI 種子）→ 歸屬鑰直解內容欄（jslib 對
     ///   無 key cipher 的 fallback 同口徑，官方讀我們舊寫法產的項目不受影響）。
+    ///
     /// None（org key 未派生、item key 解包失敗）容錯語意：讀路徑欄位回
     /// None，寫路徑必須拒寫；**不得**退回 user key 直解內容欄（帶 key 的
     /// 項目會全欄誤解，寫回更會推出無人解得開的密文）。
@@ -1064,23 +1065,6 @@ impl Hub {
         }
     }
 
-    /// 寫路徑欄位金鑰（base/ours/theirs 攤平與重新加密共用一把）：個人項目
-    /// 用 user key；共享項目（[`Self::cipher_owner_org`]）必須用所屬 org 的
-    /// 對稱金鑰——該 key 尚未派生（akey 解不出）時回 `None`，呼叫端**不得**
-    /// 退回 user key（那會把其他裝置解不開的密文推回伺服器，比不寫更糟）。
-    /// 讀路徑的同口徑容錯版見 [`cipher_field_decryptor`]。
-    pub(crate) fn cipher_write_key<'k>(
-        &self,
-        kb: &'k bw_keys::KeyBundle,
-        cipher: &Value,
-        org_keys: &'k HashMap<Uuid, bw_crypto::OrgKey>,
-    ) -> Option<&'k [u8]> {
-        match self.cipher_owner_org(cipher) {
-            None => Some(kb.user_key().as_bytes()),
-            Some(org) => org_keys.get(&org).map(|k| k.as_bytes()),
-        }
-    }
-
     /// 明文索引回填（全鏡像，含垃圾桶——官方回收桶列表要顯示解密名稱）。
     fn reindex_all(&self) -> Result<(), WtpError> {
         let mut ids: Vec<ItemId> = self
@@ -1108,8 +1092,8 @@ impl Hub {
     }
 
     /// 鏡像落盤後的明文索引回填：解密只發生在 `with_keys` 閉包內。
-    /// 單欄位解密失敗容忍跳過（漂移防御），不阻塞整批。共享項目改以
-    /// org 對稱金鑰解密（金鑰選擇見 [`cipher_field_decryptor`]）。
+    /// 單欄位解密失敗容忍跳過（漂移防御），不阻塞整批。金鑰按 cipher 歸屬
+    /// 與 item key 三態由解析器選定（見 [`Self::cipher_field_decryptor`]）。
     pub fn reindex_many(&self, ids: &[ItemId]) -> Result<(), WtpError> {
         let org_keys = self.org_key_map();
         for id in ids {
@@ -1153,6 +1137,7 @@ impl Hub {
         };
         // 共享項目（organizationId 命中已派生 org key）以 org 對稱金鑰解密；
         // 敏感度分級（§2.1）不因 org 放寬——這裡只換鑰，不換視窗。
+        // （帶 item key 的官方形態項目經 `Hub::cipher_decrypt_key` 兩段鏈。）
         let org_keys = self.org_key_map();
         let reveal = view == View::Reveal;
         let dec = self.machine.with_keys(|kb| {

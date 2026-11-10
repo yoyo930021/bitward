@@ -6,12 +6,12 @@
 //! - 下載 `GET /api/ciphers/{id}/attachment/{aid}` → 短效簽名 URL → 直連取位元組。
 //! - 刪除 `DELETE /api/ciphers/{id}/attachment/{aid}` → 回更新後 cipher。
 //!
-//! 金鑰模型（個人 vault，官方 jslib 同形）：每個附件一枚隨機 64B 對稱金鑰
+//! 金鑰模型（官方 jslib 同形）：每個附件一枚隨機 64B 對稱金鑰
 //! （enc32+mac32，與 UserKey 同構）；檔身以它加密成信封字串；附件 `key`
-//! 欄位存「該金鑰被寫側金鑰（個人＝user key）重包」的信封字串。
-//! org 共享附件的換鑰（item key 進 cipher.key、org key 重包）超出本批時域：
-//! 共享項目上傳直接拒絕（見 `attach_upload`），金鑰選擇已預留走
-//! `Hub::cipher_write_key` 同一個座標系（別自創第二套）。
+//! 欄位存「該金鑰被本項目欄位金鑰重包」的信封字串——帶 item key 的項目用
+//! item key（官方形態）、無 key 舊項目用歸屬鑰（user／org）。金鑰選擇
+//! 唯讀 `Hub::cipher_decrypt_key`（別自創第二套）；該鑰不可得（org akey
+//! 未解出、item key 解不開）時讀寫皆拒。
 
 use rand::RngCore;
 use serde_json::{Value, json};
@@ -48,17 +48,15 @@ impl Hub {
         }
         let row = self.store.item(item_id).map_err(denied)?;
         let cipher = row.ok_or(WtpError::NotFound)?.enc_cipher;
-        if self.cipher_owner_org(&cipher).is_some() {
-            // 換鑰留佔位（見模組頭註解）：共享項目附件要先把 item key
-            // 以 org key 重包後才能推，本批不硬做。
-            return Err(WtpError::Unsupported {
-                feature: "org 共享附件換鑰（item key）在後續批".into(),
-            });
-        }
+        // 附件金鑰包裝與檔名加密統一走解析器（`Hub::cipher_decrypt_key`）：
+        // 帶 item key 的項目以 item key 包（官方同形，共享成員經 cipher.key
+        // 兩段鏈解得到）；無 key 舊項目以歸屬鑰（user／org）包——org 未派生
+        // 時拒寫，不產生成員解不開的密文。
+        let org_keys = self.org_key_map();
         let (key_env, name_env, ct_blob) = self
             .machine
             .with_keys(|kb| -> Option<(String, String, Vec<u8>)> {
-                let key = kb.user_key().as_bytes().to_vec();
+                let key = self.cipher_decrypt_key(kb, &cipher, &org_keys)?;
                 let mut att_key = vec![0u8; 64];
                 rand::thread_rng().fill_bytes(&mut att_key);
                 let key_env = bw_crypto::encrypt_bytes_key(&key, &att_key).ok()?;
@@ -67,7 +65,9 @@ impl Hub {
                 Some((key_env, name_env, ct.into_bytes()))
             })
             .map_err(|_| WtpError::Locked)?
-            .ok_or_else(|| denied("附件加密失敗（金鑰不可用）"))?;
+            .ok_or_else(|| {
+                denied("附件寫入金鑰不可用（共享項目需 org 對稱金鑰派生或 item key 解開）")
+            })?;
         let blob = self.store.blob_put(&ct_blob).map_err(denied)?;
         let payload = json!({
             "op": "attach_upload",
@@ -173,9 +173,9 @@ impl Hub {
         let plain = self
             .machine
             .with_keys(|kb| -> Option<Vec<u8>> {
-                let write_key = self.cipher_write_key(kb, &row_cipher, &org_keys)?;
+                let field_key = self.cipher_decrypt_key(kb, &row_cipher, &org_keys)?;
                 let ct_s = std::str::from_utf8(&ct).ok()?;
-                let att_key = bw_crypto::decrypt_bytes_with_key(write_key, &key_env).ok()?;
+                let att_key = bw_crypto::decrypt_bytes_with_key(&field_key, &key_env).ok()?;
                 bw_crypto::decrypt_bytes_with_key(&att_key, ct_s).ok()
             })
             .map_err(|_| WtpError::Locked)?
@@ -351,8 +351,47 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, WtpError::Unsupported { .. }),
-            "org 共享附件換鑰留佔位：{err:?}"
+            matches!(err, WtpError::Denied { .. }),
+            "org key 未派生的共享項目寫附件必須拒寫（不產生成員解不開的密文）：{err:?}"
+        );
+    }
+
+    /// 官方形態項目的附件：附件金鑰以 **item key** 重包、檔名以 item key
+    /// 加密（jslib 同形，共享成員經 cipher.key 兩段鏈解得到）。
+    #[tokio::test]
+    async fn upload_wraps_attachment_key_with_item_key() {
+        let (hub, _d) = unlocked_hub("att4").await;
+        let user = hub
+            .machine
+            .with_keys(|kb| kb.user_key().as_bytes().to_vec())
+            .unwrap();
+        let item: Vec<u8> = (150u8..214).collect();
+        let id = Uuid::new_v4();
+        hub.store
+            .put_mirror(
+                id,
+                &json!({
+                    "id": id.to_string(), "type": 1,
+                    "key": bw_crypto::encrypt_bytes_key(&user, &item).unwrap(),
+                    "name": "2.n|x|y",
+                }),
+            )
+            .unwrap();
+        hub.attach_upload("s", id, "帳單.pdf", b"ik-bytes").await.unwrap();
+        let due = hub.store.take_due(8).unwrap();
+        let payload = due[0].payload.clone();
+        let att_key =
+            bw_crypto::decrypt_bytes_with_key(&item, payload["key"].as_str().unwrap()).unwrap();
+        let ct = hub.store.blob_open(payload["blob"].as_str().unwrap()).unwrap();
+        let plain =
+            bw_crypto::decrypt_bytes_with_key(&att_key, std::str::from_utf8(&ct).unwrap()).unwrap();
+        assert_eq!(plain, b"ik-bytes");
+        let name =
+            bw_crypto::decrypt_bytes_with_key(&item, payload["file_name"].as_str().unwrap()).unwrap();
+        assert_eq!(name, "帳單.pdf".as_bytes());
+        assert!(
+            bw_crypto::decrypt_bytes_with_key(&user, payload["key"].as_str().unwrap()).is_err(),
+            "附件金鑰不得再以 user key 直包（官方讀 item key 鏈）"
         );
     }
 

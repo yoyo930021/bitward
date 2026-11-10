@@ -14,6 +14,8 @@
 //! 背景自動推送常駐輪 `auto_drain_loop`（失敗指數退避，見 `drain_backoff`）、
 //! 手動刷新；notifications 重新連上也喚醒 drain（`notify_loop` 內 trigger）。
 
+use std::collections::HashMap;
+
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -200,14 +202,18 @@ impl Hub {
                 _ => None,
             })
             .collect();
-        // 寫側金鑰＝cipher 歸屬：共享項目以 org 對稱金鑰重新加密（見
-        // `Hub::cipher_write_key`）；org key 未派生時拒絕，不產生壞密文。
+        // 寫側金鑰＝cipher 歸屬走解析器（見 `Hub::cipher_decrypt_key`）：帶
+        // item key 的項目讀改寫回全用 item key、`key` 欄原樣保留；共享項目
+        // 以 org 對稱金鑰重新加密；org key 未派生/item key 解不開時拒絕，
+        // 不產生壞密文。
         let org_keys = self.org_key_map();
         let ours = self
             .machine
             .with_keys(|kb| -> Option<Value> {
-                let key = self.cipher_write_key(kb, &base, &org_keys)?;
-                let enc = |v: &str| bw_crypto::encrypt_bytes_key(key, v.as_bytes()).unwrap_or_default();
+                let key = self.cipher_decrypt_key(kb, &base, &org_keys)?;
+                let enc = |v: &str| {
+                    bw_crypto::encrypt_bytes_key(&key, v.as_bytes()).unwrap_or_default()
+                };
                 let ours = bw_vault::apply_merged(&base, &map, &enc);
                 // 陣列形態操作（Set 型 leaf 做不到的增刪）：先刪（索引由大而小，
                 // 免位移）後附加，全部落在 ours 副本上。
@@ -232,7 +238,9 @@ impl Hub {
             })
             .map_err(denied)?
             .ok_or_else(|| WtpError::Denied {
-                grant_gap: "共享項目寫入需所屬 org 對稱金鑰（akey 未解出，請 sync/重解鎖）"
+                grant_gap: "項目寫入金鑰不可用（共享需所屬 org 對稱金鑰 akey 解出；\
+                            帶 key 欄的項目需能以 user/org 鑰 unwrapped 出 item key，\
+                            請 sync/重解鎖）"
                     .to_owned(),
             })?;
         let touched: Vec<String> = edits
@@ -320,15 +328,21 @@ impl Hub {
         self.machine
             .with_keys(|kb| {
                 let uk = kb.user_key();
+                // 官方新建形態（jslib create 同形）：每筆一枚隨機 64B item key
+                // （enc‖mac），`key` 欄存它以 user key 包的信封、內容欄全用
+                // item key 加密——新建項目對官方與我們都原生。draft 無歸屬
+                // 欄位（新建恆個人項目），包裝鑰即 user key。
+                let mut ik = vec![0u8; 64];
+                rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut ik);
                 let enc = |s: &str| -> String {
-                    bw_crypto::encrypt(uk, s)
-                        .map(|e| e.to_string())
-                        .unwrap_or_default()
+                    bw_crypto::encrypt_bytes_key(&ik, s.as_bytes()).unwrap_or_default()
                 };
                 let mut c = json!({
                     "type": kind_wire(draft.kind),
                     "name": enc(&draft.name),
                     "favorite": draft.favorite,
+                    "key": bw_crypto::encrypt_bytes_key(uk.as_bytes(), &ik)
+                        .unwrap_or_default(),
                 });
                 if let Some(i) = id {
                     c["id"] = json!(i.to_string());
@@ -633,17 +647,17 @@ impl Hub {
         }
 
         // 漂移：欄位級三方合併。明文域比較（IV 隨機，密文不可比）。
-        // 金鑰按 theirs（伺服器現態）的 cipher 歸屬選：共享項目 base/ours/theirs
-        // 攤平與 PUT 重加密全走 org 對稱金鑰（`Hub::cipher_write_key`）。
-        // org key 未派生 → 結算回 Queued 等 sync 補齊 akey 後重試，
-        // 絕不以 user key 強解強加密（那會把解不開的密文推回伺服器）。
+        // 金鑰按 theirs（伺服器現態）的 cipher 歸屬走解析器（`Hub::cipher_decrypt_key`）：
+        // 帶 item key 者以 item key 攤平與重加密（`key` 欄不動）、共享無 key 者以
+        // org 對稱金鑰。org key 未派生/item key 解不開 → 結算回 Queued 等 sync
+        // 補齊後重試，絕不以 user key 強解強加密（那會把解不開的密文推回伺服器）。
         let org_keys = self.org_key_map();
         let merged = self
             .machine
             .with_keys(|kb| -> Option<Result<Option<Value>, Vec<String>>> {
-                let key = self.cipher_write_key(kb, &theirs, &org_keys)?;
+                let key = self.cipher_decrypt_key(kb, &theirs, &org_keys)?;
                 let dec = |s: &str| -> Option<String> {
-                    bw_crypto::decrypt_bytes_with_key(key, s)
+                    bw_crypto::decrypt_bytes_with_key(&key, s)
                         .ok()
                         .and_then(|b| String::from_utf8(b).ok())
                 };
@@ -653,7 +667,7 @@ impl Hub {
                 Some(match bw_vault::three_way(&base, &ours, &theirs_m) {
                     bw_vault::Merge::Push(map) => {
                         Ok(Some(bw_vault::apply_merged(&theirs, &map, &|v| {
-                            bw_crypto::encrypt_bytes_key(key, v.as_bytes()).unwrap_or_default()
+                            bw_crypto::encrypt_bytes_key(&key, v.as_bytes()).unwrap_or_default()
                         })))
                     }
                     bw_vault::Merge::Noop => Ok(None),
@@ -666,7 +680,7 @@ impl Hub {
                 let _ = self.store.settle(m.id, MutState::Queued);
                 return Err((
                     bw_server::ServerError::Rejected(
-                        "org key not derived for shared cipher".into(),
+                        "cipher write key unavailable (org key not derived or item key unwrap failed)".into(),
                     ),
                     true,
                 ));
@@ -709,7 +723,32 @@ impl Hub {
         m: &Mutation,
     ) -> Result<(), (bw_server::ServerError, bool)> {
         let theirs = client.cipher_get(m.item).await.map_err(|e| (e, false))?;
-        let mut body = theirs;
+        let target_org = m
+            .payload
+            .get("org")
+            .and_then(Value::as_str)
+            .and_then(|s| Uuid::parse_str(s).ok());
+        let mut body = theirs.clone();
+        // 歸屬轉移的官方語意：item key 以新歸屬鑰重包後才 PUT（見
+        // `Self::rewrap_moved_key`）；解不開/目標 org key 未派生 → 結算回
+        // Queued 等 sync 補齊重試，不推「成員解不開 key」的半成品。
+        match self.rewrap_moved_key(&theirs, target_org, &self.org_key_map()) {
+            Ok(Some(env)) => {
+                if let Some(o) = body.as_object_mut() {
+                    o.insert("key".into(), json!(env));
+                }
+            }
+            Ok(None) => {}
+            Err(()) => {
+                let _ = self.store.settle(m.id, MutState::Queued);
+                return Err((
+                    bw_server::ServerError::Rejected(
+                        "move re-wrap item key unavailable (org key not derived or unwrap failed)".into(),
+                    ),
+                    true,
+                ));
+            }
+        }
         if let Some(o) = body.as_object_mut() {
             o.insert(
                 "organizationId".into(),
@@ -725,6 +764,33 @@ impl Hub {
             .await
             .map_err(|e| (e, false))?;
         self.finish_applied(m.id, &resp)
+    }
+
+    /// move 換主時的 item key 重包：以現歸屬解出 item key（解析器口徑，
+    /// 含舊包法容錯），再以目標歸屬鑰包回。回 `Ok(None)`＝本項目是無 key
+    /// 舊形態，不憑空造 key 欄（維持既有 fallback 語意）；`Err(())`＝
+    /// 舊 item key 解不開或目標 org key 未派生（呼叫端延後重試）。
+    fn rewrap_moved_key(
+        &self,
+        theirs: &Value,
+        target_org: Option<Uuid>,
+        org_keys: &HashMap<Uuid, bw_crypto::OrgKey>,
+    ) -> Result<Option<String>, ()> {
+        if theirs.get("key").and_then(Value::as_str).is_none() {
+            return Ok(None);
+        }
+        self.machine
+            .with_keys(|kb| -> Option<String> {
+                let item = self.cipher_decrypt_key(kb, theirs, org_keys)?;
+                let wrap: &[u8] = match target_org {
+                    None => kb.user_key().as_bytes(),
+                    Some(o) => org_keys.get(&o).map(|k| k.as_bytes())?,
+                };
+                bw_crypto::encrypt_bytes_key(wrap, item.as_slice()).ok()
+            })
+            .map_err(|_| ())?
+            .ok_or(())
+            .map(Some)
     }
 
     fn finish_applied(
@@ -1047,6 +1113,9 @@ mod tests {
             .ok()
             .and_then(|b| String::from_utf8(b).ok())
     }
+    fn dec_bytes(key: &[u8], ct: &str) -> Option<Vec<u8>> {
+        bw_crypto::decrypt_bytes_with_key(key, ct).ok()
+    }
 
     /// 共享寫側鏡像 fixture：org（owner `2.` akey 可解）＋ collection ＋
     /// org key 加密的共享 cipher。`with_akey=false` 模擬 akey 解不出的 org。
@@ -1214,6 +1283,93 @@ mod tests {
         );
     }
 
+    /// 帶 item key 的 cipher 編輯：讀改寫回全用 item key、`key` 欄原樣
+    /// 保留、未觸及欄位的原密文不動（官方端不受我們編輯影響）。
+    #[tokio::test]
+    async fn patch_item_key_cipher_keeps_key_and_uses_item_key() {
+        let (hub, _d, shared, _c, org_bytes, user_bytes) = fixture("w5", true).await;
+        let item: Vec<u8> = (150u8..214).collect();
+        let key_env = bw_crypto::encrypt_bytes_key(&org_bytes, &item).unwrap();
+        let mut cipher = hub.store.item(shared).unwrap().unwrap().enc_cipher;
+        cipher["key"] = json!(key_env);
+        cipher["name"] = json!(bw_crypto::encrypt_bytes_key(&item, b"Shared Name").unwrap());
+        cipher["login"]["password"] =
+            json!(bw_crypto::encrypt_bytes_key(&item, b"shared-pw").unwrap());
+        hub.store.put_mirror(shared, &cipher).unwrap();
+        hub.write_patch(
+            "s",
+            shared,
+            &[FieldEdit::Set {
+                path: "password".into(),
+                value: Some("ik-new-pw".into()),
+            }],
+        )
+        .await
+        .unwrap();
+        let mirror = hub.store.item(shared).unwrap().unwrap().enc_cipher;
+        assert_eq!(
+            mirror["key"].as_str(),
+            Some(key_env.as_str()),
+            "編輯必須原樣保留 key 欄（不得改包法或遺失）"
+        );
+        let pw = mirror["login"]["password"].as_str().unwrap();
+        assert_eq!(
+            dec(&item, pw).as_deref(),
+            Some("ik-new-pw"),
+            "改寫欄位以 item key 重新加密"
+        );
+        assert_eq!(dec(&org_bytes, pw), None, "新密文不得是 org key 直解形態");
+        assert_eq!(dec(&user_bytes, pw), None, "新密文不得是 user key 直解形態");
+        assert_eq!(
+            mirror["login"]["username"].as_str().unwrap(),
+            cipher["login"]["username"].as_str().unwrap(),
+            "未觸及欄位原密文不動（org key 舊形態照存活）"
+        );
+    }
+
+    /// move 換主重包：item key 解出後以目標歸屬鑰包回（個人→org、
+    /// org→個人雙向）；無 key 舊項目 Ok(None) 不憑空造欄；目標 org key
+    /// 未派生 → Err（呼叫端延後重試，不推成員解不開的 key）。
+    #[tokio::test]
+    async fn move_rewraps_item_key_for_new_owner() {
+        let (hub, _d, shared, _c, org_bytes, user_bytes) = fixture("mv1", true).await;
+        let org_id = hub.store.collection_list().unwrap()[0].org;
+        let org_keys = hub.org_key_map();
+        let item: Vec<u8> = (150u8..214).collect();
+        let personal = json!({
+            "id": shared.to_string(), "type": 1, "organizationId": Value::Null,
+            "collectionIds": [], "name": "2.a|b|c",
+            "key": bw_crypto::encrypt_bytes_key(&user_bytes, &item).unwrap(),
+        });
+        let env = hub
+            .rewrap_moved_key(&personal, Some(org_id), &org_keys)
+            .unwrap()
+            .expect("帶 key 項目必有新信封");
+        assert_eq!(dec_bytes(&org_bytes, &env).as_deref(), Some(item.as_slice()),
+            "個人→共享：item key 改由 org key 包");
+        let shared_cipher = json!({
+            "id": shared.to_string(), "type": 1, "organizationId": org_id.to_string(),
+            "collectionIds": [], "name": "2.a|b|c",
+            "key": bw_crypto::encrypt_bytes_key(&org_bytes, &item).unwrap(),
+        });
+        let env2 = hub
+            .rewrap_moved_key(&shared_cipher, None, &org_keys)
+            .unwrap()
+            .expect("帶 key 項目必有新信封");
+        assert_eq!(dec_bytes(&user_bytes, &env2).as_deref(), Some(item.as_slice()),
+            "共享→個人：item key 改由 user key 包");
+        assert_eq!(
+            hub.rewrap_moved_key(&json!({"type": 1, "name": "2.a|b|c"}), None, &org_keys)
+                .unwrap(),
+            None,
+            "無 key 舊項目維持現狀（不憑空造 key 欄）"
+        );
+        assert!(
+            hub.rewrap_moved_key(&personal, Some(Uuid::new_v4()), &org_keys).is_err(),
+            "目標 org key 未派生 → Err 延後重試"
+        );
+    }
+
     /// 個人項目不受影響：仍走 user key。
     #[tokio::test]
     async fn patch_personal_cipher_still_uses_user_key() {
@@ -1310,7 +1466,8 @@ mod tests {
 
     /// 三件套 create 線格式（官方兼容硬證據的單元層）：SecureNote（type 2）
     /// 不帶 login、folderId 明文 UUID 入鏡像、fields[] 帶 type/linkedId；
-    /// hidden→type 1。欄值以 user key 信封往復。
+    /// hidden→type 1。新建＝官方形態：自帶 `key` 欄（item key 被 user key
+    /// 包）、欄值以 **item key** 信封往復。
     #[tokio::test]
     async fn encrypt_draft_emits_official_wire_shape() {
         let (hub, _d) = unlocked_hub("wire").await;
@@ -1347,13 +1504,30 @@ mod tests {
             .machine
             .with_keys(|kb| kb.user_key().as_bytes().to_vec())
             .unwrap();
+        // 官方形態：key 欄存在且＝user key 包的 64B item key。
+        let item = dec_bytes(&user, cipher["key"].as_str().unwrap()).expect("key 欄可解");
+        assert_eq!(item.len(), 64, "item key 64B（enc‖mac）");
         assert_eq!(
-            dec(&user, f0["name"].as_str().unwrap()).as_deref(),
-            Some("PIN")
+            dec(&item, f0["name"].as_str().unwrap()).as_deref(),
+            Some("PIN"),
+            "欄位以 item key 加密（官方同形）"
         );
         assert_eq!(
-            dec(&user, f0["value"].as_str().unwrap()).as_deref(),
+            dec(&item, f0["value"].as_str().unwrap()).as_deref(),
             Some("1234")
+        );
+        assert_eq!(
+            dec(&item, cipher["name"].as_str().unwrap()).as_deref(),
+            Some("筆記")
+        );
+        assert_eq!(
+            dec(&item, cipher["notes"].as_str().unwrap()).as_deref(),
+            Some("內文")
+        );
+        assert_eq!(
+            dec(&user, f0["name"].as_str().unwrap()),
+            None,
+            "防回歸：欄位不得再以 user key 直解（舊新建形態）"
         );
         assert!(cipher["fields"][1]["value"].is_null(), "空值欄 value=null");
 
@@ -1369,6 +1543,7 @@ mod tests {
             cipher2["login"].is_object(),
             "type 1 恆帶 login 物件（可為空 {{}}）"
         );
+        assert!(cipher2.get("key").is_some(), "新建恆自帶 item key 欄");
     }
 
     /// 非 UUID 的 folder_id 在入列前擋下（鏡像 folderId 只收合法 UUID 字串）。
