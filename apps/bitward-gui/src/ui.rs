@@ -6,7 +6,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use bw_proto::ItemKind;
+use bw_proto::{ItemKind, Settings};
 use nsh_base::{input, theme};
 use nsh_core::prelude::*;
 
@@ -525,10 +525,14 @@ pub fn section_title(label: &'static str) -> Text {
 
 /// 複製鈕：按下寫系統剪貼簿、圖示轉 success 勾 1 秒後復原。
 /// `value` 在按下當下求值（跟著 detail/revealed 訊號走）。
+/// 剪貼簿清除（macOS 設定面）：`settings.clipboard_clear_secs`＞0 時派
+/// 引擎計時任務——N 秒後**讀回比對**，內容仍是本次複製值才清空
+/// （使用者中途另複製過就讓位，官方 clearClipboard 同語意）。
 pub fn copy_button(
     value: Rc<dyn Fn() -> String>,
     token: &'static str,
     copied: Signal<Option<&'static str>>,
+    settings: Signal<Settings>,
 ) -> View {
     let press = value;
     view()
@@ -545,7 +549,16 @@ pub fn copy_button(
         .on_press(move || {
             let v = press();
             if !v.is_empty() && v != "—" {
-                set_clipboard(v);
+                set_clipboard(&v);
+                let secs = settings.get().clipboard_clear_secs;
+                if secs > 0 {
+                    spawn(async move {
+                        timer(Duration::from_secs(u64::from(secs))).await;
+                        if clipboard_string().await == v {
+                            set_clipboard(String::new());
+                        }
+                    });
+                }
             }
             copied.set(Some(token));
             set_timeout(Duration::from_millis(1000), move || {

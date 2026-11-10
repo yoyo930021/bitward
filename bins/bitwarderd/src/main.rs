@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use bw_btp::{read_client, write_server};
 use bw_keys::UnlockEvent;
-use bw_proto::{Auth, ClientMsg, PROTO_VERSION, Response, ServerMsg, WtpError};
+use bw_proto::{Auth, ClientMsg, EventTopic, PROTO_VERSION, Response, ServerMsg, WtpError};
 use hub::Hub;
 mod service;
 
@@ -448,15 +448,30 @@ async fn main() -> Result<(), String> {
         let mut watch = hub.machine.watch();
         tokio::spawn(async move {
             while let Ok(ev) = watch.recv().await {
-                if let UnlockEvent::Revoked { epoch, .. } = ev {
-                    // 鎖世代推進 ⇒ 事件之前存在的所有 session 撤銷；
-                    // 之後 Enroll 的（含 AuthLocked 期間）不受影響。
-                    let _ = hub.store.sessions_revoke_before(epoch.0);
-                    for s in hub.sessions.lock().unwrap().values_mut() {
-                        if s.row.epoch < epoch.0 {
-                            s.revoked.store(true, std::sync::atomic::Ordering::Relaxed);
+                match &ev {
+                    UnlockEvent::Revoked { epoch, .. } => {
+                        // 鎖世代推進 ⇒ 事件之前存在的所有 session 撤銷；
+                        // 之後 Enroll 的（含 AuthLocked 期間）不受影響。
+                        let _ = hub.store.sessions_revoke_before(epoch.0);
+                        for s in hub.sessions.lock().unwrap().values_mut() {
+                            if s.row.epoch < epoch.0 {
+                                s.revoked.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
                         }
                     }
+                    // 鎖態轉換廣播（FR 1635 thin 共享解鎖態）：GUI 訂閱
+                    // LockStateChanged 即時刷新——自動鎖定（閒置心跳）不是
+                    // 使用者按出来的，沒有這條事件界面會停在過期鎖態。
+                    UnlockEvent::State { view, epoch } => {
+                        hub.emit(
+                            EventTopic::LockStateChanged,
+                            serde_json::json!({
+                                "state": serde_json::to_value(view).unwrap_or_default(),
+                                "epoch": epoch.0,
+                            }),
+                        );
+                    }
+                    _ => {}
                 }
             }
         });

@@ -236,6 +236,7 @@ fn uri_row(rows: Signal<Arc<Vec<UriDraft>>>, key: u32) -> View {
                 .focus(|s| s.border_color(theme::ACCENT))
                 .flex_1(),
         )
+        .child(uri_match_menu(rows, key))
         .child(
             view()
                 .w(px(theme::COPY_BTN))
@@ -251,6 +252,85 @@ fn uri_row(rows: Signal<Arc<Vec<UriDraft>>>, key: u32) -> View {
                 })
                 .child(text("✕").text_size(px(11.0)).text_color(theme::TEXT_MUTED)),
         )
+}
+
+/// 網址判定下拉（macOS 設定面：官方六態 match）：膠囊顯示現值＋▾，
+/// 選定即關面板（手法同 `kind_menu`）。值落 `UriDraft.match_type`，diff 走
+/// `SetUriMatch`（既有列 leaf 批、新列結構批後第三發，見 `uri_edits`）。
+fn uri_match_menu(rows: Signal<Arc<Vec<UriDraft>>>, key: u32) -> View {
+    let open = signal(false);
+    let label_sig = rows;
+    let panel_open = open;
+    let panel_rows = rows;
+    view()
+        .relative()
+        .child(
+            view()
+                .h(px(theme::CHIP_H))
+                .px_2p5()
+                .rounded_full()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .cursor_pointer()
+                .border(px(1.0))
+                .border_color(theme::HAIRLINE)
+                .bg(theme::SURFACE)
+                .on_press(move || open.update(|o| *o = !*o))
+                .child(
+                    text(move || {
+                        crate::state::uri_match_label(
+                            label_sig
+                                .get()
+                                .iter()
+                                .find(|u| u.key == key)
+                                .and_then(|u| u.match_type),
+                        )
+                        .to_owned()
+                    })
+                    .text_size(px(12.0))
+                    .text_color(theme::TEXT_SECONDARY),
+                )
+                .child(text("▾").text_size(px(9.0)).text_color(theme::TEXT_MUTED)),
+        )
+        .child(when(
+            move || panel_open.get(),
+            move || uri_match_panel(panel_rows, key, panel_open),
+        ))
+}
+
+fn uri_match_panel(
+    rows: Signal<Arc<Vec<UriDraft>>>,
+    key: u32,
+    open: Signal<bool>,
+) -> View {
+    let cur = rows
+        .get()
+        .iter()
+        .find(|u| u.key == key)
+        .and_then(|u| u.match_type);
+    let rows: Vec<View> = crate::state::URI_MATCH_OPTIONS
+        .iter()
+        .map(|(val, label)| {
+            let pick = rows;
+            let close = open;
+            let (want, text_label) = (*val, *label);
+            ui::menu_row(text_label.to_owned(), cur == want, move || {
+                pick.update(|v| {
+                    if let Some(u) = Arc::make_mut(v).iter_mut().find(|u| u.key == key) {
+                        u.match_type = want;
+                    }
+                });
+                close.set(false);
+            })
+        })
+        .collect();
+    view()
+        .absolute()
+        .top(px(theme::CHIP_H + 4.0))
+        .left_0()
+        .z_index(10)
+        .child(ui::card(rows).w(px(theme::KIND_MENU_W)))
 }
 
 /// 型別切換列：建立時可選 登入／加密筆記；Card/Identity 佔位 disabled

@@ -490,6 +490,7 @@ mod tests {
             pending: false,
             deleted_at: None,
             archived_at: None,
+            uri_matches: vec![],
         })
     }
 

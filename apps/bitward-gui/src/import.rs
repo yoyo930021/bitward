@@ -190,6 +190,8 @@ pub fn to_items(rows: &[ImportRow]) -> Vec<ImportItem> {
                 password: r.password.clone(),
                 totp: None,
                 uris: r.uris.clone(),
+                // 匯入源（ImportRow）是扁平形態無判定欄：恒預設 null。
+                uri_matches: Vec::new(),
                 notes: r.notes.clone(),
                 favorite: r.favorite,
                 folder_id: r.folder_id.clone(),

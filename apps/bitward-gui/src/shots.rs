@@ -456,10 +456,12 @@ pub fn script(dir: PathBuf, core: AppCore) {
             crate::state::UriDraft {
                 key: crate::state::NEW_URI,
                 uri: "https://example.com".into(),
+                match_type: None,
             },
             crate::state::UriDraft {
                 key: crate::state::NEW_URI.wrapping_sub(1),
                 uri: "https://backup.example.com".into(),
+                match_type: None,
             },
         ]));
         c.form.tags.set("dev, 工作".into());

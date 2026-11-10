@@ -27,6 +27,7 @@ pub fn pane(core: AppCore) -> View {
     // 節次序／標題／幾何全部沿用查看態，切換零跳動。
     let editing = matches!(core.route.get(), Route::Edit(_));
     let totp_cond = core.clone();
+    let pk_cond = core.clone();
     view()
         .flex_col()
         .flex_1()
@@ -59,6 +60,14 @@ pub fn pane(core: AppCore) -> View {
                     let ac = core.clone();
                     move || attachments_rows(ac.clone())
                 }))
+                .child(when(
+                    // 「有才渲染」：無 passkey 的項目整節缺席（不像附件恆帶上傳器）。
+                    move || !pk_cond.passkeys.get().is_empty(),
+                    {
+                        let pk_build = core.clone();
+                        move || section("Passkeys", passkey_rows(pk_build.clone()))
+                    },
+                ))
                 .child(section("資訊", info_section(core.clone(), copied))),
         ))
 }
@@ -369,9 +378,9 @@ fn credentials_section(core: AppCore, copied: Signal<Option<&'static str>>, edit
         }
     });
     vec![
-        field("帳號", username.clone(), vec![ui::copy_button(username, "帳號", copied)]),
+        field("帳號", username.clone(), vec![ui::copy_button(username, "帳號", copied, core.settings)]),
         password_field(core.clone(), copied),
-        field("網址", uris.clone(), vec![ui::copy_button(uris, "網址", copied)]),
+        field("網址", uris.clone(), vec![ui::copy_button(uris, "網址", copied, core.settings)]),
         field("標籤", tags, Vec::new()),
     ]
 }
@@ -394,7 +403,7 @@ fn info_section(core: AppCore, copied: Signal<Option<&'static str>>) -> Vec<View
         field(
             "識別碼",
             id_disp.clone(),
-            vec![ui::copy_button(id_disp, "識別碼", copied)],
+            vec![ui::copy_button(id_disp, "識別碼", copied, core.settings)],
         ),
     ]
 }
@@ -409,7 +418,7 @@ fn notes_section(core: AppCore, copied: Signal<Option<&'static str>>, editing: b
     vec![block(
         move || notes(),
         true,
-        vec![ui::copy_button(copy, "備註", copied)],
+        vec![ui::copy_button(copy, "備註", copied, core.settings)],
     )]
 }
 
@@ -442,6 +451,7 @@ fn custom_fields_section(core: AppCore, copied: Signal<Option<&'static str>>, ed
                         Rc::new(move || v.clone()),
                         "自訂欄位",
                         copied,
+                        core.settings,
                     ));
                     view()
                         .flex_row()
@@ -466,6 +476,7 @@ fn custom_fields_section(core: AppCore, copied: Signal<Option<&'static str>>, ed
                         Rc::new(move || vc.clone()),
                         "自訂欄位",
                         copied,
+                        core.settings,
                     ));
                     view().child(
                         text(v)
@@ -496,6 +507,66 @@ fn attachments_rows(core: AppCore) -> Vec<View> {
         .collect();
     rows.push(upload_editor(core.clone(), item_id, d.meta.organization_id.is_some()));
     rows
+}
+
+/// Passkeys 節（macOS 設定面）：每筆一列＝ relying party＋使用者名＋刪除鈕。
+/// 資料源 `Passkey:GetPasskeys`（Metadata 級，按 item 過濾快取於 `core.passkeys`）；
+/// 刪除走確認模態（`AskDeletePasskey`）。RP/使用者名是協定明文識別欄，不需 Reveal。
+fn passkey_rows(core: AppCore) -> Vec<View> {
+    let Some(d) = core.detail.get() else {
+        return Vec::new();
+    };
+    let item_id = d.meta.id;
+    core.passkeys
+        .get()
+        .iter()
+        .map(|e| {
+            let del = core.clone();
+            let credential = e.credential_id.clone();
+            let rp = e.rp_id.clone();
+            let user = e.user_name.clone();
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    view()
+                        .flex_1()
+                        .flex_col()
+                        .gap_1()
+                        .px_3()
+                        .py_2()
+                        .rounded(px(theme::RADIUS_BLOCK))
+                        .bg(theme::SURFACE)
+                        .overflow_hidden()
+                        .child(
+                            text(e.rp_id.clone())
+                                .text_size(px(theme::TEXT_FIELD_VALUE))
+                                .text_color(theme::TEXT_PRIMARY)
+                                .number_of_lines(1),
+                        )
+                        .child(
+                            text(e.user_name.clone())
+                                .text_size(px(theme::TEXT_PAGE_SUB))
+                                .text_color(theme::TEXT_MUTED)
+                                .number_of_lines(1),
+                        ),
+                )
+                .child(ui::button("刪除", ui::Btn::Ghost, {
+                    let credential = credential.clone();
+                    let rp = rp.clone();
+                    let user = user.clone();
+                    move || {
+                        del.send(Cmd::AskDeletePasskey {
+                            item: item_id,
+                            credential: credential.clone(),
+                            rp: rp.clone(),
+                            user: user.clone(),
+                        })
+                    }
+                }))
+        })
+        .collect()
 }
 
 /// 單筆附件列。
@@ -721,6 +792,7 @@ fn password_field(core: AppCore, copied: Signal<Option<&'static str>>) -> View {
                                     Rc::new(move || c.revealed.get().unwrap_or_default()),
                                     "密碼",
                                     copied,
+                                    c.settings,
                                 )
                                                             },
                         )),
@@ -917,6 +989,7 @@ fn totp_section(core: AppCore, copied: Signal<Option<&'static str>>) -> Vec<View
                         Rc::new(move || build_copy.totp.get().unwrap_or_default()),
                         "TOTP",
                         copied,
+                        build_copy.settings,
                     )
                 },
             ));

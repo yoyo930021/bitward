@@ -17,6 +17,7 @@ mod form;
 mod import;
 mod list;
 mod passgen;
+mod settings;
 mod shots;
 mod state;
 mod theme;
@@ -350,6 +351,8 @@ fn sidebar(core: AppCore) -> View {
     let app_sel = core.clone();
     let app_press = core.clone();
     let app_cnt = core.clone();
+    let set_sel = core.clone();
+    let set_press = core.clone();
     let sync_core = core.clone();
     let export_core = core.clone();
     let import_core = core.clone();
@@ -448,6 +451,14 @@ fn sidebar(core: AppCore) -> View {
             false,
             None,
             move || app_cnt.pending.get().len(),
+        ))
+        .child(side_item(
+            "設定".to_owned(),
+            move || set_sel.route.get() == Route::Settings,
+            move || set_press.send(Cmd::OpenSettings),
+            false,
+            None,
+            || 0,
         ))
         .child(view().flex_1())
         .child(
@@ -700,6 +711,7 @@ fn split(core: AppCore) -> View {
     let detail_build = core.clone();
     let route_cond = core.clone();
     let approvals_build = core.clone();
+    let settings_build = core.clone();
     let form_build = core.clone();
     view()
         .flex_row()
@@ -723,6 +735,7 @@ fn split(core: AppCore) -> View {
                 .child(dynamic(move || {
                     match route_cond.route.get() {
                         Route::Approvals => approvals::pane(approvals_build.clone()),
+                        Route::Settings => settings::pane(settings_build.clone()),
                         Route::Create => form::pane(form_build.clone()),
                         Route::Edit(_) | Route::Detail(_) => {
                             if detail_cond.detail.get().is_some() {

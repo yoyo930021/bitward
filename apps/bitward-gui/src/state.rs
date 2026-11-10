@@ -15,9 +15,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use bw_proto::{
-    AgentCall, AttachmentOp, AuthCall, Call, CipherDraft, CipherFieldKind, EventTopic, FieldEdit,
-    ItemId, ItemKind, ItemView, OverlayOpWire, Query, Response, SortKey, SyncCall,
-    UnlockStateView, UseCall, VaultCall, View,
+    AdminCall, AgentCall, AttachmentOp, AuthCall, Call, CipherDraft, CipherFieldKind, EventTopic,
+    FieldEdit, ItemId, ItemKind, ItemView, OverlayOpWire, PasskeyCall, Query, Response, SortKey,
+    SyncCall, UnlockStateView, UseCall, VaultCall, View,
 };
 use nsh_core::prelude::*;
 
@@ -42,6 +42,8 @@ pub enum Route {
     Edit(ItemId),
     /// 批准佇列（右欄視角，側欄「待批准」進入；單鍵直決無二次確認）。
     Approvals,
+    /// 本機設定檢視（右欄視角，側欄「設定」進入；macOS 設定面）。
+    Settings,
 }
 
 /// 確認對話框（刪除、匯出共用）；`on_confirm` 是確認後要投遞的命令。
@@ -58,6 +60,8 @@ pub struct FormOriginal {
     pub name: String,
     pub username: Option<String>,
     pub uris: Vec<String>,
+    /// `uris` 平行的判定基準（缺欄＝None 預設；diff 出 SetUriMatch）。
+    pub uri_matches: Vec<Option<u8>>,
     pub tags: Vec<String>,
     pub notes: Option<String>,
     pub folder_id: Option<String>,
@@ -270,6 +274,32 @@ pub enum Cmd {
     ChooseFolder(Option<String>),
     /// 批准中心（批次 6 併入 GUI）：佇列視角、輪詢、單鍵直決。
     OpenApprovals,
+    /// 本機設定（macOS 設定面）：右欄視角、讀取、改即存。
+    OpenSettings,
+    FetchSettings,
+    /// 事件驱动的鎖態刷新（daemon `LockStateChanged` 廣播：自動鎖定沒有
+    /// 人按的呼叫，界面只能靠事件看見；Status 屬輪詢豁免、不會餵活計時器）。
+    RefreshStatus,
+    SettingsLoaded(bw_proto::Settings),
+    ApplySettings(bw_proto::Settings),
+    SettingsSaved(Result<(), String>),
+    /// 詳情頁 Passkeys 節（有才渲染）：取列表、刪除走確認模態。
+    FetchPasskeys(ItemId),
+    PasskeysLoaded {
+        item: ItemId,
+        entries: Arc<Vec<bw_proto::PasskeyEntry>>,
+    },
+    AskDeletePasskey {
+        item: ItemId,
+        credential: String,
+        rp: String,
+        user: String,
+    },
+    DeletePasskey {
+        item: ItemId,
+        credential: String,
+    },
+    PasskeyDeleted(Result<(), String>),
     FetchPending,
     PendingLoaded(Arc<Vec<PendingRow>>),
     ApprovePending(String),
@@ -466,11 +496,13 @@ impl FormFields {
 
 /// 網址編輯列（批次 A：多網址）。`key`＝基準陣列位置（對齊手法同
 /// `FieldDraft`，刪列/改列不錯位）；新增列用亂數哨兵 key（不在基準索引域，
-/// diff 時落入 `AppendUri`，見 `uri_edits`）。
+/// diff 時落入 `AppendUri`，見 `uri_edits`）。`match_type`＝官方判定欄
+/// （None=預設 null；0..4 見 `uri_match_label`），diff 走 `SetUriMatch`。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UriDraft {
     pub key: u32,
     pub uri: String,
+    pub match_type: Option<u8>,
 }
 
 /// 新增列哨兵 key 的取值（語意見 `UriDraft`；實際判別按「key 是否在基準索引域」）。
@@ -481,8 +513,31 @@ impl Default for UriDraft {
         Self {
             key: rand_key(),
             uri: String::new(),
+            match_type: None,
         }
     }
+}
+
+/// 網址判定下拉的六態（官方 `login.uris[].match`；繁中標籤對齊 upstream
+/// 語意：0=網域、1=網域＋子域、2=開頭符合、3=精確、4=正規表達式；
+/// 5=永不僅值域不列 UI，同官方 web 層級表）。
+pub const URI_MATCH_OPTIONS: [(Option<u8>, &str); 6] = [
+    (None, "預設"),
+    (Some(0), "網域"),
+    (Some(1), "網域＋子域"),
+    (Some(3), "精確符合"),
+    (Some(2), "開頭符合"),
+    (Some(4), "正規表達式"),
+];
+
+/// 判定值的顯示名（未知編號回「預設」不亂併名——5=Never 不在六態表）。
+#[must_use]
+pub fn uri_match_label(m: Option<u8>) -> &'static str {
+    URI_MATCH_OPTIONS
+        .iter()
+        .find(|(v, _)| *v == m)
+        .map(|(_, l)| *l)
+        .unwrap_or("預設")
 }
 
 /// 改主密碼模態的三欄（現有/新/確認）。明文只活在訊號與送出時的
@@ -738,6 +793,11 @@ pub struct AppCore {
     pub att_state: Signal<crate::attach::AttState>,
     /// 外觀選擇（持久化到 `<datadir>/bitward/theme.txt`）。
     pub theme_mode: Signal<Appearance>,
+    /// 本機設定鏡（daemon 真態在 meta 表）：連線後 FetchSettings 回填、
+    /// 設定頁改即存；複製鈕的剪貼簿清除倒數也讀這裡（ui::copy_button）。
+    pub settings: Signal<bw_proto::Settings>,
+    /// 詳情頁 Passkeys（GetPasskeys 按 item 過濾後的快取；離開詳情即清）。
+    pub passkeys: Signal<Arc<Vec<bw_proto::PasskeyEntry>>>,
 }
 
 impl AppCore {
@@ -803,6 +863,8 @@ impl AppCore {
             att_upload_open: signal(false),
             att_state: signal(crate::attach::AttState::default()),
             theme_mode: signal(Appearance::System),
+            settings: signal(bw_proto::Settings::default()),
+            passkeys: signal(Arc::new(Vec::new())),
             form: FormFields {
                 name: signal(String::new()),
                 username: signal(String::new()),
@@ -872,11 +934,16 @@ impl AppCore {
                     EventTopic::OutboxDrained,
                     EventTopic::VaultChanged,
                     EventTopic::ApprovalRequired,
+                    EventTopic::LockStateChanged,
                 ],
                 move |topic| {
                     match topic {
                         EventTopic::ApprovalRequired => {
                             let _ = tx2.send(Cmd::FetchPending);
+                        }
+                        // 自動鎖定/解鎖沒有人按的呼叫：靠事件刷新鎖態視角
+                        EventTopic::LockStateChanged => {
+                            let _ = tx2.send(Cmd::RefreshStatus);
                         }
                         EventTopic::OutboxDrained | EventTopic::VaultChanged => {
                             let _ = tx2.send(Cmd::EventsRefresh);
@@ -901,6 +968,7 @@ impl AppCore {
         self.totp_issued.set(None);
         self.att_upload_path.set(String::new());
         self.att_upload_open.set(false);
+        self.passkeys.set(Arc::new(Vec::new()));
     }
 }
 
@@ -947,6 +1015,12 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.error_text.set(None);
             core.send(Cmd::FetchFolders);
             fetch_list(core);
+            // 設定鏡先行回填（剪貼簿清除閘在複製鈕、鎖定清搜尋閘在 StateUpdated，
+            // 兩處都要讀它；GetSettings 是本機純讀，不動 busy 計數）。
+            core.ipc_quiet(|s| match s.call(&Call::Admin(AdminCall::GetSettings)) {
+                Ok(Response::Settings(v)) => Cmd::SettingsLoaded(v),
+                _ => Cmd::Nop,
+            });
             // 批次 8：Welcome 不帶帳號情報，補一發輕量 Status 回填
             // 帳號列 email／登入卡 server 預填／needs_reauth 旗。
             core.ipc_quiet(|s| match s.call(&Call::Sync(SyncCall::Status)) {
@@ -1041,6 +1115,9 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 // 進詳情即自動取碼——成功現碼、無 seed 靜默收合、真錯一行。
                 if is_login {
                     core.send(Cmd::RequestTotp);
+                    // Passkeys 節（有才渲染）：GetPasskeys 按 item 過濾，
+                    // 走 quiet 連線（鎖定態回 Locked 屬正常缺席，不閃橫條）。
+                    core.send(Cmd::FetchPasskeys(id));
                 }
             }
         }
@@ -1091,6 +1168,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 .map(|(i, u)| UriDraft {
                     key: i as u32,
                     uri: u.clone(),
+                    match_type: row.meta.uri_matches.get(i).copied().flatten(),
                 })
                 .collect();
             core.form
@@ -1117,6 +1195,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 name: row.meta.name.clone().unwrap_or_default(),
                 username: row.username.clone(),
                 uris: row.meta.uris.clone(),
+                uri_matches: row.meta.uri_matches.clone(),
                 tags: row.meta.tags.clone(),
                 notes: row.notes.clone(),
                 folder_id: row.meta.folder_id.map(|f| f.to_string()),
@@ -1275,6 +1354,16 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         Cmd::StateUpdated { state, refetch, reauth, email, server } => {
             core.settle();
             let unlocked = matches!(state, UnlockStateView::Unlocked { .. });
+            // 鎖定轉換（解鎖→非解鎖）＝清除最近搜尋：官方 web vault 同位語意，
+            // 字串只活在記憶體，清掉即從搜尋框與列表消失（設定可關）。
+            let was_unlocked = is_unlocked(&core.vault.get());
+            if was_unlocked
+                && !unlocked
+                && core.settings.get().clear_search_on_lock
+                && !core.query.get().is_empty()
+            {
+                core.query.set(String::new());
+            }
             core.vault.set(Some(state));
             core.error_text.set(None);
             core.needs_reauth.set(reauth);
@@ -1784,6 +1873,114 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.route.set(Route::Approvals);
             core.send(Cmd::FetchPending);
         }
+        Cmd::OpenSettings => {
+            core.leave_detail();
+            core.sort_menu.set(false);
+            core.route.set(Route::Settings);
+            core.send(Cmd::FetchSettings);
+        }
+        Cmd::FetchSettings => {
+            core.ipc(|s| match s.call(&Call::Admin(AdminCall::GetSettings)) {
+                Ok(Response::Settings(v)) => Cmd::SettingsLoaded(v),
+                Ok(other) => Cmd::Failed {
+                    err: format!("GetSettings 回應形態不符：{other:?}"),
+                },
+                Err(e) => Cmd::Failed { err: e.display() },
+            });
+        }
+        Cmd::SettingsLoaded(v) => {
+            core.settle();
+            core.settings.set(v);
+        }
+        Cmd::RefreshStatus => {
+            core.ipc_quiet(|s| match s.call(&Call::Sync(SyncCall::Status)) {
+                Ok(Response::Status(info)) => Cmd::StateUpdated {
+                    state: info.state,
+                    refetch: true,
+                    reauth: info.needs_reauth,
+                    email: info.email,
+                    server: info.server,
+                },
+                _ => Cmd::Nop,
+            });
+        }
+        Cmd::ApplySettings(next) => {
+            // 改即存：整包回寫（四欄全量 PUT 語意，無部分更新競態面）。
+            core.ipc(move |s| match s.call(&Call::Admin(AdminCall::SetSettings(next))) {
+                Ok(Response::Ok) => Cmd::SettingsSaved(Ok(())),
+                Ok(other) => Cmd::SettingsSaved(Err(format!("SetSettings 回應形態不符：{other:?}"))),
+                Err(e) => Cmd::SettingsSaved(Err(e.display())),
+            });
+        }
+        Cmd::SettingsSaved(res) => {
+            core.settle();
+            match res {
+                Ok(()) => {
+                    core.notice.set(Some("設定已儲存".into()));
+                    core.send(Cmd::FetchSettings);
+                }
+                Err(e) => core.error_text.set(Some(e)),
+            }
+        }
+        Cmd::FetchPasskeys(id) => {
+            // rp_id=None 取全庫再按 item 過濾（列表本就是全庫投影）；鎖定態
+            // daemon 回 Locked——輪詢類失敗靜默（詳情不因此閃橫條）。
+            core.ipc_quiet(move |s| match s.call(&Call::Passkey(PasskeyCall::GetPasskeys { rp_id: None })) {
+                Ok(Response::Passkeys(rows)) => Cmd::PasskeysLoaded {
+                    item: id,
+                    entries: Arc::new(rows.into_iter().filter(|e| e.item_id == Some(id)).collect()),
+                },
+                _ => Cmd::PasskeysLoaded {
+                    item: id,
+                    entries: Arc::new(Vec::new()),
+                },
+            });
+        }
+        Cmd::PasskeysLoaded { item, entries } => {
+            if matches!(core.route.get(), Route::Detail(i) | Route::Edit(i) if i == item) {
+                core.passkeys.set(entries);
+            }
+        }
+        Cmd::AskDeletePasskey {
+            item,
+            credential,
+            rp,
+            user,
+        } => {
+            core.confirm.set(Some(Arc::new(Confirm {
+                title: "刪除此 Passkey？".into(),
+                description: format!("網站：{rp}\n使用者：{user}\n刪除後該網站將無法用這組金鑰登入，且變更會同步到伺服器。"),
+                confirm_label: "刪除 Passkey".into(),
+                destructive: true,
+                on_confirm: Cmd::DeletePasskey { item, credential },
+            })));
+        }
+        Cmd::DeletePasskey { item, credential } => {
+            core.ipc(move |s| {
+                match s.call(&Call::Passkey(PasskeyCall::DeletePasskey {
+                    item_id: item,
+                    credential_id: credential,
+                })) {
+                    Ok(Response::Ok) => Cmd::PasskeyDeleted(Ok(())),
+                    Ok(other) => Cmd::PasskeyDeleted(Err(format!(
+                        "DeletePasskey 回應形態不符：{other:?}"
+                    ))),
+                    Err(e) => Cmd::PasskeyDeleted(Err(e.display())),
+                }
+            });
+        }
+        Cmd::PasskeyDeleted(res) => {
+            core.settle();
+            match res {
+                Ok(()) => {
+                    core.notice.set(Some("Passkey 已刪除".into()));
+                    if let Route::Detail(id) = core.route.get() {
+                        core.send(Cmd::FetchPasskeys(id));
+                    }
+                }
+                Err(e) => core.error_text.set(Some(e)),
+            }
+        }
         Cmd::FetchPending => {
             core.ipc_quiet(|s| match s.call(&Call::Agent(AgentCall::ListPending)) {
                 Ok(Response::Sessions(rows)) => Cmd::PendingLoaded(Arc::new(parse_pending(&rows))),
@@ -2060,6 +2257,13 @@ fn submit_form(core: &AppCore) {
                         .iter()
                         .filter_map(|u| nonblank(u.uri.trim()))
                         .collect(),
+                    // 建立面判定下拉：與 uris 平行（同樣 filter_map 掉空列）；
+                    // None 列＝官方預設 null。
+                    uri_matches: uri_rows
+                        .iter()
+                        .filter(|u| nonblank(u.uri.trim()).is_some())
+                        .map(|u| u.match_type)
+                        .collect(),
                     notes,
                     favorite: false,
                     folder_id,
@@ -2100,16 +2304,22 @@ fn submit_form(core: &AppCore) {
                 tags: &tags,
                 drafts: &drafts,
             };
-            let (leaf, field_struct, add, remove) = edit_delta(&orig, &input);
-            if leaf.is_empty() && field_struct.is_empty() && add.is_empty() && remove.is_empty() {
+            let (leaf, field_struct, match_tail, add, remove) = edit_delta(&orig, &input);
+            if leaf.is_empty()
+                && field_struct.is_empty()
+                && match_tail.is_empty()
+                && add.is_empty()
+                && remove.is_empty()
+            {
                 core.send(Cmd::ShowDetailView(id));
                 return;
             }
             core.ipc(move |s| {
                 let mut err: Option<String> = None;
-                // 兩批 Patch：先 leaf 值（含 field.<n>.name/value），後結構
-                // （SetType/RemoveField/AppendField）。分批避開同欄 type×值衝突。
-                for batch in [leaf, field_struct] {
+                // 三批 Patch：先 leaf 值（含 field.<n>.name/value 與 uri 值/既有列判定），
+                // 再結構（SetType/增刪欄與 uri 列；分批避開同欄 type×值衝突），
+                // 最後新列判定（索引域＝結構批落地後；daemon 鏡像入列即更新）。
+                for batch in [leaf, field_struct, match_tail] {
                     if batch.is_empty() || err.is_some() {
                         continue;
                     }
@@ -2252,16 +2462,23 @@ pub fn parse_pending(rows: &[serde_json::Value]) -> Vec<PendingRow> {
         .collect()
 }
 
-/// 多網址 diff（純函數，可單測）：回 (值批, 結構批)。列身份按 `key` 對齊
-/// 基準索引（同 `field_edits` 手法，刪列不錯位）：基準列改值→`uri.<n>` Set；
+/// 多網址 diff（純函數，可單測）：回 (值批, 結構批, 新列判定批)。列身份按
+/// `key` 對齊基準索引（同 `field_edits` 手法，刪列不錯位）：基準列改值→
+/// `uri.<n>` Set；基準列改判定→`SetUriMatch`（基準索引，leaf 批先於結構批）；
 /// 基準列消失→`RemoveUri`（索引由大而小，免位移）；新列（key 不在基準）→
-/// `AppendUri`（空白列跳過，daemon 同拒）。結構批與 leaf 批分兩發 Patch，
-/// 天然满足「先值後結構」紀律（AppendUri/RemoveUri 892c15b 落地）。
-pub fn uri_edits(orig: &[String], rows: &[UriDraft]) -> (Vec<FieldEdit>, Vec<FieldEdit>) {
+/// `AppendUri`（空白列跳過，daemon 同拒）落結構批；新列帶非預設判定→
+/// `SetUriMatch` 進第三批（索引＝基準數−刪除數＋附加序，結構批落地後才有效，
+/// daemon 鏡像入列即更新故第二發 Patch 直接可用）。
+pub fn uri_edits(
+    orig: &[String],
+    orig_matches: &[Option<u8>],
+    rows: &[UriDraft],
+) -> (Vec<FieldEdit>, Vec<FieldEdit>, Vec<FieldEdit>) {
     let present: std::collections::HashSet<u32> =
         rows.iter().map(|r| r.key).filter(|k| (*k as usize) < orig.len()).collect();
     let mut sets = Vec::new();
     let mut appends = Vec::new();
+    let mut match_tail = Vec::new();
     for r in rows {
         let now = nonblank(r.uri.trim());
         if let Some(base) = orig.get(r.key as usize).filter(|_| (r.key as usize) < orig.len()) {
@@ -2269,6 +2486,12 @@ pub fn uri_edits(orig: &[String], rows: &[UriDraft]) -> (Vec<FieldEdit>, Vec<Fie
                 sets.push(FieldEdit::Set {
                     path: format!("uri.{}", r.key),
                     value: now,
+                });
+            }
+            if r.match_type != orig_matches.get(r.key as usize).copied().flatten() {
+                sets.push(FieldEdit::SetUriMatch {
+                    index: r.key,
+                    match_type: r.match_type,
                 });
             }
         } else if now.is_some() {
@@ -2282,11 +2505,25 @@ pub fn uri_edits(orig: &[String], rows: &[UriDraft]) -> (Vec<FieldEdit>, Vec<Fie
         .collect();
     removes.sort_by(|a, b| b.cmp(a));
     let mut structural: Vec<FieldEdit> = removes
-        .into_iter()
-        .map(|index| FieldEdit::RemoveUri { index })
+        .iter()
+        .map(|index| FieldEdit::RemoveUri { index: *index })
         .collect();
+    // 新列判定批：附加序 k 的落地索引＝基準數−刪除數＋k（AppendUri 依序落尾）。
+    let mut append_i = 0usize;
+    for r in rows {
+        let now = nonblank(r.uri.trim());
+        if now.is_some() && (r.key as usize) >= orig.len() {
+            if let Some(m) = r.match_type {
+                match_tail.push(FieldEdit::SetUriMatch {
+                    index: (orig.len() - removes.len() + append_i) as u32,
+                    match_type: Some(m),
+                });
+            }
+            append_i += 1;
+        }
+    }
     structural.extend(appends);
-    (sets, structural)
+    (sets, structural, match_tail)
 }
 
 /// 表單現值（`edit_delta`／`form_is_dirty` 統一輸入形態；正規化在呼叫端）。
@@ -2301,12 +2538,19 @@ pub struct FormInput<'a> {
     pub drafts: &'a [FieldDraft],
 }
 
+/// `edit_delta` 的五元組返回：leaf 值批、結構批、新列判定批、標籤增、標籤刪。
+pub type EditDelta = (
+    Vec<FieldEdit>,
+    Vec<FieldEdit>,
+    Vec<FieldEdit>,
+    Vec<String>,
+    Vec<String>,
+);
+
 /// 編輯表單的完整差異集（提交與髒閘的單一真相源，紀律 1 零複製）：
-/// leaf 值批、結構批、標籤增/刪。密碼語意沿用編輯規則——空值＝不動基準。
-pub fn edit_delta(
-    orig: &FormOriginal,
-    f: &FormInput<'_>,
-) -> (Vec<FieldEdit>, Vec<FieldEdit>, Vec<String>, Vec<String>) {
+/// leaf 值批、結構批、新列判定批（結構批落地後補發）、標籤增/刪。
+/// 密碼語意沿用編輯規則——空值＝不動基準。
+pub fn edit_delta(orig: &FormOriginal, f: &FormInput<'_>) -> EditDelta {
     let mut leaf: Vec<FieldEdit> = Vec::new();
     if f.name != orig.name {
         leaf.push(FieldEdit::Set {
@@ -2326,9 +2570,9 @@ pub fn edit_delta(
             value: f.password.clone(),
         });
     }
-    // 多網址（批次 A＃1＋C）：值改併入 leaf 批；增刪列走結構批
-    // （RemoveUri 遞減＋AppendUri 落尾，892c15b 面）。
-    let (u_sets, u_struct) = uri_edits(&orig.uris, f.uris);
+    // 多網址（批次 A＃1＋C）：值改與既有列判定改併入 leaf 批；增刪列走結構批
+    // （RemoveUri 遞減＋AppendUri 落尾，892c15b 面）；新列判定第三批改索引域。
+    let (u_sets, u_struct, u_match_tail) = uri_edits(&orig.uris, &orig.uri_matches, f.uris);
     leaf.extend(u_sets);
     if f.notes != orig.notes {
         leaf.push(FieldEdit::Set {
@@ -2349,7 +2593,7 @@ pub fn edit_delta(
     leaf.extend(field_leaf);
     field_struct.extend(u_struct);
     let (add, remove) = diff_tags(&orig.tags, f.tags);
-    (leaf, field_struct, add, remove)
+    (leaf, field_struct, u_match_tail, add, remove)
 }
 
 /// 表單是否「髒」（純函數，單測點）：正規化與 `submit_form` 完全一致
@@ -2386,8 +2630,12 @@ pub fn form_is_dirty(
                 tags: &tag_list,
                 drafts,
             };
-            let (leaf, field_struct, add, remove) = edit_delta(o, &input);
-            !(leaf.is_empty() && field_struct.is_empty() && add.is_empty() && remove.is_empty())
+            let (leaf, field_struct, match_tail, add, remove) = edit_delta(o, &input);
+            !(leaf.is_empty()
+                && field_struct.is_empty()
+                && match_tail.is_empty()
+                && add.is_empty()
+                && remove.is_empty())
         }
         None => {
             !name.is_empty()
@@ -2431,6 +2679,7 @@ fn nav_interrupts(cmd: &Cmd) -> bool {
             | Cmd::OpenCreate
             | Cmd::OpenEdit(_)
             | Cmd::OpenApprovals
+            | Cmd::OpenSettings
             | Cmd::ShowDetailView(_)
             | Cmd::ChooseFolder(_)
             | Cmd::ToggleTrash
@@ -2660,6 +2909,7 @@ mod tests {
             name: "GitHub".into(),
             username: Some("octo".into()),
             uris: vec!["https://github.com".into()],
+            uri_matches: vec![None],
             tags: vec!["dev".into()],
             notes: None,
             folder_id: None,
@@ -2668,6 +2918,7 @@ mod tests {
         let rows = [UriDraft {
             key: 0,
             uri: "https://github.com".into(),
+            match_type: None,
         }];
         // 基準原值＝不髒；空白抖動與「空密碼＝不動」也不髒（同 submit 正規化）。
         assert!(!form_is_dirty(
@@ -2689,7 +2940,13 @@ mod tests {
         ));
         // 清空網址列值（Set uri.0 None）＝髒；列數縮減在編輯面不可達（無 ✕）。
         assert!(form_is_dirty(
-            Some(&orig), "GitHub", "octo", "", &[UriDraft { key: 0, uri: "  ".into() }],
+            Some(&orig), "GitHub", "octo", "", &[UriDraft { key: 0, uri: "  ".into(), match_type: None }],
+            "dev", "", "", ItemKind::Login, &[]
+        ));
+        // 只改判定欄（match 預設→精確）＝髒：SetUriMatch 走 leaf 批。
+        assert!(form_is_dirty(
+            Some(&orig), "GitHub", "octo", "",
+            &[UriDraft { key: 0, uri: "https://github.com".into(), match_type: Some(3) }],
             "dev", "", "", ItemKind::Login, &[]
         ));
         assert!(form_is_dirty(
@@ -2711,7 +2968,7 @@ mod tests {
             None, "", "", "", &[], "", "", "", ItemKind::SecureNote, &[]
         ));
         assert!(form_is_dirty(
-            None, "", "", "", &[UriDraft { key: NEW_URI, uri: "https://a.test".into() }],
+            None, "", "", "", &[UriDraft { key: NEW_URI, uri: "https://a.test".into(), match_type: None }],
             "", "", "", ItemKind::Login, &[]
         ));
         let row = FieldDraft {
@@ -2737,39 +2994,56 @@ mod tests {
     #[test]
     fn uri_edits_key_alignment_and_structural_batches() {
         let orig = vec!["https://a.test".to_owned(), "https://b.test".to_owned()];
-        // 全等基準＝兩批皆空。
+        let no_match: [Option<u8>; 2] = [None, None];
+        // 全等基準＝三批皆空。
         let same = [
-            UriDraft { key: 0, uri: "https://a.test".into() },
-            UriDraft { key: 1, uri: "https://b.test".into() },
+            UriDraft { key: 0, uri: "https://a.test".into(), match_type: None },
+            UriDraft { key: 1, uri: "https://b.test".into(), match_type: None },
         ];
-        let (s, t) = uri_edits(&orig, &same);
-        assert!(s.is_empty() && t.is_empty());
+        let (s, t, tail) = uri_edits(&orig, &no_match, &same);
+        assert!(s.is_empty() && t.is_empty() && tail.is_empty());
         // 倒置排列但 key 對齊→只有真改動的列產 Set。
         let swapped = [
-            UriDraft { key: 1, uri: "https://b.test".into() },
-            UriDraft { key: 0, uri: "https://a2.test".into() },
+            UriDraft { key: 1, uri: "https://b.test".into(), match_type: None },
+            UriDraft { key: 0, uri: "https://a2.test".into(), match_type: None },
         ];
-        let (s, t) = uri_edits(&orig, &swapped);
+        let (s, t, tail) = uri_edits(&orig, &no_match, &swapped);
         assert!(matches!(&s[..], [FieldEdit::Set{path, value}] if path=="uri.0" && value.as_deref()==Some("https://a2.test")));
-        assert!(t.is_empty());
+        assert!(t.is_empty() && tail.is_empty());
+        // 基準有 match、現值回落預設＝SetUriMatch None（leaf 批）。
+        let reset = [
+            UriDraft { key: 0, uri: "https://a.test".into(), match_type: None },
+            same[1].clone(),
+        ];
+        let (s, _, _) = uri_edits(&orig, &[Some(1), None], &reset);
+        assert!(matches!(&s[..], [FieldEdit::SetUriMatch{index, match_type: None}] if *index==0));
         // 清空列值＝Set None；刪列＝RemoveUri 按基準索引、由大而小。
-        let dropped = [UriDraft { key: 0, uri: "https://a.test".into() }];
-        let (s, t) = uri_edits(&orig, &dropped);
+        let dropped = [UriDraft { key: 0, uri: "https://a.test".into(), match_type: None }];
+        let (s, t, _tail) = uri_edits(&orig, &no_match, &dropped);
         assert!(s.is_empty());
         assert!(matches!(&t[..], [FieldEdit::RemoveUri{index}] if *index==1));
         let dropped_both: [UriDraft; 0] = [];
-        let (_, t) = uri_edits(&orig, &dropped_both);
+        let (_, t, _) = uri_edits(&orig, &no_match, &dropped_both);
         assert!(matches!(&t[..], [FieldEdit::RemoveUri{index:1}, FieldEdit::RemoveUri{index:0}]));
         // 新增列（key 不在基準）＝AppendUri 落結構批尾端；空白新列跳過。
         let with_new = [
             same[0].clone(),
             same[1].clone(),
-            UriDraft { key: NEW_URI, uri: " https://c.test ".into() },
-            UriDraft { key: NEW_URI.wrapping_sub(1), uri: "   ".into() },
+            UriDraft { key: NEW_URI, uri: " https://c.test ".into(), match_type: None },
+            UriDraft { key: NEW_URI.wrapping_sub(1), uri: "   ".into(), match_type: None },
         ];
-        let (s, t) = uri_edits(&orig, &with_new);
+        let (s, t, tail) = uri_edits(&orig, &no_match, &with_new);
         assert!(s.is_empty());
         assert!(matches!(&t[..], [FieldEdit::AppendUri{uri}] if uri=="https://c.test"));
+        assert!(tail.is_empty());
+        // 新列帶判定＋刪一列：判定批索引＝基準數−刪除數＋附加序（0）＝1。
+        let drop_and_append = [
+            same[1].clone(),
+            UriDraft { key: NEW_URI, uri: "https://c.test".into(), match_type: Some(2) },
+        ];
+        let (_, t, tail) = uri_edits(&orig, &no_match, &drop_and_append);
+        assert!(matches!(&t[..], [FieldEdit::RemoveUri{index:0}, FieldEdit::AppendUri{..}]));
+        assert!(matches!(&tail[..], [FieldEdit::SetUriMatch{index, match_type: Some(2)}] if *index==1));
     }
 
     #[test]
