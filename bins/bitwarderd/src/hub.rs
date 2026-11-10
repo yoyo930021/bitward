@@ -259,6 +259,10 @@ impl Hub {
 
     pub async fn status_info(&self) -> StatusInfo {
         let d = self.store.depth().unwrap_or_default();
+        let acc = self.account.read().await;
+        let email = acc.as_ref().map(|a| a.email.clone());
+        let server = acc.as_ref().map(|a| a.server.clone());
+        drop(acc);
         StatusInfo {
             state: self.machine.state(),
             epoch: self.machine.epoch().0,
@@ -280,6 +284,8 @@ impl Hub {
             },
             proto: PROTO_VERSION,
             orgs: self.store.org_count().unwrap_or(0),
+            email,
+            server,
         }
     }
 

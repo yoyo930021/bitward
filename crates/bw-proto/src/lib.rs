@@ -897,9 +897,15 @@ pub struct StatusInfo {
     pub needs_reauth: bool,
     pub proto: u16,
     /// 已落庫的 organization 數（P4b 讀側；含邀請中/已接受全部狀態）。
-    /// `default`：舊 daemon（P4b 前建置）不帶此欄位，thin 端寬容解析（§2.6 同款紀律）。
+    /// `default`：舊 daemon（P4b 前建置）不帶此欄位，thin 端寬容解析（§2.6 R3）。
     #[serde(default)]
     pub orgs: u32,
+    /// 帳號顯示欄（批次 8：側欄帳號列 email、登入卡預填 server）。
+    /// 置尾＋`default`：舊 daemon 回包缺欄＝None（JSON 寬容）；未登入兩者皆 None。
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub server: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1065,6 +1071,39 @@ mod tests {
         assert_eq!(postcard::from_bytes::<ClientMsg>(&bytes).unwrap().rid(), 7);
         let j = serde_json::to_vec(&msg).unwrap();
         assert_eq!(serde_json::from_slice::<ClientMsg>(&j).unwrap().rid(), 7);
+    }
+
+    /// 批次 8 紀律：StatusInfo 尾附 email/server 兩欄 must `default`——
+    /// 舊 daemon 的 JSON 幀（無此欄）要能解析成 None，不得互炸。
+    #[test]
+    fn statusinfo_tolerates_legacy_frames_without_account_fields() {
+        let legacy = serde_json::json!({
+            "state": {"Unlocked": {"epoch": 3, "deadline_epoch_ms": null}},
+            "epoch": 3, "items": 9,
+            "outbox": {"queued": 0, "in_flight": 0, "awaiting": 0, "conflict": 0, "dead": 0, "total": 0},
+            "needs_reauth": false, "proto": 1, "orgs": 0,
+        });
+        let info: StatusInfo = serde_json::from_value(legacy).unwrap();
+        assert_eq!(info.email, None);
+        assert_eq!(info.server, None);
+        let full = StatusInfo {
+            state: UnlockStateView::SignedOut,
+            epoch: 0,
+            items: 0,
+            outbox: OutboxCounts::default(),
+            needs_reauth: true,
+            proto: 1,
+            orgs: 0,
+            email: Some("a@b.test".into()),
+            server: Some("http://127.0.0.1:1".into()),
+        };
+        let bytes = postcard::to_allocvec(&full).unwrap();
+        let back: StatusInfo = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(back.email.as_deref(), Some("a@b.test"));
+        assert_eq!(back.server.as_deref(), Some("http://127.0.0.1:1"));
+        let j = serde_json::to_string(&full).unwrap();
+        let back: StatusInfo = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.email, full.email);
     }
 
     impl ClientMsg {
