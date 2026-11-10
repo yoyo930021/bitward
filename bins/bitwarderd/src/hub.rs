@@ -79,6 +79,9 @@ pub struct Hub {
     pub apns: Option<Arc<crate::apns::ApnsConfig>>,
     /// TLS listener 啟動後快取的 SPKI pin（pair start 顯示用）
     pub tls_pin: std::sync::OnceLock<String>,
+    /// 圖示代理單飛閘（批次 B）：同 host 併發去重——雙重檢查快取，
+    /// 閘內只放一發外連（語意同 bw-server refresh_gate）
+    pub icon_gate: tokio::sync::Mutex<()>,
 }
 
 pub type DispatchResult = Result<Response, WtpError>;
@@ -157,6 +160,7 @@ impl Hub {
             ntfy_url,
             apns,
             tls_pin: std::sync::OnceLock::new(),
+            icon_gate: tokio::sync::Mutex::new(()),
         });
         if let Some(a) = account {
             let client = std::sync::Arc::new(
@@ -492,6 +496,10 @@ impl Hub {
                     attachment_id,
                 } => self.attach_delete(*item_id, attachment_id).await,
             },
+            Call::Vault(VaultCall::SetArchived { id, archived }) => {
+                self.write_set_archived(session, *id, *archived).await
+            }
+            Call::Vault(VaultCall::GetIcon { host }) => self.get_icon(host).await,
             Call::Use(UseCall::TotpCode { id }) => self.totp(*id),
             Call::Use(UseCall::GeneratePassword { policy }) => {
                 let opts = bw_crypto::PasswordOptions {
@@ -1472,6 +1480,8 @@ fn action_tag(c: &Call) -> String {
         Call::Vault(VaultCall::Attachment {
             sub: bw_proto::AttachmentOp::Delete { .. },
         }) => "Vault.Attachment.Delete",
+        Call::Vault(VaultCall::SetArchived { .. }) => "Vault.SetArchived",
+        Call::Vault(VaultCall::GetIcon { .. }) => "Vault.GetIcon",
         Call::Passkey(PasskeyCall::GetPasskeys { .. }) => "Passkey.GetPasskeys",
         Call::Passkey(PasskeyCall::RegisterPasskey { .. }) => "Passkey.RegisterPasskey",
         Call::Passkey(PasskeyCall::AssertPasskey { .. }) => "Passkey.AssertPasskey",
@@ -1550,6 +1560,11 @@ fn sensitivity_of_call(c: &Call, resp: Option<&Response>) -> bw_proto::Sensitivi
         Call::Vault(VaultCall::Attachment {
             sub: bw_proto::AttachmentOp::Delete { .. },
         }) => Identity,
+        // 封存只動元資料標記；圖示位元組是站方公開標誌（host 本就在庫中，
+        // 見 GetIcon 變體註解）——皆 Identity 級出口
+        Call::Vault(VaultCall::SetArchived { .. }) | Call::Vault(VaultCall::GetIcon { .. }) => {
+            Identity
+        }
         Call::Use(UseCall::TotpCode { .. })
         | Call::Use(UseCall::Run { .. })
         | Call::Use(UseCall::ResolveRef { .. })

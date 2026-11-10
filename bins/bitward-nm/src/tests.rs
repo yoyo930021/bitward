@@ -42,6 +42,7 @@ fn item(id: &str, name: &str, uris: &[&str]) -> ItemView {
         updated_at: None,
         pending: false,
         deleted_at: None,
+        archived_at: None,
     })
 }
 

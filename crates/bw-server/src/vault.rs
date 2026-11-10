@@ -314,6 +314,29 @@ impl Client {
         self.try_empty_delete(&format!("folders/{id}")).await
     }
 
+    /// `GET {base}/icons/{host}/icon.png`：網站圖示（批次 B）。路徑查證
+    /// （VW 1.37.2，2026-11-10）：掛 **root** 而非 `/api`（`/api/icons/...`
+    /// 實錄 404）；不需要 bearer（無 auth 200 實錄）；解析失敗的 host 回
+    /// 200 占位 PNG（19×19 gray），route 不存在才 404——呼叫端據此區分
+    /// 「未啟用圖示服務」與「該站無圖」。回應可能是 PNG 或 ICO（1.1.1.1
+    /// 實錄 image/x-icon），呼叫端按 magic bytes 自辨。
+    pub async fn fetch_icon(&self, host: &str) -> Result<Vec<u8>, ServerError> {
+        let url = format!("{}icons/{host}/icon.png", self.base);
+        let resp = self.http.get(&url).send().await?;
+        let status = u16::from(resp.status());
+        if status == 404 {
+            return Err(ServerError::Http {
+                status,
+                detail: "icons route unavailable".to_owned(),
+            });
+        }
+        if !(200..299).contains(&status) {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ApiError::parse(status, &body).into_server_error());
+        }
+        Ok(resp.bytes().await?.to_vec())
+    }
+
     /// `POST /ciphers/{id}/attachment/v2`：拿上傳 URL（不傳檔案）。
     pub async fn attachment_prepare_upload(
         &self,

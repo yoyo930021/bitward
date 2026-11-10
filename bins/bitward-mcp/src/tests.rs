@@ -53,6 +53,7 @@ fn sample_item() -> ItemView {
         updated_at: None,
         pending: false,
         deleted_at: None,
+        archived_at: None,
     })
 }
 

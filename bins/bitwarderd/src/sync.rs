@@ -296,6 +296,68 @@ impl Hub {
         Ok(Response::Ok)
     }
 
+    /// 封存／取消封存（批次 B）。語意照 delete/restore 先例：鏡像立即改
+    /// `archivedDate`（列表即刻反映＋pending 徽章），drain 端以即時 theirs
+    /// 為基底全量 PUT（partial 端點不收 archivedDate——VW 1.37.2 實錄 422；
+    /// 見 proto 變體註解）。離線＝入列待推。
+    pub async fn write_set_archived(
+        &self,
+        session: &str,
+        id: ItemId,
+        archived: bool,
+    ) -> Result<Response, WtpError> {
+        self.require_unlocked()?;
+        let mut mirror = {
+            let row = self.store.item(id).map_err(denied)?;
+            row.ok_or(WtpError::NotFound)?.enc_cipher
+        };
+        if let Some(o) = mirror.as_object_mut() {
+            if archived {
+                o.insert("archivedDate".into(), json!(chrono_now()));
+            } else {
+                o.insert("archivedDate".into(), Value::Null);
+            }
+        }
+        self.store
+            .enqueue(&MutationDraft {
+                item: id,
+                payload: json!({"op": "archive", "archived": archived}),
+                base_rev: None,
+                origin: Some(session),
+                mirror: Some(&mirror),
+            })
+            .map_err(denied)?;
+        self.trigger_drain();
+        Ok(Response::Ok)
+    }
+
+    /// drain 端 archive：GET 即時 theirs → 蓋/清 archivedDate → 全量 PUT。
+    /// 鏡像與金鑰欄原樣隨 theirs 帶回（item key 層不動，同 push_move 紀律）。
+    async fn push_archive(
+        &self,
+        client: &bw_server::Client,
+        m: &Mutation,
+    ) -> Result<(), (bw_server::ServerError, bool)> {
+        let mut body = client.cipher_get(m.item).await.map_err(|e| (e, false))?;
+        let archived = m
+            .payload
+            .get("archived")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        if let Some(o) = body.as_object_mut() {
+            if archived {
+                o.insert("archivedDate".into(), json!(chrono_now()));
+            } else {
+                o.insert("archivedDate".into(), Value::Null);
+            }
+        }
+        let resp = client
+            .cipher_put(m.item, &body)
+            .await
+            .map_err(|e| (e, false))?;
+        self.finish_applied(m.id, &resp)
+    }
+
     pub async fn write_restore(&self, session: &str, id: ItemId) -> Result<Response, WtpError> {
         self.require_unlocked()?;
         let mut mirror = {
@@ -533,6 +595,7 @@ impl Hub {
                 .await
                 .map(|_| ())
                 .map_err(|e| (e, false)),
+            "archive" => self.push_archive(&client, m).await,
             "attach_upload" => self.push_attach_upload(&client, m).await,
             "move" => self.push_move(&client, m).await,
             other => {
@@ -1704,5 +1767,37 @@ mod tests {
         // 上限 500 防呆
         let many = vec![bw_proto::ImportItem::default(); 501];
         assert!(hub.write_import("s", &many, false).await.is_err());
+    }
+
+    /// 批次 B 封存：鏡像立即帶 archivedDate（列表即時反映）、outbox 入列
+    /// archive op；取消封存清欄。推送端全量 PUT 形態由 archicon.sh 實錄。
+    #[tokio::test]
+    async fn set_archived_flips_mirror_and_queues_op() {
+        let (hub, _d) = unlocked_hub("arch").await;
+        let id = Uuid::new_v4();
+        hub.store
+            .put_mirror(
+                id,
+                &json!({"id": id.to_string(), "type": 1, "name": "2.n|x|y"}),
+            )
+            .unwrap();
+        hub.write_set_archived("s", id, true).await.unwrap();
+        let m = hub.store.meta(id).unwrap().unwrap();
+        assert!(m.archived_at.is_some(), "鏡像即刻投影 archived_at");
+        let due = hub.store.take_due(8).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].payload["op"], json!("archive"));
+        assert_eq!(due[0].payload["archived"], json!(true));
+        // 主列表預設排除已封存（三態過濾的 store 層專測在 tests/store.rs）
+        assert!(
+            hub.store
+                .query(&Query::default())
+                .unwrap()
+                .iter()
+                .all(|x| x.id != id)
+        );
+        hub.write_set_archived("s2", id, false).await.unwrap();
+        let m = hub.store.meta(id).unwrap().unwrap();
+        assert_eq!(m.archived_at, None, "取消封存清欄");
     }
 }

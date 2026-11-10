@@ -260,6 +260,14 @@ impl Hub {
                     (Access::Mutate(MutateOp::Delete), Some(*item_id))
                 }
             },
+            // 封存＝項目元資料改動（Patch 級）；圖示是 host 級讀取，
+            // 無 item 錨點（Target::All 級授權命中；item 級 grant 不覆蓋）
+            Call::Vault(VaultCall::SetArchived { id, .. }) => {
+                (Access::Mutate(MutateOp::Patch), Some(*id))
+            }
+            Call::Vault(VaultCall::GetIcon { .. }) => {
+                (Access::See(bw_proto::Sensitivity::Identity), None)
+            }
             // passkey 分級（契約 §4）：列表＝Metadata（Identity floor）；
             // Register/Assert 取用私鑰＝Use(UseKind::Passkey)（用而不讀，同 totp 級）
             Call::Passkey(PasskeyCall::GetPasskeys { .. }) => {
@@ -749,6 +757,7 @@ pub fn item_of(call: &Call) -> Option<uuid::Uuid> {
             | bw_proto::AttachmentOp::Download { item_id, .. }
             | bw_proto::AttachmentOp::Delete { item_id, .. } => *item_id,
         }),
+        Call::Vault(VaultCall::SetArchived { id, .. }) => Some(*id),
         Call::Vault(VaultCall::Delete { ids }) => ids.first().copied(),
         Call::Passkey(PasskeyCall::RegisterPasskey {
             item_id: Some(id), ..

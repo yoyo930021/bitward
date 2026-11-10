@@ -69,6 +69,9 @@ enum Cmd {
         /// 列垃圾桶（帶 deleted_at；默認只列未刪）
         #[arg(long)]
         trash: bool,
+        /// 只列已封存項目（默認排除封存；官方 archivedDate 語意）
+        #[arg(long)]
+        archived: bool,
         #[arg(long, default_value = "name")]
         sort: String,
         #[arg(long, default_value_t = 100)]
@@ -178,6 +181,18 @@ enum Cmd {
         /// 官方 `bw import` 格式參數佔位（本批 true/false 語意相同）
         #[arg(long)]
         format: bool,
+    },
+    /// 封存／取消封存（官方 archivedDate 語意：主列表預設排除已封存）
+    Archive {
+        id: String,
+        /// true＝封存（預設）、false＝取消封存
+        #[arg(default_value = "true")]
+        on: String,
+    },
+    /// 取網站圖示（daemon 代理＋7 天快取；`-`＝stdout。404＝server 無 icons）
+    Icon {
+        host: String,
+        out: String,
     },
     Rm {
         id: String,
@@ -629,11 +644,15 @@ async fn run() -> Result<(), String> {
     }
     match reply {
         Ok(resp) => {
-            if let Cmd::Attach {
-                cmd: AttachCmd::Get { out, .. },
-            } = &args.cmd
-                && let Response::AttachmentBytes(bytes) = &resp
-            {
+            // 二進位出口統一落檔：附件下載與圖示代理同形（AttachmentBytes）
+            let bin_out = match &args.cmd {
+                Cmd::Attach {
+                    cmd: AttachCmd::Get { out, .. },
+                }
+                | Cmd::Icon { out, .. } => Some(out.clone()),
+                _ => None,
+            };
+            if let (Some(out), Response::AttachmentBytes(bytes)) = (&bin_out, &resp) {
                 // 附件內容寫檔不走 stdout（二進位；`-`＝stdout 供管線）
                 if out == "-" {
                     use std::io::Write as _;
@@ -1013,6 +1032,7 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             collection,
             folder,
             trash,
+            archived,
             sort,
             limit,
         } => Call::Vault(VaultCall::List {
@@ -1032,6 +1052,7 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                 collection: collection.as_deref().map(parse_id).transpose()?,
                 folder: folder.clone(),
                 deleted: trash.then_some(true),
+                archived: archived.then_some(true),
             },
             view: View::Metadata,
         }),
@@ -1197,6 +1218,15 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             }),
             FolderCmd::Delete { id } => Call::Vault(VaultCall::DeleteFolder { id: parse_id(id)? }),
         },
+        Cmd::Archive { id, on } => Call::Vault(VaultCall::SetArchived {
+            id: parse_id(id)?,
+            archived: match on.as_str() {
+                "true" => true,
+                "false" => false,
+                other => return Err(format!("archive 值需 true|false，got {other}")),
+            },
+        }),
+        Cmd::Icon { host, .. } => Call::Vault(VaultCall::GetIcon { host: host.clone() }),
         Cmd::Purge { id } => Call::Vault(VaultCall::Purge { id: parse_id(id)? }),
         Cmd::Edit {
             id,

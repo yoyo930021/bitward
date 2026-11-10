@@ -7,6 +7,7 @@ mod arena;
 mod attach;
 mod datamanage;
 mod hub;
+mod icon;
 mod passkey;
 mod sync;
 

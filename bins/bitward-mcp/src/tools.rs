@@ -136,6 +136,7 @@ pub fn map_call(name: &str, args: &Value) -> Result<bw_proto::Call, ToolError> {
                 collection: None,
                 folder: None,
                 deleted: None,
+                archived: None,
             },
             view: View::Metadata,
         }),
