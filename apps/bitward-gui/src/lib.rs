@@ -173,6 +173,8 @@ pub fn App() -> impl IntoElement {
     if let Some(dir) = std::env::var_os("NSH_GUI_SHOTS").map(PathBuf::from) {
         if std::env::var_os("NSH_GUI_SHOTS_DRAIN").is_some() {
             shots::script_drain(dir, core.clone());
+        } else if std::env::var_os("NSH_GUI_SHOTS_LOGIN2FA").is_some() {
+            shots::script_login2fa(dir, core.clone());
         } else if std::env::var_os("NSH_GUI_SHOTS_LOGIN").is_some() {
             shots::script_login(dir, core.clone());
         } else {
@@ -809,9 +811,15 @@ fn login_page(core: AppCore) -> View {
     let server = core.login.server;
     let email = core.login.email;
     let password = core.login.password;
+    let code = core.login.code;
     let submit = core.clone();
     let err_core = core.clone();
     let busy_cond = core.clone();
+    // 第一步（三欄）／第二步（因子單選＋碼）以 providers 訊號切換於同卡。
+    let step1_core = core.clone();
+    let step2_core = core.clone();
+    let resend_core = core.clone();
+    let factors_core = core.clone();
     view()
         .flex_1()
         .flex_col()
@@ -848,28 +856,113 @@ fn login_page(core: AppCore) -> View {
                                 .line_height(px(34.0)),
                         )
                         .child(
-                            text("登入密碼庫")
-                                .text_size(px(theme::TEXT_CARD_TITLE))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme::TEXT_PRIMARY),
+                            text(move || {
+                                if step2_core.login.providers.get().is_some() {
+                                    "第二因子驗證"
+                                } else {
+                                    "登入密碼庫"
+                                }
+                            })
+                            .text_size(px(theme::TEXT_CARD_TITLE))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::TEXT_PRIMARY),
                         ),
                 )
-                .child(ui::form_field(
-                    "伺服器",
-                    "https://vault.example.com",
-                    server,
-                    false,
-                    move |v| server.set(v),
+                .child(when(
+                    move || step1_core.login.providers.get().is_none(),
+                    move || {
+                        view()
+                            .flex_col()
+                            .gap(px(theme::FORM_GAP))
+                            .child(ui::form_field(
+                                "伺服器",
+                                "https://vault.example.com",
+                                server,
+                                false,
+                                move |v| server.set(v),
+                            ))
+                            .child(ui::form_field(
+                                "Email",
+                                "you@example.com",
+                                email,
+                                false,
+                                move |v| email.set(v),
+                            ))
+                            .child(ui::form_field(
+                                "主密碼",
+                                "（登入後即解鎖金鑰鏈）",
+                                password,
+                                true,
+                                move |v| password.set(v),
+                            ))
+                    },
                 ))
-                .child(ui::form_field("Email", "you@example.com", email, false, move |v| {
-                    email.set(v)
-                }))
-                .child(ui::form_field(
-                    "主密碼",
-                    "（登入後即解鎖金鑰鏈）",
-                    password,
-                    true,
-                    move |v| password.set(v),
+                .child(when(
+                    move || step2_core.login.providers.get().is_some(),
+                    move || {
+                        let list_core = factors_core.clone();
+                        let pick_core = factors_core.clone();
+                        view()
+                            .flex_col()
+                            .gap(px(theme::FORM_GAP))
+                            .child(
+                                text("此帳號需要第二因子驗證，請選擇因子並輸入驗證碼。")
+                                    .text_size(px(12.5))
+                                    .line_height(px(18.0))
+                                    .text_color(theme::TEXT_SECONDARY),
+                            )
+                            .child(dynamic(move || {
+                                let mut col = view().flex_col().gap_0p5();
+                                if let Some(infos) = list_core.login.providers.get() {
+                                    for p in infos.iter() {
+                                        let label = format!(
+                                            "{}{}",
+                                            bw_proto::TwoFactorProviderInfo::label(p.provider),
+                                            match &p.hint {
+                                                Some(h) => format!("：{h}"),
+                                                None => String::new(),
+                                            }
+                                        );
+                                        let n = p.provider;
+                                        let sel = list_core.login.provider.get() == n;
+                                        let c = pick_core.clone();
+                                        col = col.child(ui::menu_row(label, sel, move || {
+                                            c.login.provider.set(n)
+                                        }));
+                                    }
+                                }
+                                col
+                            }))
+                            .child(ui::form_field(
+                                "驗證碼",
+                                "6 位數字",
+                                code,
+                                false,
+                                move |v| code.set(v),
+                            ))
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .cursor_pointer()
+                                    .on_press({
+                                        let c = factors_core.clone();
+                                        move || {
+                                            let v = c.login.remember.get();
+                                            c.login.remember.set(!v);
+                                        }
+                                    })
+                                    .child(ui::bool_switch(move || {
+                                        factors_core.login.remember.get()
+                                    }))
+                                    .child(
+                                        text("記住此裝置（下次登入免第二因子）")
+                                            .text_size(px(12.5))
+                                            .text_color(theme::TEXT_SECONDARY),
+                                    ),
+                            )
+                    },
                 ))
                 .child(
                     text(move || err_core.login.error.get().unwrap_or_default())
@@ -880,22 +973,48 @@ fn login_page(core: AppCore) -> View {
                 .child(when(
                     move || !busy_cond.login.busy.get(),
                     move || {
+                        let step2 = step2_core.login.providers.get().is_some();
                         let c = submit.clone();
-                        view().w_full().child(
-                            ui::button("登入", ui::Btn::PrimaryWide, move || {
-                                c.send(Cmd::SubmitLogin)
-                            })
+                        let r = resend_core.clone();
+                        let mut col = view().flex_col().gap(px(theme::FORM_GAP)).w_full();
+                        col = col.child(
+                            ui::button(
+                                if step2 { "完成登入" } else { "登入" },
+                                ui::Btn::PrimaryWide,
+                                move || {
+                                    c.send(if step2 {
+                                        Cmd::SubmitLogin2fa
+                                    } else {
+                                        Cmd::SubmitLogin
+                                    })
+                                },
+                            )
                             .w_full(),
-                        )
+                        );
+                        if step2 {
+                            // Email 因子補發：重送第一步（無 two_factor）讓伺服器
+                            // 再跑挑戰並重發驗證信；Authenticator 時無害。
+                            col = col.child(ui::text_button_dyn(
+                                || "重新取得驗證碼".to_owned(),
+                                move || r.send(Cmd::SubmitLogin),
+                            ));
+                        }
+                        col
                     },
                 ))
                 .child(when(
                     move || busy_cond.login.busy.get(),
                     move || {
-                        text("登入中…")
-                            .text_size(px(12.5))
-                            .text_color(theme::TEXT_SECONDARY)
-                            .animate_pulse()
+                        text(move || {
+                            if busy_cond.login.providers.get().is_some() {
+                                "驗證中…"
+                            } else {
+                                "登入中…"
+                            }
+                        })
+                        .text_size(px(12.5))
+                        .text_color(theme::TEXT_SECONDARY)
+                        .animate_pulse()
                     },
                 ))
                 .child(

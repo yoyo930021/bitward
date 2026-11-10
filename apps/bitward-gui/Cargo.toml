@@ -18,6 +18,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = "1"
+# shots 驗收流算即時 TOTP（2FA 登入流）；正式路徑的碼在 daemon 端算。
+hmac = "0.12"
+sha1 = "0.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nsh-platform-linux = { version = "0.3.0", default-features = false }

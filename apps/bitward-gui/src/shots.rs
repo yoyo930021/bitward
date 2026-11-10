@@ -275,6 +275,122 @@ fn poll_unlocked(dir: PathBuf, core: AppCore, ms: u64) {
     });
 }
 
+/// base32（RFC 4648 無填充变體；VW 的 TOTP secret 形態）。
+fn base32_decode(input: &str) -> Vec<u8> {
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut out = Vec::new();
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for ch in input.bytes() {
+        let ch = ch.to_ascii_uppercase() as char;
+        if ch == '=' || ch.is_whitespace() {
+            continue;
+        }
+        let idx = alphabet.iter().position(|a| *a as char == ch).expect("base32 字元");
+        acc = (acc << 5) | idx as u32;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((acc >> bits) & 0xff) as u8);
+        }
+    }
+    out
+}
+
+/// 視窗當前的 RFC 6238 TOTP（6 碼/30s/SHA1，同 Bitwarden 客户端）。填入時刻
+/// 現算而非 env 預計算：nsh 啟動時間不定，預計算碼會撞過期邊界。
+fn totp_now(secret_base32: &str) -> String {
+    use hmac::{Hmac, Mac};
+    let key = base32_decode(secret_base32);
+    let counter = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        / 30;
+    let mut mac = Hmac::<sha1::Sha1>::new_from_slice(&key).expect("hmac 接受任意鍵長");
+    mac.update(&counter.to_be_bytes());
+    let h = mac.finalize().into_bytes();
+    let off = (h[h.len() - 1] & 0x0f) as usize;
+    let bin = ((h[off] & 0x7f) as u32) << 24
+        | (h[off + 1] as u32) << 16
+        | (h[off + 2] as u32) << 8
+        | h[off + 3] as u32;
+    format!("{:06}", bin % 1_000_000)
+}
+
+/// 2FA 登入卡驗收流（`NSH_GUI_SHOTS_LOGIN2FA`）：前提同 script_login（乾淨
+/// daemon SignedOut）＋帳號已開 Authenticator 2FA（login2fa.sh 經 VW API 開）。
+/// 填三欄 → SubmitLogin → 輪詢 providers 訊號（第二步態）→ 48 因子清單 →
+/// 現算當窗碼填欄 → SubmitLogin2fa → 輪詢 Unlocked＋鏡像非空 → 49 進庫。
+/// 碼錯/超時走斷言紅＋90s 硬退。
+pub fn script_login2fa(dir: PathBuf, core: AppCore) {
+    let server = std::env::var("BW_TEST_SERVER").unwrap_or_default();
+    let email = std::env::var("BW_TEST_EMAIL").unwrap_or_default();
+    let pw = std::env::var("BW_TEST_PASSWORD").unwrap_or_default();
+    let secret = std::env::var("BW_TEST_TOTP_SECRET").unwrap_or_default();
+    assert!(!secret.is_empty(), "BW_TEST_TOTP_SECRET 必要");
+    let c = core.clone();
+    at(3000, move || {
+        assert!(
+            matches!(c.vault.get(), Some(bw_proto::UnlockStateView::SignedOut)),
+            "2FA 登入流前提＝daemon SignedOut，實際：{:?}",
+            c.vault.get()
+        );
+        c.login.server.set(server);
+        c.login.email.set(email);
+        c.login.password.set(pw);
+    });
+    let c = core.clone();
+    at(3800, move || c.send(Cmd::SubmitLogin));
+    poll_2fa_step(dir, core, 5000, secret);
+    at(90000, || {
+        eprintln!("bitward-gui: 2fa login e2e 90 秒未完成（掛在輪詢？）");
+        std::process::exit(1);
+    });
+}
+
+fn poll_2fa_step(dir: PathBuf, core: AppCore, ms: u64, secret: String) {
+    let d = dir.clone();
+    let c = core.clone();
+    at(ms, move || {
+        let Some(providers) = c.login.providers.get() else {
+            if ms < 60000 {
+                poll_2fa_step(dir, core, ms + 1000, secret);
+            }
+            return;
+        };
+        assert!(
+            providers.iter().any(|p| p.provider == 0),
+            "第二步應列出 Authenticator（0），實際：{providers:?}"
+        );
+        assert_eq!(c.login.provider.get(), 0, "預選應落在首個支援因子");
+        capture(&d, "shot-48-login-2fa-step.png");
+        c.login.code.set(totp_now(&secret));
+        c.send(Cmd::SubmitLogin2fa);
+        poll_2fa_unlocked(dir, core, ms + 2000);
+    });
+}
+
+fn poll_2fa_unlocked(dir: PathBuf, core: AppCore, ms: u64) {
+    let d = dir.clone();
+    let c = core.clone();
+    at(ms, move || {
+        let unlocked = matches!(c.vault.get(), Some(bw_proto::UnlockStateView::Unlocked { .. }));
+        if !unlocked || c.items.get().is_empty() {
+            if ms < 80000 {
+                poll_2fa_unlocked(dir, core, ms + 1000);
+            }
+            return;
+        }
+        let err_open = c.login.error.get();
+        assert!(
+            err_open.is_none(),
+            "2FA 登入後錯誤列應清空，實際：{err_open:?}"
+        );
+        capture(&d, "shot-49-vault-after-2fa.png");
+        at(ms + 600, quit);
+    });
+}
+
 /// 由目前列表訊號找名字完全相符的項目視圖。
 fn find_view(core: &AppCore, name: &str) -> Option<bw_proto::ItemView> {
     core.items

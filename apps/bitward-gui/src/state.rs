@@ -259,6 +259,11 @@ pub enum Cmd {
     OpenLogin,
     /// 登入卡送出：前端校驗 → `Auth:Login{password:Some}`（本機 UDS 明文合法）。
     SubmitLogin,
+    /// 第二步（2FA）：伺服器挑戰列出可用因子，卡原地進因子單選＋驗證碼態。
+    Login2faRequested(Vec<bw_proto::TwoFactorProviderInfo>),
+    /// 第二步送出：重發 Login{password, two_factor}（daemon 不存挑戰，
+    /// hash 由密碼重算；密碼訊號跨步保留）。
+    SubmitLogin2fa,
     /// 登入失敗回包（成功直接走 StateUpdated，登入即解鎖的 hub 語意）。
     LoginDone(Result<(), String>),
     /// 空作（背景路徑無情報可落地時佔位）。
@@ -406,6 +411,13 @@ pub struct LoginFields {
     pub password: Signal<String>,
     pub error: Signal<Option<String>>,
     pub busy: Signal<bool>,
+    /// 第二步（2FA）：Some＝伺服器挑戰列出的因子（卡進因子單選＋驗證碼態）；
+    /// None＝第一步。password 訊號跨步保留＝重送 Login 的憑證來源。
+    pub providers: Signal<Option<Arc<Vec<bw_proto::TwoFactorProviderInfo>>>>,
+    /// 當前端選的因子編號。
+    pub provider: Signal<i32>,
+    pub code: Signal<String>,
+    pub remember: Signal<bool>,
 }
 
 impl LoginFields {
@@ -413,6 +425,9 @@ impl LoginFields {
         self.password.set(String::new());
         self.error.set(None);
         self.busy.set(false);
+        self.providers.set(None);
+        self.code.set(String::new());
+        self.remember.set(false);
     }
 }
 
@@ -454,11 +469,34 @@ pub fn validate_login(server: &str, email: &str, password: &str) -> Result<Strin
     normalize_server(server).map_err(str::to_owned)
 }
 
+/// 第二步預選因子（純函數，單測點）：首個本批支援的因子（Authenticator/Email）；
+/// 全部未支援時退回首個列出的（選了會拿到 daemon「此因子尚未支援」可懂錯誤，
+/// 看得見總比默靜成功好）。空清單＝None。
+pub fn default_provider(infos: &[bw_proto::TwoFactorProviderInfo]) -> Option<i32> {
+    infos
+        .iter()
+        .find(|p| bw_proto::TwoFactorProviderInfo::is_supported(p.provider))
+        .or_else(|| infos.first())
+        .map(|p| p.provider)
+}
+
+/// 一次性驗證碼格式閘（純函數，單測點）：6 位數字（TOTP/Email 代碼同形）。
+/// 通過時回 trim 後的碼；最終裁判仍是伺服器。
+pub fn validate_otp(raw: &str) -> Result<String, String> {
+    let s = raw.trim();
+    if s.len() != 6 || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("驗證碼需為 6 位數字".into());
+    }
+    Ok(s.to_owned())
+}
+
 /// 登入錯誤可懂化（批次 8）：保留 daemon 原文（使用者要看真話），
 /// 403／傳輸類另加一句繁中提示。
 pub fn humanize_login(err: &str) -> String {
     if err.contains("403") || err.contains("incorrect") {
         format!("{err}（憑證遭拒：檢查 email 與主密碼）")
+    } else if err.contains("Invalid TOTP") || err.contains("Invalid token") {
+        format!("{err}（驗證碼錯誤或已過期：重新取碼後再試）")
     } else if err.contains("refused")
         || err.contains("transport")
         || err.contains("connect")
@@ -609,6 +647,10 @@ impl AppCore {
                 password: signal(String::new()),
                 error: signal(None),
                 busy: signal(false),
+                providers: signal(None),
+                provider: signal(0),
+                code: signal(String::new()),
+                remember: signal(false),
             },
             confirm: signal_with(None, SignalEquals::Never),
             pw_modal: signal(false),
@@ -1090,6 +1132,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                             email,
                             password: Some(pw),
                             api_key: None,
+                            two_factor: None,
                         })) {
                             // 登入即解鎖：成功直接回 Status，走 StateUpdated。
                             Ok(Response::Status(info)) => Cmd::StateUpdated {
@@ -1099,6 +1142,10 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                                 email: info.email,
                                 server: info.server,
                             },
+                            // 伺服器要第二因子：原地進第二步。
+                            Ok(Response::TwoFactorRequest { providers }) => {
+                                Cmd::Login2faRequested(providers)
+                            }
                             Ok(other) => Cmd::LoginDone(Err(format!(
                                 "Login 回應形態不符：{other:?}"
                             ))),
@@ -1113,6 +1160,68 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             match res {
                 Ok(()) => core.login.reset(),
                 Err(e) => core.login.error.set(Some(e)),
+            }
+        }
+        Cmd::Login2faRequested(providers) => {
+            core.login.busy.set(false);
+            core.login.error.set(None);
+            core.login.code.set(String::new());
+            core.login
+                .provider
+                .set(default_provider(&providers).unwrap_or(0));
+            core.login.providers.set(Some(Arc::new(providers)));
+        }
+        Cmd::SubmitLogin2fa => {
+            if core.login.busy.get() {
+                return;
+            }
+            let server = core.login.server.get();
+            let email = core.login.email.get().trim().to_owned();
+            let pw = core.login.password.get().clone();
+            let code = match validate_otp(&core.login.code.get()) {
+                Ok(c) => c,
+                Err(msg) => {
+                    core.login.error.set(Some(msg));
+                    return;
+                }
+            };
+            // 第一步欄位仍是憑證真相源（失焦不清號碼）；校驗共用 validate_login。
+            match validate_login(&server, &email, &pw) {
+                Err(msg) => core.login.error.set(Some(msg)),
+                Ok(url) => {
+                    core.login.busy.set(true);
+                    core.login.error.set(None);
+                    let tf = bw_proto::TwoFactorInput {
+                        provider: core.login.provider.get(),
+                        token: code,
+                        remember: core.login.remember.get(),
+                    };
+                    core.ipc(move |s| {
+                        match s.call(&Call::Auth(AuthCall::Login {
+                            server: url,
+                            email,
+                            password: Some(pw),
+                            api_key: None,
+                            two_factor: Some(tf),
+                        })) {
+                            Ok(Response::Status(info)) => Cmd::StateUpdated {
+                                state: info.state,
+                                refetch: true,
+                                reauth: info.needs_reauth,
+                                email: info.email,
+                                server: info.server,
+                            },
+                            // 再挑戰＝碼沒送對位；留第二步讓人重取碼。
+                            Ok(Response::TwoFactorRequest { providers }) => {
+                                Cmd::Login2faRequested(providers)
+                            }
+                            Ok(other) => Cmd::LoginDone(Err(format!(
+                                "Login 回應形態不符：{other:?}"
+                            ))),
+                            Err(e) => Cmd::LoginDone(Err(humanize_login(&e.display()))),
+                        }
+                    });
+                }
             }
         }
         Cmd::Nop => {}
@@ -2150,6 +2259,40 @@ mod tests {
             "請輸入 email"
         );
         assert_eq!(validate_login("vault.test", "a@b.c", "pw").unwrap(), "https://vault.test");
+    }
+
+    #[test]
+    fn default_provider_prefers_supported_then_first() {
+        let info = |p: i32| bw_proto::TwoFactorProviderInfo { provider: p, hint: None };
+        // 首個支援因子（Authenticator=0）優先，即使不是清單第一位。
+        assert_eq!(
+            default_provider(&[info(1), info(0)]),
+            Some(1),
+            "Email(1) 是首個支援因子時選它"
+        );
+        assert_eq!(default_provider(&[info(2), info(0)]), Some(0));
+        // 全未支援：退回首個列出的（選了給 daemon 可懂錯誤，不沉默）。
+        assert_eq!(default_provider(&[info(3), info(2)]), Some(3));
+        assert_eq!(default_provider(&[]), None);
+    }
+
+    #[test]
+    fn validate_otp_gates_six_digits() {
+        assert_eq!(validate_otp(" 123456 ").unwrap(), "123456");
+        assert_eq!(validate_otp("000000").unwrap(), "000000");
+        assert_eq!(validate_otp("12345").unwrap_err(), "驗證碼需為 6 位數字");
+        assert_eq!(validate_otp("1234567").unwrap_err(), "驗證碼需為 6 位數字");
+        assert_eq!(validate_otp("12a456").unwrap_err(), "驗證碼需為 6 位數字");
+        assert_eq!(validate_otp("").unwrap_err(), "驗證碼需為 6 位數字");
+    }
+
+    #[test]
+    fn humanize_login_flags_stale_totp() {
+        let out = humanize_login("http 400: Invalid TOTP code! Server time: ...");
+        assert!(out.starts_with("http 400: Invalid TOTP code!"), "原文保留：{out}");
+        assert!(out.contains("驗證碼錯誤或已過期"), "加可懂提示：{out}");
+        // 其他錯誤不動原文。
+        assert_eq!(humanize_login("weird"), "weird");
     }
 
     #[test]
