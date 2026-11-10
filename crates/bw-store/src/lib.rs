@@ -158,6 +158,10 @@ impl Store {
                 let _ = conn.execute_batch(&format!("{stmt};"));
             }
         }
+        if version < 8 {
+            // v8（Send 鏡像）：表在 V1，此處留掛鉤（同 v3/v4/v6 形態）
+            conn.execute_batch(schema::V8)?;
+        }
         if version < schema::SCHEMA_VERSION {
             conn.execute_batch(&format!(
                 "PRAGMA user_version = {};",

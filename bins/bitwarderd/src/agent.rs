@@ -268,14 +268,32 @@ impl Hub {
             Call::Vault(VaultCall::GetIcon { .. }) => {
                 (Access::See(bw_proto::Sensitivity::Identity), None)
             }
-            // 報告出口全部去敏（id 群集／分數／日期＋名稱＋uri 計數）——比照
-            // FindDuplicates 的 See(Identity)；歷史錨定 item 供 item 級 grant 判定
+            // 報告出口全部去敏（id 群集／分數／日期＋名稱＋uri 計數），解密只發生在
+            // daemon 打分閉包內——比照 FindDuplicates 的 See(Identity)；歷史錨定 item 供 item 級 grant 判定
             Call::Vault(VaultCall::Reports {
                 sub: bw_proto::Reports::CipherHistory { id },
             }) => (Access::See(bw_proto::Sensitivity::Identity), Some(*id)),
             Call::Vault(VaultCall::Reports { .. }) => {
                 (Access::See(bw_proto::Sensitivity::Identity), None)
             }
+            // Send：id 不是 cipher（Target::Item 判定不適用，比照資料夾走
+            // Target::All）；建立/取 URL/改密出口帶明文或 seed 片段＝Secret 級，
+            // 清單與刪除只動元資料列＝Identity 級（分級對照見 hub::sensitivity_of_call）
+            Call::Vault(VaultCall::Send {
+                sub: bw_proto::SendOp::Create { .. },
+            }) => (Access::Mutate(MutateOp::Create), None),
+            Call::Vault(VaultCall::Send {
+                sub: bw_proto::SendOp::Get { .. },
+            }) => (Access::Reveal(bw_proto::Sensitivity::Secret), None),
+            Call::Vault(VaultCall::Send {
+                sub: bw_proto::SendOp::List,
+            }) => (Access::See(bw_proto::Sensitivity::Identity), None),
+            Call::Vault(VaultCall::Send {
+                sub: bw_proto::SendOp::Remove { .. },
+            }) => (Access::Mutate(MutateOp::Delete), None),
+            Call::Vault(VaultCall::Send {
+                sub: bw_proto::SendOp::Password { .. },
+            }) => (Access::Mutate(MutateOp::Patch), None),
             // passkey 分級（契約 §4）：列表＝Metadata（Identity floor）；
             // Register/Assert 取用私鑰＝Use(UseKind::Passkey)（用而不讀，同 totp 級）
             Call::Passkey(PasskeyCall::GetPasskeys { .. }) => {
@@ -796,6 +814,8 @@ fn summarize(call: &Call) -> String {
         }
         // 附件 Upload 帶整檔位元組：Debug dump 會把內容潑進審計/核准文字
         Call::Vault(VaultCall::Attachment { sub }) => crate::attach::op_summary(sub),
+        // Send Create 帶明文內容/密碼與整檔位元組，同理走形態摘要
+        Call::Vault(VaultCall::Send { sub }) => crate::send::op_summary(sub),
         other => format!("{other:?}"),
     }
 }

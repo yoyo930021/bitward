@@ -1233,13 +1233,18 @@ fn denied(e: impl std::fmt::Display) -> WtpError {
     }
 }
 
-fn chrono_now() -> String {
+pub(crate) fn chrono_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_millis();
-    // ISO-8601 without deps: seconds since epoch → RFC3339 由呼叫端容忍；VW 接受任何可解析日期字串
+        .as_millis() as u64;
+    iso_utc_at_ms(ms)
+}
+
+/// unix ms → `YYYY-MM-DDTHH:MM:SSZ`（Send 的 deletionDate 上線形態；
+/// VW 以 chrono `DateTime<Utc>` 寬容解析，任何 RFC3339 變體都收）。
+pub(crate) fn iso_utc_at_ms(ms: u64) -> String {
     let secs = ms / 1000;
     let days = secs / 86_400;
     let rem = secs % 86_400;

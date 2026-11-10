@@ -247,6 +247,11 @@ enum Cmd {
         #[arg(long)]
         id: Option<String>,
     },
+    /// Send 加密分享（文字/檔案 → 連結；無 outbox，建立需連網）
+    Send {
+        #[command(subcommand)]
+        cmd: SendCmd,
+    },
     /// 合併重複項：保留 KEEP，軟刪其餘，tags 聯集
     Merge {
         keep: String,
@@ -355,6 +360,55 @@ enum AttachCmd {
         item: String,
         #[arg(name = "ATT_ID")]
         att_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SendCmd {
+    /// 分享文字（成功輸出分享 URL；需連網＋解鎖）
+    Text {
+        text: String,
+        /// 存活天數：1|7|30（官方預設 7；伺服器硬閘 31 天）
+        #[arg(long, default_value_t = 7)]
+        days: u32,
+        /// 從 stdin 讀取用密碼（無值＝不設）
+        #[arg(long)]
+        password_stdin: bool,
+        /// 存取上限（留空＝不限）
+        #[arg(long)]
+        max: Option<u32>,
+        /// 顯示名稱（留空＝取文字首行）
+        #[arg(long)]
+        name: Option<String>,
+        /// 對接收方隱藏帳號 email
+        #[arg(long)]
+        hide_email: bool,
+    },
+    /// 分享檔案（≤32MiB；成功輸出分享 URL；需連網＋解鎖）
+    File {
+        path: String,
+        #[arg(long, default_value_t = 7)]
+        days: u32,
+        #[arg(long)]
+        password_stdin: bool,
+        #[arg(long)]
+        max: Option<u32>,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        hide_email: bool,
+    },
+    /// 列 Send（鏡像；name 需解鎖，鎖態為 null）
+    Ls,
+    /// 取分享 URL（本地組裝，不連網；URL 帶金鑰片段，勿貼進明文通道）
+    Url {
+        #[arg(name = "SEND_ID")]
+        id: String,
+    },
+    /// 刪除（需連網；伺服器已不存在＝照收斂）
+    Rm {
+        #[arg(name = "SEND_ID")]
+        id: String,
     },
 }
 
@@ -706,6 +760,18 @@ async fn run() -> Result<(), String> {
                 && !args.json
             {
                 println!("主密碼已變更");
+            } else if !args.json
+                && matches!(
+                    &args.cmd,
+                    Cmd::Send {
+                        cmd: SendCmd::Url { .. } | SendCmd::Text { .. } | SendCmd::File { .. }
+                    }
+                )
+                && let Response::Json(v) = &resp
+                && let Some(u) = v.get("url").and_then(|x| x.as_str())
+            {
+                // 單一 URL 列：管線友善（$(bitward send url …)）；--json 才出整包
+                println!("{u}");
             } else {
                 print_response(&resp, args.json);
             }
@@ -1478,6 +1544,81 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                 }
             };
             Call::Vault(VaultCall::Reports { sub })
+        }
+        Cmd::Send { cmd } => {
+            let (name, content, password, days, max, hide_email) = match cmd {
+                SendCmd::Text {
+                    text,
+                    days,
+                    password_stdin,
+                    max,
+                    name,
+                    hide_email,
+                } => (
+                    name.clone(),
+                    bw_proto::SendContent::Text { text: text.clone() },
+                    if *password_stdin {
+                        Some(read_line_stdin()?)
+                    } else {
+                        None
+                    },
+                    *days,
+                    *max,
+                    *hide_email,
+                ),
+                SendCmd::File {
+                    path,
+                    days,
+                    password_stdin,
+                    max,
+                    name,
+                    hide_email,
+                } => {
+                    let file_name = std::path::Path::new(path)
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.clone());
+                    let bytes =
+                        std::fs::read(path).map_err(|e| format!("讀不到分享檔：{e}"))?;
+                    (
+                        name.clone(),
+                        bw_proto::SendContent::File { file_name, bytes },
+                        if *password_stdin {
+                            Some(read_line_stdin()?)
+                        } else {
+                            None
+                        },
+                        *days,
+                        *max,
+                        *hide_email,
+                    )
+                }
+                SendCmd::Ls => {
+                    return Ok(Call::Vault(VaultCall::Send {
+                        sub: bw_proto::SendOp::List,
+                    }));
+                }
+                SendCmd::Url { id } => {
+                    return Ok(Call::Vault(VaultCall::Send {
+                        sub: bw_proto::SendOp::Get { id: parse_id(id)? },
+                    }));
+                }
+                SendCmd::Rm { id } => {
+                    return Ok(Call::Vault(VaultCall::Send {
+                        sub: bw_proto::SendOp::Remove { id: parse_id(id)? },
+                    }));
+                }
+            };
+            Call::Vault(VaultCall::Send {
+                sub: bw_proto::SendOp::Create {
+                    name,
+                    content,
+                    password,
+                    deletion_hours: days.saturating_mul(24),
+                    max_access: max,
+                    hide_email,
+                },
+            })
         }
         Cmd::Merge { keep, dupes } => Call::Vault(VaultCall::Merge {
             keep: parse_id(keep)?,

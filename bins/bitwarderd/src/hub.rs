@@ -268,6 +268,11 @@ impl Hub {
         id
     }
 
+    /// 帳號的 server base 值（Send 分享 URL 的前綴；契約 3：base 用帳號 server 值）。
+    pub(crate) async fn server_base(&self) -> Option<String> {
+        self.account.read().await.as_ref().map(|a| a.server.clone())
+    }
+
     pub async fn status_info(&self) -> StatusInfo {
         let d = self.store.depth().unwrap_or_default();
         let acc = self.account.read().await;
@@ -518,6 +523,7 @@ impl Hub {
                     self.reports_cipher_history(*id).await
                 }
             },
+            Call::Vault(VaultCall::Send { sub }) => self.send_op(sub).await,
             Call::Use(UseCall::TotpCode { id }) => self.totp(*id),
             Call::Use(UseCall::GeneratePassword { policy }) => {
                 let opts = bw_crypto::PasswordOptions {
@@ -1542,6 +1548,7 @@ fn action_tag(c: &Call) -> String {
         Call::Vault(VaultCall::Reports {
             sub: bw_proto::Reports::CipherHistory { .. },
         }) => "Vault.Reports.CipherHistory",
+        Call::Vault(VaultCall::Send { sub }) => return crate::send::op_tag(sub).to_owned(),
         Call::Passkey(PasskeyCall::GetPasskeys { .. }) => "Passkey.GetPasskeys",
         Call::Passkey(PasskeyCall::RegisterPasskey { .. }) => "Passkey.RegisterPasskey",
         Call::Passkey(PasskeyCall::AssertPasskey { .. }) => "Passkey.AssertPasskey",
@@ -1642,6 +1649,13 @@ fn sensitivity_of_call(c: &Call, resp: Option<&Response>) -> bw_proto::Sensitivi
         // 報告出口全部去敏（id 群集／分數／日期＋名稱＋uri 計數），解密只發生在
         // daemon 打分閉包內——比照 FindDuplicates 的 Identity 級
         Call::Vault(VaultCall::Reports { .. }) => Identity,
+        // Send：Create 明文入程＋seed 片段出口、Get 出口帶 seed（分享 URL）、
+        // Password 明文入程——皆 Secret 級（seed 屬金鑰材料，§2.1 表同 UserKey）；
+        // List 只回元資料＋解密名稱（Identity 級，同鏡像列表）、Remove 只摘列
+        Call::Vault(VaultCall::Send {
+            sub: bw_proto::SendOp::Create { .. } | bw_proto::SendOp::Get { .. } | bw_proto::SendOp::Password { .. },
+        }) => Secret,
+        Call::Vault(VaultCall::Send { .. }) => Identity,
         Call::Use(UseCall::TotpCode { .. })
         | Call::Use(UseCall::Run { .. })
         | Call::Use(UseCall::ResolveRef { .. })

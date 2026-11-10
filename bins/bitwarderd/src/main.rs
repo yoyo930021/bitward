@@ -9,6 +9,7 @@ mod datamanage;
 mod hub;
 mod icon;
 mod passkey;
+mod send;
 mod settings;
 mod sync;
 

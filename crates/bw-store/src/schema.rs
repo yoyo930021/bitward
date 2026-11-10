@@ -1,5 +1,5 @@
 /// schema 版本；每次加表/改表就 +1 並在本檔補一段遷移 SQL。
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// v1→v2：值搜尋明文索引欄。舊庫 ALTER；新庫 V1 已含，Duplicate column 容忍。
 pub const V2: &str = "ALTER TABLE meta_plain ADD COLUMN username_plain TEXT;
@@ -51,6 +51,11 @@ pub const V6: &str = "";
 /// v6→v7（批次 B 封存支援）：`meta_plain.archived_at`——協定 `archivedDate`
 /// 的鏡像投影欄（有值＝已封存）。逐條 ALTER 容忍 Duplicate column（同 V2 紀律）。
 pub const V7: &str = "ALTER TABLE meta_plain ADD COLUMN archived_at TEXT;";
+
+/// v7→v8（Send 面）：`sends` 鏡像表在 V1（CREATE IF NOT EXISTS 冪等，
+/// 形態同 v3/v4/v6 紀律）；欄位級無 ALTER，版本號提升只為
+/// schema_version_guard 的可見性。
+pub const V8: &str = "";
 
 /// v1：鏡像（密文原樣）+ 明文 metadata 索引（FTS5）+ overlay + outbox +
 /// audit（append-only hash 鏈）+ sessions + blobs 登記 + meta。
@@ -132,6 +137,28 @@ CREATE TABLE IF NOT EXISTS attachments(
   url       TEXT
 );
 CREATE INDEX IF NOT EXISTS attachments_cipher ON attachments(cipher);
+
+-- v8（Send 面）：/sync 的 sends[] 與 `GET /sends` 刷新鏡像。
+-- 信封欄（name/key/file_name）存伺服器原樣，本層不做金鑰語意（同 folders 紀律）；
+-- raw 是 send JSON 原樣（真相源）；access_id＝b64url(uuid) 由伺服器給、缺欄時
+-- 呼叫端可自算。全量替換見 apply_sync / sends_replace。
+CREATE TABLE IF NOT EXISTS sends(
+  id               TEXT PRIMARY KEY,
+  stype            INTEGER NOT NULL,          -- 0 Text | 1 File
+  name             TEXT,                      -- 信封字串（send key 加密）
+  key              TEXT,                      -- seed 的 user key 包裝信封
+  access_id        TEXT,
+  deletion_date    TEXT,
+  expiration_date  TEXT,
+  max_access_count INTEGER,
+  access_count     INTEGER NOT NULL DEFAULT 0,
+  hide_email       INTEGER NOT NULL DEFAULT 0,
+  file_id          TEXT,                      -- 檔案 send 的 server file id（非 UUID）
+  file_name        TEXT,                      -- 信封字串
+  file_size        INTEGER,
+  rev              TEXT,                      -- revisionDate
+  raw              BLOB NOT NULL
+);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS meta_fts USING fts5(
   name, uris, fields_plain,

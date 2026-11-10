@@ -437,6 +437,12 @@ pub enum VaultCall {
     Reports {
         sub: Reports,
     },
+    /// 置尾（同上紀律）：**Send 加密分享**五操作（子孫見 `SendOp`）。
+    /// 無 outbox——建立/改密/刪除需連網（Send 語意＝交連結即存在，佇列
+    /// 會造出「以為分享了其實沒有」的假象）；離線時回 `Denied` 可懂錯誤。
+    Send {
+        sub: SendOp,
+    },
 }
 
 /// 弱密碼列管門檻：`password_score` **低於**此值進報告（zxcvbn 口徑 0–2＝可猜）。
@@ -458,6 +464,70 @@ pub enum Reports {
     /// （實錄 404）→ 回 {"supported":false,"versions":[]}，GUI 據此收合歷史節。
     CipherHistory {
         id: ItemId,
+    },
+}
+
+/// Send 面（`VaultCall::Send` 子孫；置尾紀律同宿主）。加密模型見 bw-crypto
+/// `send.rs` 模組頭；端點與語意見 bw-server `sends.rs` 模組頭。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum SendOp {
+    /// 建立。`name` None＝daemon 按內容推預設（文字首行截 32 字元／檔名）。
+    /// `content` 為**明文**（本機線紀律同 `AttachmentOp::Upload`：加密發生在
+    /// daemon `with_keys` 閉包，金鑰與 seed 不出閉包）；檔案 ≤32 MiB
+    /// （借附件上限紀律，daemon 入口擋）。
+    /// `password`：取用密碼明文（daemon 換成官方 wire 哈希再上線）。
+    /// `deletion_hours`：到期刪除（官方選單 1/7/30 天＝24/168/720；
+    /// 伺服器硬上限 31 天，VW `create_send` 實錄 400）。
+    /// `max_access`：存取上限（None＝不限；0 拒收）。
+    /// 成功回 `Response::Json`（{"id","url","name","deletionDate"}——
+    /// `url` 帶 seed 片段，屬 Secret 級出口）。
+    Create {
+        name: Option<String>,
+        content: SendContent,
+        password: Option<String>,
+        deletion_hours: u32,
+        max_access: Option<u32>,
+        hide_email: bool,
+    },
+    /// 鏡像清單（`/sync` 的 `sends[]` 與線上 `GET /sends` 刷新落庫；
+    /// 離線照回鏡像）。回應 `Response::Json`（{"items":[{"id","type",
+    /// "name","deletionDate","expirationDate","maxAccessCount","accessCount",
+    /// "viewed","hideEmail","hasPassword"}]}，deletionDate 升序；
+    /// `name` 需解鎖態解密（seed 鏡像端為 user key 信封），鎖態為 null——
+    /// 資料夾清單同語意；`viewed`＝accessCount>0（伺服器無 viewed 欄，實錄））。
+    List,
+    /// 分享 URL：`{帳號 server 值}/#/send/{accessId}/{b64url(seed)}`
+    /// （官方 web vault 同形：`getSendUrl()+accessId+"/"+urlB64Key`）。
+    /// 需解鎖態（seed 從鏡像 `key` 信封解出）；回應 `Response::Json`
+    /// （{"id","url"}）。審計只記動作與 id，**不落片段**（A11 延伸）。
+    Get {
+        id: ItemId,
+    },
+    /// 刪除（需連網；伺服器 404＝已不存在，照收斂摘鏡像列回 Ok）。
+    Remove {
+        id: ItemId,
+    },
+    /// 取用密碼：`Some`＝設/換（`PUT /sends/{id}` 帶新哈希，seed 不變＝
+    /// 既有連結的解密密鑰不受影響）；`None`＝清除（`remove-password`）。
+    /// 需解鎖態＋連網；回應 `Response::Json`（{"id","hasPassword"}）。
+    Password {
+        id: ItemId,
+        password: Option<String>,
+    },
+}
+
+/// Send 內容二態（`SendOp::Create` 載體）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum SendContent {
+    Text {
+        text: String,
+    },
+    /// `bytes` 明文檔身（同附件 Upload 紀律）；`file_name` 原檔名
+    /// （daemon 加密後逐字上傳——VW 比對 multipart filename 與登記檔名）。
+    File {
+        file_name: String,
+        #[serde(with = "bytes_b64")]
+        bytes: Vec<u8>,
     },
 }
 
@@ -1703,6 +1773,65 @@ mod tests {
         let e = WtpError::StaleEpoch { seen: 3, now: 5 };
         let j = serde_json::to_string(&e).unwrap();
         assert_eq!(serde_json::from_str::<WtpError>(&j).unwrap(), e);
+    }
+
+    #[test]
+    fn send_ops_roundtrip_and_tail_discipline() {
+        let idx = |c: &VaultCall| postcard::to_allocvec(c).unwrap()[0];
+        // 置尾紀律：Send 索引在 Reports 之後，既有變體不動
+        assert!(
+            idx(&VaultCall::Send {
+                sub: SendOp::List
+            }) > idx(&VaultCall::Reports {
+                sub: Reports::PasswordReuse
+            })
+        );
+        let create = SendOp::Create {
+            name: None,
+            content: SendContent::File {
+                file_name: "報表.pdf".into(),
+                bytes: vec![0u8, 1, 2, 255, 128],
+            },
+            password: Some("pw".into()),
+            deletion_hours: 168,
+            max_access: Some(3),
+            hide_email: true,
+        };
+        let msg = ClientMsg::Invoke {
+            rid: 21,
+            call: Call::Vault(VaultCall::Send { sub: create }),
+        };
+        // 線形態：bytes 是 base64 字串（附件同紀律）
+        let j = serde_json::to_value(&msg).unwrap();
+        assert_eq!(
+            j["Invoke"]["call"]["Vault"]["Send"]["sub"]["Create"]["content"]["File"]["bytes"],
+            serde_json::json!("AAEC/4A=")
+        );
+        let back: ClientMsg = serde_json::from_slice(&serde_json::to_vec(&msg).unwrap()).unwrap();
+        assert_eq!(back.rid(), 21);
+        let b = postcard::to_allocvec(&msg).unwrap();
+        assert_eq!(postcard::from_bytes::<ClientMsg>(&b).unwrap().rid(), 21);
+        for sub in [
+            SendOp::Get {
+                id: ItemId::new_v4(),
+            },
+            SendOp::Remove {
+                id: ItemId::new_v4(),
+            },
+            SendOp::Password {
+                id: ItemId::new_v4(),
+                password: None,
+            },
+        ] {
+            let msg = ClientMsg::Invoke {
+                rid: 22,
+                call: Call::Vault(VaultCall::Send { sub }),
+            };
+            let j = serde_json::to_vec(&msg).unwrap();
+            assert_eq!(serde_json::from_slice::<ClientMsg>(&j).unwrap().rid(), 22);
+            let b = postcard::to_allocvec(&msg).unwrap();
+            assert_eq!(postcard::from_bytes::<ClientMsg>(&b).unwrap().rid(), 22);
+        }
     }
 
     #[test]

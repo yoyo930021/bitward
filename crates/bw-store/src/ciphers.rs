@@ -64,7 +64,7 @@ impl Store {
         tx.execute_batch(
             "DELETE FROM meta_plain; DELETE FROM ciphers;
              DELETE FROM orgs; DELETE FROM collections; DELETE FROM cipher_collections;
-             DELETE FROM folders; DELETE FROM attachments;",
+             DELETE FROM folders; DELETE FROM attachments; DELETE FROM sends;",
         )?;
         for c in ciphers {
             let id_s = c
@@ -109,6 +109,17 @@ impl Store {
             let id = Uuid::parse_str(id_s)
                 .map_err(|e| StoreError::Invalid(format!("folder id {id_s}: {e}")))?;
             write_folder(&tx, id, f)?;
+        }
+        // v8（Send 面）：sends[] 全量替換（VW 1.37.2 實錄 /sync 帶 sends 欄；
+        // 缺欄＝空集合，語意同 collections 的寬容解析）。
+        for s in sync_array(sync, &["sends", "objects.sends"]) {
+            let id_s = s
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| StoreError::Invalid("send missing `id`".to_string()))?;
+            let id = Uuid::parse_str(id_s)
+                .map_err(|e| StoreError::Invalid(format!("send id {id_s}: {e}")))?;
+            write_send(&tx, id, s)?;
         }
         if let Some(sd) = sync.get("serverDate").and_then(Value::as_str) {
             tx.execute(
@@ -321,6 +332,67 @@ impl Store {
         Ok(())
     }
 
+    // —— Send 鏡像（v8）——
+
+    /// 全量鏡像清單（伺服器 JSON 原樣；deletionDate 升序＝最快到期排前）。
+    pub fn send_list(&self) -> StoreResult<Vec<Value>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT raw FROM sends ORDER BY deletion_date ASC")?;
+        let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+        rows.map(|r| serde_json::from_slice(&r?).map_err(Into::into))
+            .collect()
+    }
+
+    /// 單列鏡像（伺服器 JSON 原樣；缺列＝None）。
+    pub fn send(&self, id: ItemId) -> StoreResult<Option<Value>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let raw = conn
+            .query_row("SELECT raw FROM sends WHERE id = ?1", [id.to_string()], |r| {
+                r.get::<_, Vec<u8>>(0)
+            })
+            .optional()?;
+        raw.map(|b| serde_json::from_slice(&b).map_err(Into::into))
+            .transpose()
+    }
+
+    /// 即時落地（建立/更新回包）：單列 upsert，不動全量語意（同 folder_put 紀律）。
+    pub fn send_put(&self, send: &Value) -> StoreResult<()> {
+        let id_s = send
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| StoreError::Invalid("send missing `id`".to_string()))?;
+        let id = Uuid::parse_str(id_s)
+            .map_err(|e| StoreError::Invalid(format!("send id {id_s}: {e}")))?;
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        write_send(&conn, id, send)
+    }
+
+    /// 刪除收斂（server `DELETE /sends/{id}` 成功或 404 後摘鏡像列）。
+    pub fn send_remove(&self, id: ItemId) -> StoreResult<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("DELETE FROM sends WHERE id = ?1", [id.to_string()])?;
+        Ok(())
+    }
+
+    /// 線上刷新（`GET /sends` 的 `{data:[...]}` 陣列）：全量替換鏡像表
+    /// （同 apply_sync 的 sends 分支語意——伺服器是真相源，本地不留孤列）。
+    pub fn sends_replace(&self, items: &[Value]) -> StoreResult<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM sends", [])?;
+        for s in items {
+            let id_s = s
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| StoreError::Invalid("send missing `id`".to_string()))?;
+            let id = Uuid::parse_str(id_s)
+                .map_err(|e| StoreError::Invalid(format!("send id {id_s}: {e}")))?;
+            write_send(&tx, id, s)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// 硬刪收斂（`VaultCall::Purge` 的儲存端）：**本機鏡像永久移除**——
     /// cipher 列、明文索引、collection 歸屬、該 item 的全部 outbox 未推列、
     /// overlay 殭屍列一併清除；不發伺服器請求（调用端已判定伺服器端現態）。
@@ -392,6 +464,39 @@ fn write_folder(conn: &rusqlite::Connection, id: ItemId, f: &Value) -> StoreResu
             f.get("name").and_then(Value::as_str),
             f.get("revisionDate").and_then(Value::as_str),
             serde_json::to_vec(f)?,
+        ],
+    )?;
+    Ok(())
+}
+
+/// v8（Send 面）：單列 upsert。信封欄原樣入列（本層不判斷金鑰語意）；
+/// `file.size` 在 VW 回包是**字串**（mobile 兼容形態，實錄），兩態都收。
+fn write_send(conn: &rusqlite::Connection, id: ItemId, s: &Value) -> StoreResult<()> {
+    let file_size = s.pointer("/file/size").and_then(|v| {
+        v.as_i64()
+            .or_else(|| v.as_str().and_then(|x| x.parse().ok()))
+    });
+    conn.execute(
+        "INSERT OR REPLACE INTO sends(id, stype, name, key, access_id, deletion_date,
+            expiration_date, max_access_count, access_count, hide_email,
+            file_id, file_name, file_size, rev, raw)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+        rusqlite::params![
+            id.to_string(),
+            s.get("type").and_then(Value::as_i64).unwrap_or(0),
+            s.get("name").and_then(Value::as_str),
+            s.get("key").and_then(Value::as_str),
+            s.get("accessId").and_then(Value::as_str),
+            s.get("deletionDate").and_then(Value::as_str),
+            s.get("expirationDate").and_then(Value::as_str),
+            s.get("maxAccessCount").and_then(Value::as_i64),
+            s.get("accessCount").and_then(Value::as_i64).unwrap_or(0),
+            s.get("hideEmail").and_then(Value::as_bool).unwrap_or(false) as i64,
+            s.pointer("/file/id").and_then(Value::as_str),
+            s.pointer("/file/fileName").and_then(Value::as_str),
+            file_size,
+            s.get("revisionDate").and_then(Value::as_str),
+            serde_json::to_vec(s)?,
         ],
     )?;
     Ok(())
