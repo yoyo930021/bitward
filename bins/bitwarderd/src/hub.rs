@@ -18,9 +18,9 @@ use bw_keys::{
 use bw_proto::{
     AccountInfo, AdminCall, AgentCall, AuditChainInfo, AuthCall, Call, FillCall, ItemId, ItemView,
     OutboxCounts, PROTO_VERSION, PasskeyCall, PushCall, Query, Response, StatusInfo, SyncCall,
-    UseCall, VaultCall, View, WtpError,
+    TwoFactorInput, TwoFactorProviderInfo, UseCall, VaultCall, View, WtpError,
 };
-use bw_server::{Client, PasswordLogin, ServerError};
+use bw_server::{Client, PasswordLogin, ServerError, TwoFactorProviderType};
 use bw_store::{AuditFilter, AuditRecord, Store};
 
 pub struct ServerHandle {
@@ -361,7 +361,8 @@ impl Hub {
                 email,
                 password: Some(pw),
                 api_key: None,
-            }) => self.login(server, email, pw).await,
+                two_factor,
+            }) => self.login(server, email, pw, two_factor.as_ref()).await,
             Call::Auth(AuthCall::Login { .. }) => Err(denied(
                 "P1: daemon-side password challenge 未実装；請由 CLI 傳入密碼",
             )),
@@ -625,18 +626,63 @@ impl Hub {
         }
     }
 
-    async fn login(&self, server: &str, email: &str, pw: &str) -> DispatchResult {
+    /// 登入（含 2FA 第二步回合）。挑戰**不跨呼叫保存**：`TwoFactorChallenge`
+    /// 只是「原 login 參數＋伺服器列出的因子」的 client 端包裝，master password
+    /// hash 可由 (pw, prelogin KDF) 決定性重算，故第二步由呼叫端原樣重發
+    /// Login{password, two_factor}（daemon 端 pinentry 收碼未實現——Login 的
+    /// password None 直接拒——無既有互動通道可複用；重發方案讓 daemon 保持
+    /// 無狀態、重啟不影響回合，密碼明文只在既有本機線多走一次，不新增洩密面）。
+    async fn login(
+        &self,
+        server: &str,
+        email: &str,
+        pw: &str,
+        two_factor: Option<&TwoFactorInput>,
+    ) -> DispatchResult {
         let client =
             std::sync::Arc::new(Client::with_options(server, Hub::sync_options()).map_err(denied)?);
         let pre = client.prelogin(email).await.map_err(map_server_err)?;
         let kdf = KdfWire::from_prelogin(&pre).ok_or_else(|| drift("prelogin 缺 KDF 欄位"))?;
         let mk = bw_crypto::master_key(pw, email, kdf.to_params()).map_err(denied)?;
         let hash = bw_crypto::master_password_hash(&mk, pw).as_b64().to_owned();
-        let login = PasswordLogin::new(email, hash, self.device.clone());
-        let bundle = client
-            .password_login(&login)
-            .await
-            .map_err(map_server_err)?;
+        let mut login = PasswordLogin::new(email, hash, self.device.clone());
+        if let Some(tf) = two_factor {
+            if !TwoFactorProviderInfo::is_supported(tf.provider) {
+                return Err(denied(format!(
+                    "此因子尚未支援：{}（請選手機驗證器或 Email）",
+                    TwoFactorProviderInfo::label(tf.provider)
+                )));
+            }
+            login = login.two_factor(
+                TwoFactorProviderType::from_i32(tf.provider),
+                tf.token.clone(),
+                tf.remember,
+            );
+        }
+        let bundle = match client.password_login(&login).await {
+            Ok(b) => b,
+            // 不吞挑戰：映射成 TwoFactorRequest 讓 GUI/CLI 原地進第二步。
+            Err(ServerError::TwoFactorRequired { challenge }) => {
+                return Ok(Response::TwoFactorRequest {
+                    providers: challenge
+                        .providers
+                        .iter()
+                        .map(|p| TwoFactorProviderInfo {
+                            provider: p.kind.as_i32(),
+                            hint: p
+                                .details
+                                .as_ref()
+                                .and_then(|d| {
+                                    d.get("Email").or_else(|| d.get("email")).map(Value::as_str)
+                                })
+                                .flatten()
+                                .map(str::to_owned),
+                        })
+                        .collect(),
+                });
+            }
+            Err(other) => return Err(map_server_err(other)),
+        };
         let keys = bundle
             .keys
             .clone()

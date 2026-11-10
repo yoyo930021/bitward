@@ -246,6 +246,12 @@ pub enum AuthCall {
         /// None ＝ daemon 端向人收（pinentry 式）；Some 只允許經加密本機通道
         password: Option<String>,
         api_key: Option<(String, String)>,
+        /// 登入第二步（2FA）：None＝第一步；Some＝帶因子與碼重送。
+        /// 置尾＋`default`：舊幀缺欄＝None（語意＝第一步，postcard 變體序不動）。
+        /// 伺服器挑戰不在 daemon 快取——hash 可由 password 重算，第二步由
+        /// 呼叫端原樣重發 Login（理由見 hub::login 註解）。
+        #[serde(default)]
+        two_factor: Option<TwoFactorInput>,
     },
     Unlock {
         biometric: bool,
@@ -271,6 +277,17 @@ pub enum AuthCall {
         current: Option<String>,
         new: Option<String>,
     },
+}
+
+/// 登入第二步的使用者輸入。`provider` 是 upstream `TwoFactorProviderType` 編號
+/// （見 [`TwoFactorProviderInfo`]）；`token` 為一次性代碼，明文紀律同
+/// `AuthCall::Login` 的 password（只走本機線，不落 argv）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TwoFactorInput {
+    pub provider: i32,
+    pub token: String,
+    /// 要求伺服器記住此裝置（`twoFactorRemember=1`）。
+    pub remember: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -871,6 +888,48 @@ pub enum Response {
     /// 附件下載的回傳位元組（批次 4a；解密後的明文內容，
     /// 本機線安全紀律同 Upload bytes；JSON 線形態為 base64 字串）。
     AttachmentBytes(#[serde(with = "bytes_b64")] Vec<u8>),
+    /// 登入第一步被伺服器擋下：需要第二因子（2FA 回合）。置尾紀律同 Passkey：
+    /// postcard 變體索引只追加。呼叫端據 providers 收碼後重發
+    /// `AuthCall::Login{password, two_factor: Some(..)}`。
+    TwoFactorRequest {
+        providers: Vec<TwoFactorProviderInfo>,
+    },
+}
+
+/// 伺服器宣告的可用第二因子（daemon 由 `bw-server` 挑戰映射而來的輕量形態）。
+/// `provider` 編號對齊 upstream `TwoFactorProviderType`（0=Authenticator、
+/// 1=Email、2=Duo、3=YubiKey、4=U2f、5=Remember、6=OrgDuo、7=WebAuthn、
+/// 8=RecoveryCode）；`hint` 為顯示提示（Email 給伺服器回的水漬地址、
+/// Authenticator 為 None），不含秘密值。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TwoFactorProviderInfo {
+    pub provider: i32,
+    pub hint: Option<String>,
+}
+
+impl TwoFactorProviderInfo {
+    /// 本批支援的因子（收 6 位碼直接重送即可通路）：Authenticator、Email。
+    /// 其餘因子需要額外交涉（Duo 網頁流、YubiKey/U2f 硬體簽章），
+    /// 選中時 daemon 給「此因子尚未支援」的可懂錯誤。
+    pub fn is_supported(provider: i32) -> bool {
+        matches!(provider, 0 | 1)
+    }
+
+    /// 因子繁中顯示名（CLI/GUI 共用，未知編號顯示原值不亂併名）。
+    pub fn label(provider: i32) -> &'static str {
+        match provider {
+            0 => "手機驗證器（Authenticator）",
+            1 => "Email",
+            2 => "Duo",
+            3 => "YubiKey",
+            4 => "安全金鑰（U2f）",
+            5 => "記住此裝置（Remember）",
+            6 => "組織 Duo",
+            7 => "WebAuthn",
+            8 => "備用救援碼",
+            _ => "未知因子",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1104,6 +1163,70 @@ mod tests {
         let j = serde_json::to_string(&full).unwrap();
         let back: StatusInfo = serde_json::from_str(&j).unwrap();
         assert_eq!(back.email, full.email);
+    }
+
+    /// 2FA 批紀律：Login 尾附 `two_factor` must `default`——舊 CLI 幀（無此欄）
+    /// 解析＝None（＝第一步語意），不得互炸；postcard/JSON 往返帶欄同檢。
+    #[test]
+    fn login_tolerates_legacy_frames_without_two_factor() {
+        let legacy = serde_json::json!({
+            "Login": {
+                "server": "http://127.0.0.1:18097",
+                "email": "a@b.test",
+                "password": "pw",
+                "api_key": null,
+            }
+        });
+        let call: AuthCall = serde_json::from_value(legacy).unwrap();
+        let AuthCall::Login { two_factor, .. } = &call else {
+            panic!("形態不符")
+        };
+        assert!(two_factor.is_none());
+        let with = Call::Auth(AuthCall::Login {
+            server: "http://127.0.0.1:18097".into(),
+            email: "a@b.test".into(),
+            password: Some("pw".into()),
+            api_key: None,
+            two_factor: Some(TwoFactorInput {
+                provider: 0,
+                token: "123456".into(),
+                remember: true,
+            }),
+        });
+        let bytes = postcard::to_allocvec(&with).unwrap();
+        let back: Call = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(postcard::to_allocvec(&back).unwrap(), bytes);
+        let j = serde_json::to_string(&with).unwrap();
+        let back: Call = serde_json::from_str(&j).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), j);
+    }
+
+    /// TwoFactorRequest 置尾變體：postcard 索引追加不動舊變體，且往返同檢。
+    #[test]
+    fn two_factor_request_roundtrips() {
+        let resp = Response::TwoFactorRequest {
+            providers: vec![
+                TwoFactorProviderInfo {
+                    provider: 0,
+                    hint: None,
+                },
+                TwoFactorProviderInfo {
+                    provider: 1,
+                    hint: Some("a***@b.test".into()),
+                },
+            ],
+        };
+        let bytes = postcard::to_allocvec(&resp).unwrap();
+        let back: Response = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(postcard::to_allocvec(&back).unwrap(), bytes);
+        let j = serde_json::to_string(&resp).unwrap();
+        let back: Response = serde_json::from_str(&j).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), j);
+        assert!(TwoFactorProviderInfo::is_supported(0));
+        assert!(TwoFactorProviderInfo::is_supported(1));
+        assert!(!TwoFactorProviderInfo::is_supported(2));
+        assert_eq!(TwoFactorProviderInfo::label(3), "YubiKey");
+        assert_eq!(TwoFactorProviderInfo::label(99), "未知因子");
     }
 
     impl ClientMsg {

@@ -866,6 +866,7 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                 email: email.clone(),
                 password: pw,
                 api_key: None,
+                two_factor: None,
             })
         }
         Cmd::Unlock => Call::Auth(AuthCall::Unlock { biometric: false }),
