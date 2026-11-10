@@ -677,6 +677,10 @@ pub fn validate_change_password(
 #[derive(Clone)]
 pub struct AppCore {
     pub session: Arc<Session>,
+    /// favicon 專用第二連線（批次 C）：GetIcon 在 daemon 端要代理抓外站
+    /// （秒級），若走互動 session 的 Mutex 會塞死一切命令（e2e14 實錄）；
+    /// 自開一條只跑 icon 的連線，延遲彼此隔離。
+    pub icon_session: Arc<Session>,
     tx: Sender<Cmd>,
     pub phase: Signal<Phase>,
     pub route: Signal<Route>,
@@ -740,7 +744,9 @@ impl AppCore {
     /// 在元件上下文（`App`）裡呼叫：訊號隸屬目前 owner。
     pub fn boot(session: Arc<Session>) -> (AppCore, Receiver<Cmd>) {
         let (tx, rx) = channel();
+        let icon_session = Arc::new(Session::new(session.path().to_path_buf()));
         let core = AppCore {
+            icon_session,
             session,
             tx,
             phase: signal(Phase::Connecting),
@@ -1981,15 +1987,19 @@ fn request_hosts(core: &AppCore, hosts: Vec<String>) {
         }
     });
     for host in missing {
-        core.ipc_quiet(move |s| {
-            match s.call(&Call::Vault(VaultCall::GetIcon { host: host.clone() })) {
+        // 走 icon 專用連線：daemon 代理抓外站是秒級延遲，絕不佔互動 session。
+        let session = core.icon_session.clone();
+        let tx = core.tx.clone();
+        std::thread::spawn(move || {
+            let cmd = match session.call(&Call::Vault(VaultCall::GetIcon { host: host.clone() })) {
                 Ok(Response::AttachmentBytes(b)) => Cmd::IconLoaded { host, res: Ok(b) },
                 Ok(other) => Cmd::IconLoaded {
                     host,
                     res: Err(format!("GetIcon 回應形態不符：{other:?}")),
                 },
                 Err(e) => Cmd::IconLoaded { host, res: Err(e.display()) },
-            }
+            };
+            let _ = tx.send(cmd);
         });
     }
 }
