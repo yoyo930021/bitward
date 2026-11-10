@@ -54,6 +54,7 @@ fn sample_item() -> ItemView {
         pending: false,
         deleted_at: None,
         archived_at: None,
+        uri_matches: vec![],
     })
 }
 

@@ -179,6 +179,9 @@ fn row_to_meta(row: &Row<'_>) -> Result<ItemMeta, rusqlite::Error> {
         pending: row.get::<_, i64>(8)? != 0,
         deleted_at: row.get::<_, Option<String>>(11)?,
         archived_at: row.get::<_, Option<String>>(12)?,
+        // match 判定存鏡像不在 meta_plain：列表（Metadata 視窗）恆空，
+        // 編輯基準由 project_one 的 Masked/Reveal 路徑回填。
+        uri_matches: Vec::new(),
     })
 }
 

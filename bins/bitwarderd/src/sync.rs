@@ -169,6 +169,19 @@ impl Hub {
                         return Err(denied("AppendUri 需要網址"));
                     }
                 }
+                FieldEdit::SetUriMatch { index, match_type } => {
+                    if (*index as usize) >= n_uris {
+                        return Err(denied(format!(
+                            "uri.{index} 越界：本項目只有 {n_uris} 列網址"
+                        )));
+                    }
+                    // 官方 UriMatchType：null|0..5（5=Never 僅值域，UI 不列）
+                    if match_type.is_some_and(|m| m > 5) {
+                        return Err(denied(format!(
+                            "match 值域 null|0..5，got {match_type:?}"
+                        )));
+                    }
+                }
                 FieldEdit::AppendField { field } => {
                     if field.name.is_empty() {
                         return Err(denied("AppendField 需要欄名"));
@@ -216,6 +229,11 @@ impl Hub {
                     format!("field.{index}.type"),
                     Some(bw_vault::type_word(kind.wire() as i64)?.to_string()),
                 )),
+                // match 走 leaf 座標系（uri.<n>.match）：three_way 得以看見
+                // 判定欄的雙端改動，漂移合併不靜默吞掉（apply_merged 明文落欄）。
+                FieldEdit::SetUriMatch { index, match_type } => {
+                    Some((format!("uri.{index}.match"), match_type.map(|m| m.to_string())))
+                }
                 _ => None,
             })
             .collect();
@@ -287,6 +305,7 @@ impl Hub {
                 FieldEdit::RemoveField { index } => format!("field.remove.{index}"),
                 FieldEdit::AppendUri { .. } => "uri.append".to_string(),
                 FieldEdit::RemoveUri { index } => format!("uri.remove.{index}"),
+                FieldEdit::SetUriMatch { index, .. } => format!("uri.{index}.match"),
             })
             .collect();
         let payload = json!({"op": "patch", "base": base, "ours": ours, "touched": touched});
@@ -497,7 +516,10 @@ impl Hub {
                         let uris: Vec<Value> = draft
                             .uris
                             .iter()
-                            .map(|u| json!({"uri": enc(u), "match": null}))
+                            .enumerate()
+                            .map(|(i, u)| {
+                                json!({"uri": enc(u), "match": draft.uri_matches.get(i).copied().flatten()})
+                            })
                             .collect();
                         login.insert("uris".into(), json!(uris));
                     }
@@ -1910,6 +1932,67 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// SetUriMatch：明文整數落 `login.uris[].match`（不落信封）、None 回落
+    /// null；值域與越界預驗入列前拒；touched 帶 `uri.<n>.match` 路徑。
+    #[tokio::test]
+    async fn patch_uri_match_writes_plaintext_field() {
+        let (hub, _d) = unlocked_hub("urimatch").await;
+        let user = hub
+            .machine
+            .with_keys(|kb| kb.user_key().as_bytes().to_vec())
+            .unwrap();
+        let id = Uuid::new_v4();
+        hub.store
+            .put_mirror(
+                id,
+                &json!({
+                    "id": id.to_string(), "type": 1, "name": enc(&user, "n"),
+                    "login": {"uris": [{"uri": enc(&user, "https://one.test"), "match": null}]}
+                }),
+            )
+            .unwrap();
+        hub.write_patch(
+            "s",
+            id,
+            &[FieldEdit::SetUriMatch {
+                index: 0,
+                match_type: Some(1),
+            }],
+        )
+        .await
+        .unwrap();
+        let m = hub.store.item(id).unwrap().unwrap().enc_cipher;
+        assert_eq!(m["login"]["uris"][0]["match"], json!(1), "明文整數不落信封");
+        let due = hub.store.take_due(16).unwrap();
+        assert_eq!(due[0].payload["touched"][0], "uri.0.match");
+        for mm in &due {
+            hub.store.settle(mm.id, bw_store::MutState::Applied).unwrap();
+        }
+        // None＝回落 null
+        hub.write_patch("s", id, &[FieldEdit::SetUriMatch { index: 0, match_type: None }])
+            .await
+            .unwrap();
+        let m = hub.store.item(id).unwrap().unwrap().enc_cipher;
+        assert!(m["login"]["uris"][0]["match"].is_null());
+        // 值域 6 與越界 index 入列前拒
+        assert!(
+            hub.write_patch("s", id, &[FieldEdit::SetUriMatch { index: 0, match_type: Some(6) }])
+                .await
+                .is_err()
+        );
+        assert!(
+            hub.write_patch("s", id, &[FieldEdit::SetUriMatch { index: 3, match_type: Some(0) }])
+                .await
+                .is_err()
+        );
+        // Masked 投影回填 uri_matches（GUI 編輯基準）
+        let v = hub
+            .project_one(id, bw_proto::View::Masked)
+            .unwrap()
+            .expect("項目在");
+        assert_eq!(v.meta.uri_matches, vec![None], "null 投影為 None");
     }
 
     /// 批次 B 封存：鏡像立即帶 archivedDate（列表即時反映）、outbox 入列

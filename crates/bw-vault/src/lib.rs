@@ -156,6 +156,10 @@ pub fn flatten(cipher: &serde_json::Value, dec: &dyn Fn(&str) -> Option<String>)
             .and_then(|l| l.get("totp"))
             .and_then(serde_json::Value::as_str),
     );
+    // match 為協定明文整數欄（UriMatchType null|0..5）：入欄才能讓 three_way
+    // 看见兩端的判定改動（缺欄/null＝預設，鍵缺席＝None 同態）。同 fields
+    // 型別欄紀律：先收集、put_enc 死後才插（m 的可變借用不重疊）。
+    let mut match_keys: Vec<(String, Option<String>)> = Vec::new();
     if let Some(uris) = login
         .and_then(|l| l.get("uris"))
         .and_then(serde_json::Value::as_array)
@@ -165,6 +169,9 @@ pub fn flatten(cipher: &serde_json::Value, dec: &dyn Fn(&str) -> Option<String>)
                 &format!("uri.{i}"),
                 u.get("uri").and_then(serde_json::Value::as_str),
             );
+            if let Some(mt) = u.get("match").and_then(serde_json::Value::as_u64) {
+                match_keys.push((format!("uri.{i}.match"), Some(mt.to_string())));
+            }
         }
     }
     // 自訂欄位（v5 三件套）：`field.<n>.name`／`field.<n>.value` 以 0 起索引
@@ -192,6 +199,10 @@ pub fn flatten(cipher: &serde_json::Value, dec: &dyn Fn(&str) -> Option<String>)
         for (k, v) in type_keys {
             m.insert(k, v);
         }
+    }
+    // put_enc 的最後使用點在上方 fields 迴圈；此處 m 的可變借用已釋放。
+    for (k, v) in match_keys {
+        m.insert(k, v);
     }
     // folderId 是明文欄（同 favorite 直接轉字串）；null/缺欄＝未歸屬（鍵缺席）。
     if let Some(fid) = cipher.get("folderId").and_then(serde_json::Value::as_str) {
@@ -290,6 +301,32 @@ pub fn apply_merged(
                 }
                 p => {
                     if let Some(rest) = p.strip_prefix("uri.")
+                        && let Some(idx_s) = rest.strip_suffix(".match")
+                        && let Some(idx) = idx_s.parse::<usize>().ok()
+                    {
+                        // `uri.<n>.match`：協定明文整數欄（不落信封、不佔位）。
+                        // None＝回落 null（官方預設判定）。越界＝跳過（同 fields 紀律：
+                        // theirs 列數由伺服器決定，本端不憑空造列）。
+                        let login =
+                            obj_of(obj.entry("login").or_insert_with(|| serde_json::json!({})));
+                        let uris = login.entry("uris").or_insert_with(|| serde_json::json!([]));
+                        if !uris.is_array() {
+                            *uris = serde_json::json!([]);
+                        }
+                        if let Some(entry) =
+                            uris.as_array_mut().expect("uris must be array").get_mut(idx)
+                            && let Some(e) = entry.as_object_mut()
+                        {
+                            let v = match value {
+                                Some(s) => s
+                                    .parse::<u8>()
+                                    .map(|n| serde_json::json!(n))
+                                    .unwrap_or(serde_json::Value::Null),
+                                None => serde_json::Value::Null,
+                            };
+                            e.insert("match".into(), v);
+                        }
+                    } else if let Some(rest) = p.strip_prefix("uri.")
                         && let Some(idx) = rest.parse::<usize>().ok()
                     {
                         let login =
@@ -502,6 +539,41 @@ mod tests {
             Merge::Conflict { fields } => assert_eq!(fields, vec!["field.0.value".to_string()]),
             other => panic!("expect Conflict, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn uri_match_paths_merge_and_clash() {
+        // uri.<n>.match 明文欄進座標系後：不相交自動合併、同列相撞進收件匣。
+        let base = map(&[("uri.0", Some("https://a.test")), ("uri.0.match", Some("0"))]);
+        let ours = map(&[("uri.0", Some("https://a.test")), ("uri.0.match", Some("3"))]);
+        let theirs = map(&[("uri.0", Some("https://b.test")), ("uri.0.match", Some("0"))]);
+        match three_way(&base, &ours, &theirs) {
+            Merge::Push(push) => {
+                assert_eq!(push.get("uri.0.match").unwrap().as_deref(), Some("3"));
+                assert!(!push.contains_key("uri.0"), "theirs 已改的 uri 值不動");
+            }
+            other => panic!("expect Push, got {other:?}"),
+        }
+        let theirs2 = map(&[("uri.0", Some("https://a.test")), ("uri.0.match", Some("1"))]);
+        match three_way(&base, &ours, &theirs2) {
+            Merge::Conflict { fields } => assert_eq!(fields, vec!["uri.0.match".to_string()]),
+            other => panic!("expect Conflict, got {other:?}"),
+        }
+        // 明文整數寫回 theirs：不落信封、None 回 null。
+        let theirs_json = serde_json::json!({"login": {"uris": [
+            {"uri": "E.a", "match": 0}
+        ]}});
+        let merged = {
+            let mut m = FieldMap::new();
+            m.insert("uri.0.match".into(), Some("3".into()));
+            m
+        };
+        let out = apply_merged(&theirs_json, &merged, &|s| format!("E.{s}"));
+        assert_eq!(out["login"]["uris"][0]["match"], serde_json::json!(3));
+        let mut cleared = FieldMap::new();
+        cleared.insert("uri.0.match".into(), None);
+        let out = apply_merged(&theirs_json, &cleared, &|s| format!("E.{s}"));
+        assert!(out["login"]["uris"][0]["match"].is_null());
     }
 
     #[test]

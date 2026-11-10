@@ -1159,9 +1159,9 @@ impl Hub {
         Ok(())
     }
 
-    fn project_one(&self, id: ItemId, view: View) -> Result<Option<ItemView>, WtpError> {
+    pub(crate) fn project_one(&self, id: ItemId, view: View) -> Result<Option<ItemView>, WtpError> {
         let meta = self.store.meta(id).map_err(denied)?;
-        let base = match meta {
+        let mut base = match meta {
             Some(m) => m,
             None => return Ok(None),
         };
@@ -1176,6 +1176,18 @@ impl Hub {
         let Some(row) = row else {
             return Ok(Some(ItemView::metadata(base)));
         };
+        // match 判定是協定明文欄（鏡像原樣）：Masked/Reveal 回填給 GUI 編輯面
+        // 下拉做基準；Metadata 視窗（列表）不讀鏡像、恆空。
+        base.uri_matches = row
+            .enc_cipher
+            .pointer("/login/uris")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .map(|u| u.get("match").and_then(Value::as_u64).map(|m| m as u8))
+                    .collect()
+            })
+            .unwrap_or_default();
         // 共享項目（organizationId 命中已派生 org key）以 org 對稱金鑰解密；
         // 敏感度分級（§2.1）不因 org 放寬——這裡只換鑰，不換視窗。
         // （帶 item key 的官方形態項目經 `Hub::cipher_decrypt_key` 兩段鏈。）

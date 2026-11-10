@@ -101,6 +101,11 @@ pub struct ItemMeta {
     /// 投影紀律同 `deleted_at`：協定欄位原樣，非本地時鐘。
     #[serde(default)]
     pub archived_at: Option<String>,
+    /// 各網址列的 match 判定（鏡像 `login.uris[].match` 明文整數；缺欄＝None
+    /// 預設）。順序對齊 `uris`；鎖定態（Metadata 視窗）不讀鏡像恆空，
+    /// Masked/Reveal 由 `project_one` 回填（GUI 編輯面 match 下拉的基準值）。
+    #[serde(default)]
+    pub uri_matches: Vec<Option<u8>>,
 }
 
 /// 依 `View` 構造的回傳型別：Metadata 下機密欄位在型別上不存在（契約 §2.1）。
@@ -673,6 +678,10 @@ pub struct CipherDraft {
     /// 自訂欄位（順序即線格式 `fields[]` 順序）
     #[serde(default)]
     pub fields: Vec<CipherField>,
+    /// 各網址列的 match 判定（對齊 `uris[]` 索引；缺欄/缺項＝null 預設）。
+    /// 官方線格式 `login.uris[].match` 明文整數（見 `FieldEdit::SetUriMatch`）。
+    #[serde(default)]
+    pub uri_matches: Vec<Option<u8>>,
 }
 
 /// 批次匯入的一筆（`VaultCall::Import` 載體）。draft 是**明文欄位結構**：
@@ -727,6 +736,18 @@ pub enum FieldEdit {
     /// 移除網址列（按 index；越界回錯）。
     RemoveUri {
         index: u32,
+    },
+    /// 改網址列的 match 判定（官方 `login.uris[].match`：null=預設、
+    /// 0=網域、1=網域＋子域、2=開頭符合、3=精確、4=正規表達式、5=永不）。
+    /// `None`＝回落預設（null）。值為明文整數不落信封（協定欄位形態）；
+    /// 按基準索引定位（同 `uri.<n>` Set 紀律：先值批後結構批，AppendUri
+    /// 新增列的 match 由呼叫端在結構批落地後補一發）。
+    /// 置尾紀律同 AppendUri：陣列欄位級寫入走全 PUT（VW partial 只收
+    /// folderId/favorite，查證 2026-11-10）。
+    SetUriMatch {
+        index: u32,
+        #[serde(rename = "match")]
+        match_type: Option<u8>,
     },
 }
 
@@ -1199,6 +1220,7 @@ mod tests {
             pending: false,
             deleted_at: None,
             archived_at: None,
+            uri_matches: vec![],
         }
     }
 
@@ -1247,6 +1269,24 @@ mod tests {
         let bytes = postcard::to_allocvec(&resp).unwrap();
         let back: Response = postcard::from_bytes(&bytes).unwrap();
         assert!(matches!(back, Response::Settings(s) if s == Settings::default()));
+        // 批次 2/3 新變體：postcard 往返＋JSON 欄名（match 為關鍵字、線名不轉義）
+        let edit = Call::Vault(VaultCall::Patch {
+            id: Uuid::new_v4(),
+            edits: vec![FieldEdit::SetUriMatch { index: 2, match_type: Some(3) }],
+        });
+        let bytes = postcard::to_allocvec(&edit).unwrap();
+        let back: Call = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), serde_json::to_string(&edit).unwrap());
+        assert!(serde_json::to_string(&edit).unwrap().contains("\"match\":3"));
+        let del = Call::Passkey(PasskeyCall::DeletePasskey {
+            item_id: Uuid::new_v4(),
+            credential_id: "cred".into(),
+        });
+        let bytes = postcard::to_allocvec(&del).unwrap();
+        assert!(matches!(
+            postcard::from_bytes::<Call>(&bytes).unwrap(),
+            Call::Passkey(PasskeyCall::DeletePasskey { .. })
+        ));
     }
 
     #[test]

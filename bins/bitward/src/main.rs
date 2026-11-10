@@ -178,6 +178,10 @@ enum Cmd {
         /// 移除網址列（0 起 index），可重複
         #[arg(long = "remove-uri")]
         remove_uris: Vec<u32>,
+        /// 改網址列判定 `<index>=<null|0..5>`，可重複（官方 `login.uris[].match`：
+        /// null=預設、0=網域、1=網域＋子域、2=開頭符合、3=精確、4=正規表達式、5=永不）
+        #[arg(long = "set-uri-match")]
+        set_uri_matches: Vec<String>,
         /// 清除欄位，可重複
         #[arg(long = "clear")]
         clears: Vec<String>,
@@ -1242,6 +1246,8 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                     password,
                     totp: totp.clone(),
                     uris: uri.clone().into_iter().collect(),
+                    // CLI new 不帶判定下拉（官方新建預設 null）；GUI 建立面走 draft.uri_matches
+                    uri_matches: Vec::new(),
                     notes: notes.clone(),
                     favorite: false,
                     folder_id: folder.clone(),
@@ -1276,6 +1282,7 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             removes,
             append_uris,
             remove_uris,
+            set_uri_matches,
             clears,
             secret_stdin,
         } => {
@@ -1326,6 +1333,22 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             }
             for r in remove_uris {
                 edits.push(FieldEdit::RemoveUri { index: *r });
+            }
+            for s in set_uri_matches {
+                let (idx, val) = s
+                    .split_once('=')
+                    .ok_or_else(|| format!("--set-uri-match 需要 index=match， got {s}"))?;
+                let index = idx
+                    .parse::<u32>()
+                    .map_err(|_| format!("--set-uri-match index 需為數字，got {idx}"))?;
+                let match_type = match val {
+                    "null" => None,
+                    v => Some(
+                        v.parse::<u8>()
+                            .map_err(|_| format!("--set-uri-match 值域 null|0..5，got {val}"))?,
+                    ),
+                };
+                edits.push(FieldEdit::SetUriMatch { index, match_type });
             }
             for c in clears {
                 edits.push(FieldEdit::Set {
@@ -1585,6 +1608,21 @@ fn parse_import_item(c: &serde_json::Value) -> Result<ImportItem, String> {
                 .collect()
         })
         .unwrap_or_default();
+    // 官方匯出 uris[].match（明文整數/null）：隨列序平行帶入 draft，缺位＝None 預設
+    let uri_matches: Vec<Option<u8>> = c
+        .get("uris")
+        .or(login.get("uris"))
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .map(|u| {
+                    u.get("match")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|m| m as u8)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let fields = c
         .get("fields")
         .and_then(serde_json::Value::as_array)
@@ -1631,6 +1669,7 @@ fn parse_import_item(c: &serde_json::Value) -> Result<ImportItem, String> {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned),
             fields,
+            uri_matches,
         },
         tags,
     })

@@ -43,6 +43,7 @@ fn item(id: &str, name: &str, uris: &[&str]) -> ItemView {
         pending: false,
         deleted_at: None,
         archived_at: None,
+        uri_matches: vec![],
     })
 }
 
