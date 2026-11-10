@@ -339,3 +339,13 @@ r1/r2 兩輪 A16 同點掛：探針頁渲染成功、`tap_text` 也點了出去�
 （nsh AppActivity 沒事是因為它自己處理 safe-area）。修＝`fitsSystemWindows=true`。
 教訓：**外殼新增原生頁要嘛吃 insets、要嘛別把可交互欄位排在屏頂 90px 內**；
 uiautomator 節點存在≠可點中，focus 斷言要看 `focused="true"` 而不是只認節點。
+
+### A16 實錄三：存檔提示是 zh 語系（「保存」鈕，描述列不可點）
+
+insets 修好後 fill→commit 全通，但 `onSaveRequest` 仍不來：emulator 語系為
+zh，系統存檔提示實錄節點＝標題「要将密码和用户名保存到bitward吗？」＋
+自訂描述列「儲存到 Bitward」（**純文字，點了沒反應**）＋「不用了」＋
+「保存」（真鈕）。腳本原本認英文「Save」落空。教訓：**框架彈窗文案按語系
+變，自動化要嘛固定 emulator 語系、要嘛按钮角色（非描述列）定位**；本腳本
+改認「保存」優先、英文「Save」退路。修後實測鏈：`probe commit requested →
+onSaveRequest → jni: save q=io.bitward.android action=created → save ok`。

@@ -561,12 +561,14 @@ type_text "$SAVE_PASS"
 hide_ime
 $ADB logcat -c
 tap_text a16-submit "提交"
-# 系統存檔提示（SaveInfo 流的必經步驟）：認「儲存到 Bitward」描述列與
-# framework Save 鈕兩種形態，点了再等孤島落地標記。
+# 系統存檔提示（SaveInfo 流的必經步驟）：emulator 是 zh 語系，Save 鈕實錄
+# 文案＝「保存」（描述列「儲存到 Bitward」不可點，别误打）；英文 image 退
+# 「Save」。点了才會有 onSaveRequest。
 for _ in $(seq 1 12); do
   dump /tmp/android-a16-prompt.xml
-  if has_text /tmp/android-a16-prompt.xml "儲存到 Bitward"; then tap_text a16-chip "儲存到 Bitward"; fi
-  if has_text /tmp/android-a16-prompt.xml "Save"; then tap_text a16-btn "Save"; fi
+  if has_text /tmp/android-a16-prompt.xml "保存"; then tap_text a16-btn "保存"
+  elif has_text /tmp/android-a16-prompt.xml "Save"; then tap_text a16-btn "Save"
+  fi
   $ADB logcat -d | grep -q 'save ok action=' && break
   sleep 1
 done
