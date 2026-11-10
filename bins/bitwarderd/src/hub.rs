@@ -995,6 +995,75 @@ impl Hub {
             .map(|c| c.org)
     }
 
+    /// cipher 的欄位金鑰（讀寫路徑單一真相源；官方金鑰模型）。官方客戶端
+    /// 每筆項目一枚隨機 64B **item key**（enc32‖mac32，與 UserKey 同形），
+    /// `key` 欄存它以 user/org key 包的 `2.` 信封，name/uris/username/
+    /// password/totp/fields/notes 全部以 item key 加密（jslib `Cipher.key`；
+    /// bitwarden.com/help/what-encryption-is-used）。
+    /// - 帶 `key` 欄 → 解包得 item key。包裝鑰候選依歸屬
+    ///   （[`Self::cipher_owner_org`]）排首，再補其他已派生鑰——type 2 信封
+    ///   MAC 先驗，錯鑰解不開、絕不會誤出明文；歸屬候選排首讓 move 收斂前
+    ///   的過渡窗（鏡像已改歸屬、`key` 仍舊包法）也解得開。全解不開 → None。
+    /// - 無 `key` 欄（舊項目/自家 CLI 種子）→ 歸屬鑰直解內容欄（jslib 對
+    ///   無 key cipher 的 fallback 同口徑，官方讀我們舊寫法產的項目不受影響）。
+    /// None（org key 未派生、item key 解包失敗）容錯語意：讀路徑欄位回
+    /// None，寫路徑必須拒寫；**不得**退回 user key 直解內容欄（帶 key 的
+    /// 項目會全欄誤解，寫回更會推出無人解得開的密文）。
+    pub(crate) fn cipher_decrypt_key(
+        &self,
+        kb: &bw_keys::KeyBundle,
+        cipher: &Value,
+        org_keys: &HashMap<Uuid, bw_crypto::OrgKey>,
+    ) -> Option<Zeroizing<Vec<u8>>> {
+        let user: &[u8] = kb.user_key().as_bytes();
+        let owner: Option<&[u8]> = match self.cipher_owner_org(cipher) {
+            None => Some(user),
+            Some(org) => org_keys.get(&org).map(|k| k.as_bytes()),
+        };
+        match cipher.get("key").and_then(Value::as_str) {
+            Some(env) => {
+                let mut candidates: Vec<&[u8]> = Vec::new();
+                if let Some(o) = owner.filter(|o| *o != user) {
+                    candidates.push(o);
+                }
+                candidates.push(user);
+                for k in org_keys.values() {
+                    let b = k.as_bytes();
+                    if b != user && !candidates.contains(&b) {
+                        candidates.push(b);
+                    }
+                }
+                candidates.into_iter().find_map(|w| {
+                    bw_crypto::decrypt_bytes_with_key(w, env)
+                        .ok()
+                        // item key 形態校驗：32（legacy type 0）或 64（enc‖mac），
+                        // 同 `UserKey::from_bytes` 規則。
+                        .filter(|ik| ik.len() == 32 || ik.len() == 64)
+                        .map(Zeroizing::new)
+                })
+            }
+            None => owner.map(|o| Zeroizing::new(o.to_vec())),
+        }
+    }
+
+    /// 讀路徑欄位解密器（project_one/totp/autotype/SecretRef/索引回填共用）：
+    /// 金鑰取自 [`Self::cipher_decrypt_key`]，閉包只在 `with_keys` 閉包內
+    /// 存活（不變量 3）。單欄解不開回 None（容忍漂移，同舊行為）。
+    pub(crate) fn cipher_field_decryptor(
+        &self,
+        kb: &bw_keys::KeyBundle,
+        enc_cipher: &Value,
+        org_keys: &HashMap<Uuid, bw_crypto::OrgKey>,
+    ) -> impl Fn(&str) -> Option<String> + '_ {
+        let key = self.cipher_decrypt_key(kb, enc_cipher, org_keys);
+        move |e: &str| {
+            let k: &[u8] = key.as_ref()?;
+            bw_crypto::decrypt_bytes_with_key(k, e)
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok())
+        }
+    }
+
     /// 寫路徑欄位金鑰（base/ours/theirs 攤平與重新加密共用一把）：個人項目
     /// 用 user key；共享項目（[`Self::cipher_owner_org`]）必須用所屬 org 的
     /// 對稱金鑰——該 key 尚未派生（akey 解不出）時回 `None`，呼叫端**不得**
@@ -1048,7 +1117,7 @@ impl Hub {
                 continue;
             };
             let decrypted = self.machine.with_keys(|kb| {
-                let dec = cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
+                let dec = self.cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
                 bw_vault::plain_index(&row.enc_cipher, &dec)
             });
             let idx = match decrypted {
@@ -1087,7 +1156,7 @@ impl Hub {
         let org_keys = self.org_key_map();
         let reveal = view == View::Reveal;
         let dec = self.machine.with_keys(|kb| {
-            let d = cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
+            let d = self.cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
             let (username, password, notes, fields) = {
                 let login = row.enc_cipher.get("login");
                 let username = login
@@ -1171,7 +1240,7 @@ impl Hub {
             let org_keys = self.org_key_map();
             self.machine
                 .with_keys(|kb| {
-                    let d = cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
+                    let d = self.cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
                     let dec = |field: &str| {
                         row.enc_cipher
                             .pointer(&format!("/login/{field}"))
@@ -1231,7 +1300,7 @@ impl Hub {
             let org_keys = self.org_key_map();
             self.machine
                 .with_keys(|kb| {
-                    let d = cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
+                    let d = self.cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
                     row.enc_cipher
                         .pointer("/login/totp")
                         .and_then(Value::as_str)
@@ -1510,31 +1579,6 @@ fn sensitivity_of_call(c: &Call, resp: Option<&Response>) -> bw_proto::Sensitivi
     }
 }
 
-/// 讀路徑欄位解密器：cipher 帶 `organizationId` 且該 org 的對稱金鑰已派生
-/// （`org_key_map`）→ 用 org key；否則使用者金鑰。回傳閉包只在 `with_keys`
-/// 閉包內存活（不變量 3）。解密失敗回 None（容忍漂移，同 reindex 舊行為）。
-/// 出處：org 項目欄位以 org 對稱金鑰加密（clients 新金鑰模型；
-/// `Membership.akey` → `organizations[].key` 的包裝金鑰見 bw-keys `unwrap_org_key`）。
-pub(crate) fn cipher_field_decryptor<'k>(
-    kb: &'k bw_keys::KeyBundle,
-    enc_cipher: &Value,
-    org_keys: &'k HashMap<Uuid, bw_crypto::OrgKey>,
-) -> impl Fn(&str) -> Option<String> + 'k {
-    let user_bytes: &'k [u8] = kb.user_key().as_bytes();
-    let org_bytes = enc_cipher
-        .get("organizationId")
-        .and_then(Value::as_str)
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .and_then(|o| org_keys.get(&o))
-        .map(|k| k.as_bytes());
-    let key: &'k [u8] = org_bytes.unwrap_or(user_bytes);
-    move |e: &str| {
-        bw_crypto::decrypt_bytes_with_key(key, e)
-            .ok()
-            .and_then(|b| String::from_utf8(b).ok())
-    }
-}
-
 /// org RSA 私鑰解密鏈驗證：user 對稱金鑰解 `encryptedPrivateKey` 得 PKCS#8
 /// → 以 org 公開金鑰 RSA-OAEP 包一枚 probe → 私鑰解回原值。全用既有
 /// bw-crypto 原語（P4b 契約交付 1 的「至少」門檻）。
@@ -1662,5 +1706,119 @@ mod tests {
             .unwrap();
         let Response::Json(v) = resp else { panic!("expect Json") };
         assert_eq!(v.as_array().map(Vec::len), Some(0));
+    }
+
+    fn one_org_keys(org: Uuid, key: &bw_crypto::OrgKey) -> HashMap<Uuid, bw_crypto::OrgKey> {
+        let mut m = HashMap::new();
+        m.insert(org, key.clone());
+        m
+    }
+
+    /// 解析器三態：有 key（解包得 item key）／無 key（歸屬鑰直解）／
+    /// 解包失敗（None，不誤退回）；共享兩形態（org 包 item key 的兩段鏈）。
+    #[tokio::test]
+    async fn cipher_decrypt_key_three_states() {
+        let (hub, _d) = crate::passkey::tests::unlocked_hub("keyres1").await;
+        let user = hub
+            .machine
+            .with_keys(|kb| kb.user_key().as_bytes().to_vec())
+            .unwrap();
+        let item: Vec<u8> = (150u8..214).collect();
+        let wrapped = bw_crypto::encrypt_bytes_key(&user, &item).unwrap();
+        let resolve = |cipher: Value| {
+            let hub = hub.clone();
+            hub.machine
+                .with_keys(|kb| hub.cipher_decrypt_key(kb, &cipher, &HashMap::new()))
+                .unwrap()
+                .map(|k| k.to_vec())
+        };
+        assert_eq!(
+            resolve(json!({"type": 1, "key": wrapped, "name": "2.a|b|c"})).as_deref(),
+            Some(item.as_slice()),
+            "有 key 欄 → 以 user key unwrapped 出 item key"
+        );
+        assert_eq!(
+            resolve(json!({"type": 1, "name": "2.a|b|c"})).as_deref(),
+            Some(user.as_slice()),
+            "無 key 欄 → user key 直解（反向相容舊項目）"
+        );
+        let foreign_wrap = bw_crypto::encrypt_bytes_key(
+            &(0u8..64).collect::<Vec<u8>>(),
+            &item,
+        )
+        .unwrap();
+        assert_eq!(
+            resolve(json!({"type": 1, "key": foreign_wrap, "name": "2.a|b|c"})),
+            None,
+            "unwrap 失敗 → None（不得退回 user key 直解內容欄）"
+        );
+        // 共享（無 key）：org 已派生 → org key；未派生 → None。
+        let org = Uuid::new_v4();
+        let orgkey = bw_crypto::OrgKey::from_bytes((100u8..164).collect()).unwrap();
+        let shared = json!({"type": 1, "organizationId": org.to_string(), "name": "2.a|b|c"});
+        let got = hub
+            .machine
+            .with_keys(|kb| {
+                hub.cipher_decrypt_key(kb, &shared, &one_org_keys(org, &orgkey))
+                    .map(|k| k.to_vec())
+            })
+            .unwrap();
+        assert_eq!(got.as_deref(), Some(orgkey.as_bytes()));
+        assert_eq!(
+            hub.machine
+                .with_keys(|kb| hub.cipher_decrypt_key(kb, &shared, &HashMap::new()))
+                .unwrap(),
+            None,
+            "org key 未派生 → None（同寫側拒寫口徑）"
+        );
+        // 共享（有 key）：org key 包 item key——成員鏈條兩段都要對。
+        let item2: Vec<u8> = (10u8..74).collect();
+        let wrapped2 = bw_crypto::encrypt_bytes_key(orgkey.as_bytes(), &item2).unwrap();
+        let shared2 =
+            json!({"type": 1, "organizationId": org.to_string(), "key": wrapped2, "name": "2.a|b|c"});
+        let got = hub
+            .machine
+            .with_keys(|kb| {
+                hub.cipher_decrypt_key(kb, &shared2, &one_org_keys(org, &orgkey))
+                    .map(|k| k.to_vec())
+            })
+            .unwrap();
+        assert_eq!(got.as_deref(), Some(item2.as_slice()));
+    }
+
+    /// 官方形態鏡像（key 欄＋item-key 加密欄位）：明文索引回填與 Reveal
+    /// 投影都解得出——使用者真實庫的讀取路徑。
+    #[tokio::test]
+    async fn item_key_cipher_projects_and_indexes() {
+        let (hub, _d) = crate::passkey::tests::unlocked_hub("keyres2").await;
+        let user = hub
+            .machine
+            .with_keys(|kb| kb.user_key().as_bytes().to_vec())
+            .unwrap();
+        let item: Vec<u8> = (150u8..214).collect();
+        let enc = |pt: &str| bw_crypto::encrypt_bytes_key(&item, pt.as_bytes()).unwrap();
+        let id = Uuid::new_v4();
+        hub.store
+            .put_mirror(
+                id,
+                &json!({
+                    "id": id.to_string(), "type": 1,
+                    "key": bw_crypto::encrypt_bytes_key(&user, &item).unwrap(),
+                    "name": enc("GitHub"),
+                    "login": {
+                        "username": enc("octo"),
+                        "password": enc("s3cret-ik"),
+                        "uris": [{"uri": enc("https://github.com"), "match": null}],
+                    },
+                }),
+            )
+            .unwrap();
+        hub.reindex_one(id).unwrap();
+        let meta = hub.store.meta(id).unwrap().unwrap();
+        assert_eq!(meta.name.as_deref(), Some("GitHub"), "item key 層名稱必須回填");
+        assert_eq!(meta.uris, vec!["https://github.com".to_string()]);
+        let v = hub.project_one(id, View::Reveal).unwrap().unwrap();
+        assert_eq!(v.password.as_deref(), Some("s3cret-ik"));
+        assert_eq!(v.username.as_deref(), Some("octo"));
     }
 }
