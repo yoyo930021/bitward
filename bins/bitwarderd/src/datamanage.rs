@@ -57,16 +57,23 @@ impl Hub {
             .map_err(denied)?;
         let mut clusters: std::collections::BTreeMap<(String, String), Vec<ItemId>> =
             Default::default();
+        let org_keys = self.org_key_map();
         for m in metas {
             let row = match self.store.item(m.id) {
                 Ok(Some(r)) => r,
                 _ => continue,
             };
-            let key = self
+            let cluster_key = self
                 .machine
                 .with_keys(|kb| {
-                    let uk = kb.user_key();
-                    let dec = |s: &str| bw_crypto::decrypt(uk, &s.to_string()).ok();
+                    // 金鑰選擇統一走解析器（item key／org key／user key 三態，
+                    // 見 `Hub::cipher_decrypt_key`）；金鑰不出閉包（不變量 3）。
+                    let k = self.cipher_decrypt_key(kb, &row.enc_cipher, &org_keys)?;
+                    let dec = |s: &str| {
+                        bw_crypto::decrypt_bytes_with_key(&k, s)
+                            .ok()
+                            .and_then(|b| String::from_utf8(b).ok())
+                    };
                     let user = row
                         .enc_cipher
                         .pointer("/login/username")
@@ -84,9 +91,11 @@ impl Hub {
                             after.split(['/']).next().map(str::to_lowercase)
                         })
                         .unwrap_or_default();
-                    (host, user)
+                    Some((host, user))
                 })
                 .map_err(denied)?;
+            // 無可用金鑰（org 未派生／item key 解不開）：跳過比誤配準。
+            let Some(key) = cluster_key else { continue };
             if key.0.is_empty() && key.1.is_empty() {
                 continue;
             }

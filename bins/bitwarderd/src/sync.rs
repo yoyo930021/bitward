@@ -845,14 +845,14 @@ impl Hub {
                         let org_keys = self.org_key_map();
                         self.machine
                             .with_keys(|kb| {
-                                // 衝突欄位顯示同寫側口徑：按 cipher 歸屬選鑰攤平。
-                                // org key 缺 → 退回 user key（純顯示路徑，最壞是
-                                // 欄位清單為空，不觸伺服器）。
-                                let key = self
-                                    .cipher_write_key(kb, ours, &org_keys)
-                                    .unwrap_or_else(|| kb.user_key().as_bytes());
+                                // 衝突欄位顯示同讀寫口徑：按 cipher 歸屬走解析器
+                                // 攤平（含 item key 兩段鏈）。無鑰 → 空欄位清單
+                                // （純顯示路徑，最壞不報欄，不硬用 user key 誤解）。
+                                let Some(key) = self.cipher_decrypt_key(kb, ours, &org_keys) else {
+                                    return Vec::new();
+                                };
                                 let dec = |s: &str| -> Option<String> {
-                                    bw_crypto::decrypt_bytes_with_key(key, s)
+                                    bw_crypto::decrypt_bytes_with_key(&key, s)
                                         .ok()
                                         .and_then(|b| String::from_utf8(b).ok())
                                 };
