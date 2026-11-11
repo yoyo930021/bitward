@@ -949,19 +949,12 @@ $ADB logcat -c
 tap_text a20-row "Bitward：尚未解鎖"
 wait_text "生物辨識直接解鎖" 30 || { dump /tmp/android-a20-guide.xml; fail "A20 一鍵引導沒拉開解鎖閘（見 /tmp/android-a20-guide.xml）"; }
 biometric_unlock "鏡像 8 筆" 20-cold-guidance
-# 解鎖後同進程中樞現鑰：下一次 fill 請求就是真候選（A11 口徑、生物解鎖路徑）。
-$ADB shell am start -n "$PKG/.AutofillProbeActivity" >/dev/null 2>&1
-sleep 2
+# 解鎖後同進程中樞現鑰：下一次 fill 請求就是真候選——A11 同款口徑，
+# 直接 focus 金庫頁搜尋欄（探針頁重置頂在「AppActivity 在上」時 am start
+# 會靜默不生效，14:5x 實錄兩式皆然，改走既有確定性通道）。
 hide_ime
 $ADB logcat -c
-# 探針頁回到前景有轉場窗（實錄：單發 dump 會抓到 vault/過渡幀而無 EditText）：
-# 輪詢等層級裡有欄位再定位。
-for _ in $(seq 1 10); do
-  dump /tmp/android-a20-refocus.xml
-  grep -q 'android.widget.EditText' /tmp/android-a20-refocus.xml && break
-  sleep 1
-done
-tap_edittext_of /tmp/android-a20-refocus.xml 1
+tap_first_edittext android-a20-focus.xml
 wait_text "bitward-selftest" 15 || { $ADB logcat -d | grep bitward-island | tail -6; fail "A20 解鎖後沒出現真候選"; }
 [[ "$($ADB logcat -d)" == *'onFillRequest unlocked=true'* ]] \
   || fail "A20 解鎖後的 fill 沒走 unlocked=true 分支"
