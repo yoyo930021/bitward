@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Android P4b 驗收（契約 §5 P4 列「Android track 自此起平行」）。
 #
-# 十七斷言（A1–A17）：
+# 二十斷言（A1–A20）：
 #   A1 in-process 核心（bw-crypto/bw-server/bw-store）交叉編譯進三 ABI 的 APK
 #   A2 app 裝進 emulator 並啟動到登入畫面（原生 nav 標題渲染）
 #   A3 真實 UI 路徑完成登入：prelogin→派生→password grant→user key 解封→sync→明文索引
@@ -24,8 +24,19 @@
 #   A16 autofill save 全鏈：探針頁輸入未儲存組合→fill 回 SaveInfo→提交→
 #       onSaveRequest→Hub::save_from_autofill create→outbox→重新同步 drain
 #       →暫時 daemon 對 VW reveal 出存进去的帳密（鎖態不假裝存）
-#   A17 詳情 TOTP 自動碼：進頁免按鈕現算，碼與本機 python HMAC 同值、
+#   A17 詳情 TOTP 自動碼：進頁免按鈕現算，碼與本機 HMAC 同值、
 #       倒數條「剩餘 N 秒」渲染（≤5s 轉警告色屬視覺，截圖留證）
+#   A18 Keystore 封存：登入成功點封存 user key 落 no_backup/bitward/sealed.json
+#       （v/email/PUK 錨/blob=IV‖ct‖tag）；重啟後「生物辨識直接解鎖」彈窗＋
+#       假指紋（adb emu finger touch）免 KDF 重派生進金庫（logcat 證 unseal、
+#       反證無「已登入」密碼軌跡）
+#   A19 startForeground 背景同步：寫入即踢 HubService（dataSync 通知截圖＋
+#       dumpsys 斷言）；「待推送」不打重新同步由背景 drain 收斂＋VW 端可見；
+#       JobScheduler 15 分鐘週期 job 在冊；強制 tick（am start-foreground-service）
+#       即刻收工
+#   A20 autofill 冷啟定案：封存金鑰綁使用者驗證 → service 冷啟無 UI 彈窗，
+#       30 秒視窗外誠實鎖態（silent unseal denied＋fill locked sealed=true＋
+#       「尚未解鎖」截圖）；一鍵引導拉開解鎖閘→生物解鎖→下一次 fill 真候選
 # 產物：apps/bitward-android/shots/*.png（截圖）與 .nsh/out/bitward-islands.apk
 #       （孤島＋nsh 中樞的合併 APK；A1–A7 裝的就是這顆）
 set -euo pipefail
@@ -156,6 +167,73 @@ unlock_device() {  # 設了 PIN 之後 keyguard 可能在螢幕喚醒時擋路�
     sleep 1
   fi
 }
+auth_device() {  # 真·使用者驗證事件：鎖屏→PIN 解鎖（Keystore 30 秒視窗的來源；
+  # wm dismiss-keyguard 不算驗證，實錄見 findings 第五批）。登入前跑，
+  # 讓登入成功點的封存走靜默路（不彈窗、A1–A17 形態不變）。
+  local sz w h
+  sz=$($ADB shell wm size | sed -E 's/.*: ([0-9]+)x([0-9]+).*/\1 \2/' | tr -d '\r')
+  w=${sz% *}; h=${sz#* }
+  $ADB shell input keyevent 26 </dev/null >/dev/null 2>&1    # POWER：關屏
+  sleep 1
+  $ADB shell input keyevent 224 </dev/null >/dev/null 2>&1   # WAKEUP
+  sleep 1
+  $ADB shell input swipe "$((w/2))" "$((h*88/100))" "$((w/2))" "$((h*30/100))" 300 </dev/null >/dev/null 2>&1
+  sleep 1
+  $ADB shell input text "$EMU_PIN" </dev/null >/dev/null 2>&1
+  $ADB shell input keyevent 66 </dev/null >/dev/null 2>&1
+  sleep 1
+  for _ in 1 2 3; do
+    $ADB shell dumpsys window 2>/dev/null | grep -qE 'mShowingLockscreen=true|mDreamingLockscreen=true' \
+      || return 0
+    unlock_device
+    sleep 1
+  done
+  fail "auth_device：PIN 解鎖沒把 keyguard 收掉"
+}
+BIO_PROMPT_TEXT="確認指紋以解密本機金鑰"  # BiometricPromptActivity 副標（斷言錨點）
+wait_login() {  # wait_login <vault 文字> <秒>：等列表；若 Keystore 封存落在
+  # 驗證視窗外（彈窗路）就假指紋放行；通知權限窗搶場就點允許——兩條 seal
+  # 路與權限視窗 e2e 都容忍。
+  for _ in $(seq 1 "${2:-40}"); do
+    dump /tmp/android-wait.xml
+    has_text /tmp/android-wait.xml "$1" && return 0
+    if has_text /tmp/android-wait.xml "$BIO_PROMPT_TEXT"; then
+      $ADB emu finger touch 1 >/dev/null 2>&1
+    elif has_text /tmp/android-wait.xml "要允许"; then
+      xy=$(center_of /tmp/android-wait.xml "允許"); [[ -n "$xy" ]] && $ADB shell input tap $xy </dev/null >/dev/null 2>&1
+    elif has_text /tmp/android-wait.xml "Allow notifications"; then
+      xy=$(center_of /tmp/android-wait.xml "Allow"); [[ -n "$xy" ]] && $ADB shell input tap $xy </dev/null >/dev/null 2>&1
+    fi
+    sleep 1
+  done
+  return 1
+}
+biometric_unlock() {  # 生物辨識直接解鎖鈕 → 彈窗 → 假指紋 → 等 vault（$1 文字）。
+  tap_text bio-btn "生物辨識直接解鎖"
+  local seen=0
+  for _ in $(seq 1 20); do
+    dump /tmp/android-bio.xml
+    if has_text /tmp/android-bio.xml "$BIO_PROMPT_TEXT"; then
+      seen=1
+      break
+    fi
+    sleep 1
+  done
+  [[ $seen == 1 ]] || { dump /tmp/android-bio-fail.xml; fail "生物辨識彈窗沒出現（見 /tmp/android-bio-fail.xml）"; }
+  shot "${2:-18-biometric-prompt}"
+  $ADB emu finger touch 1 >/dev/null 2>&1
+  wait_text "$1" 40 || { dump /tmp/android-bio-after.xml; fail "假指紋後沒進金庫（見 /tmp/android-bio-after.xml）"; }
+}
+assert_pending() {  # assert_pending <dump 留檔名> <列名>：「待推送」本地先行斷言。
+  # 寫入即踢 HubService（第五批）後，背景輪可能在秒級就把列推清（第三批
+  # 「斷言變競態」教訓的再現窗）：膠囊還在＝直接過；已清＝必須看到背景輪
+  # 收斂軌跡（誰清的說得出來），否則 fail。
+  dump "/tmp/android-$1.xml"
+  has_text "/tmp/android-$1.xml" "待推送" && return 0
+  has_text "/tmp/android-$1.xml" "$2" || fail "$1 新增列不見（$2）"
+  $ADB logcat -d | grep -qE 'background run → (ok|ok-synced)' \
+    || fail "$1 「待推送」已清但沒有背景收斂軌跡（$2）"
+}
 
 # --- 0. 依賴 ------------------------------------------------------------------
 command -v nsh >/dev/null || fail "找不到 nsh（install.sh 裝到 ~/.local/bin）"
@@ -213,6 +291,52 @@ if [[ "$HAS_PW" != *"lock credential"* ]] && [[ "$HAS_PW" != "true" ]]; then
 fi
 $ADB shell svc power stayon true >/dev/null 2>&1
 unlock_device
+# 生物辨識前提：虛擬指紋已註冊（A18–A20 的假指紋通道；實錄：未註冊時
+# BiometricPrompt 直落憑證頁、emu finger touch 無效）。冪等：已註冊就跳過。
+PRINTS=$($ADB shell dumpsys fingerprint 2>/dev/null | grep -oE '"prints":\[[^]]*\]' | head -1)
+if [[ "$PRINTS" != *'"id"'* ]]; then
+  python3 - "$EMU_PIN" <<'PY' || fail "虛擬指紋註冊失敗（A18 前提）"
+import subprocess,sys,re,time
+PIN=sys.argv[1]
+def dump():
+    subprocess.run(['adb','shell','uiautomator','dump','/sdcard/w.xml'],capture_output=True)
+    return subprocess.run(['adb','shell','cat','/sdcard/w.xml'],capture_output=True,text=True).stdout
+def tap(x,*ts):
+    for m in re.finditer(r'text="([^"]*)"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', x):
+        if m.group(1) in ts:
+            cx=(int(m.group(2))+int(m.group(4)))//2
+            cy=(int(m.group(3))+int(m.group(5)))//2
+            subprocess.run(['adb','shell','input','tap',str(cx),str(cy)])
+            return True
+    return False
+subprocess.run(['adb','shell','am','start','-a','android.settings.BIOMETRIC_ENROLL'])
+time.sleep(2)
+x=dump()
+if 'PIN' in x:
+    subprocess.run(['adb','shell','input','text',PIN])
+    subprocess.run(['adb','shell','input','keyevent','66'])
+time.sleep(2)
+touched=0
+for _ in range(150):
+    x=dump(); j='|'.join(re.findall(r'text="([^"]+)"',x))
+    if '已添加指纹' in j or 'Fingerprint added' in j or '指紋已新增' in j:
+        break
+    if ('我同意' in j or 'I agree' in j) and ('不用了' in j or 'Not now' in j):
+        tap(x,'我同意','I agree')          # 「不用了」會退出向導（實錄 13:22）
+    elif '设置 Pixel Imprint' in j or 'Set up Pixel Imprint' in j:
+        tap(x,'更多','More')
+    elif '传感器' in j or '触摸' in j or '抬起' in j or 'sensor' in j.lower():
+        subprocess.run(['adb','emu','finger','touch','1'],capture_output=True)
+        touched+=1
+    else:
+        tap(x,'继续','下一步','好了','完成','跳过','以后再说','稍后','Continue','Next','Done','Skip','Later')
+    time.sleep(1.1)
+assert touched>3, '沒走過傳感器觸碰'
+PY
+  pass "已註冊虛擬指紋（設定向導自動流，touched≥4）"
+else
+  pass "虛擬指紋已在（$($ADB shell dumpsys fingerprint | grep -oE '\"prints\":\[[^]]*\]' | head -1 | cut -c1-60)…）"
+fi
 pass "emulator 就緒（$($ADB get-state)）"
 
 # --- 3. A1：三 ABI＋孤島 dex 的合併 APK ---------------------------------------
@@ -251,6 +375,10 @@ $ADB shell settings put secure current_autofill_service null >/dev/null 2>&1 || 
 $ADB install -r "$APK" >/dev/null
 # 清掉上輪的 app 資料（登入頁預填會變，斷言要可重跑）
 $ADB shell pm clear $PKG >/dev/null
+# pm clear 會收回 runtime 權限：33+ 通知權限先給好，否則 A3 登入後的
+# HubService 權限補要窗（PermissionRequestActivity）會蓋住 vault 頁把
+# wait_login 拖死（13:36 實錄：登入/seal 全對、列表斷言餓死）。
+$ADB shell pm grant $PKG android.permission.POST_NOTIFICATIONS 2>/dev/null || true
 $ADB shell monkey -p $PKG -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
 wait_text "登入你的密碼庫" 30 || fail "登入畫面沒出現"
 dump /tmp/android-login.xml
@@ -266,8 +394,9 @@ type_text "$WP"
 hide_ime
 shot 2-login-filled
 $ADB logcat -c
+auth_device
 tap_text login-btn "登入"
-wait_text "鏡像 4 筆" 40 || { $ADB logcat -d | grep -E 'nsh|AndroidRuntime' | tail -20; fail "登入後列表沒出現"; }
+wait_login "鏡像 4 筆" 40 || { $ADB logcat -d | grep -E 'nsh|AndroidRuntime' | tail -20; fail "登入後列表沒出現"; }
 APP_LOG=$($ADB logcat -d)
 [[ "$APP_LOG" == *'已登入：4 筆鏡像'* ]] || fail "logcat 沒有登入成功軌跡"
 shot 3-vault
@@ -362,8 +491,9 @@ tap_text pw-field "只用於派生金鑰，不落地"
 type_text "$WP"
 hide_ime
 $ADB logcat -c
+auth_device
 tap_text login-btn "登入"
-wait_text "鏡像 4 筆" 40 || { $ADB logcat -d | grep -E 'bitward|nsh|AndroidRuntime' | tail -20; fail "A11 重新登入失敗"; }
+wait_login "鏡像 4 筆" 40 || { $ADB logcat -d | grep -E 'bitward|nsh|AndroidRuntime' | tail -20; fail "A11 重新登入失敗"; }
 $ADB shell settings put secure autofill_service "$AF_SVC"
 $ADB shell settings put secure current_autofill_service "$AF_SVC"
 sleep 2
@@ -398,8 +528,9 @@ tap_text pw-field2 "只用於派生金鑰，不落地"
 type_text "$WP"
 hide_ime
 $ADB logcat -c
+auth_device
 tap_text login-btn2 "登入"
-wait_text "鏡像 4 筆" 40 || { $ADB logcat -d | grep -E 'bitward|nsh|AndroidRuntime' | tail -20; fail "A12 重新登入失敗"; }
+wait_login "鏡像 4 筆" 40 || { $ADB logcat -d | grep -E 'bitward|nsh|AndroidRuntime' | tail -20; fail "A12 重新登入失敗"; }
 $ADB logcat -c
 tap_text a12-add "新增"
 wait_text "新增項目" 10 || fail "A12 編輯模態沒出現"
@@ -421,7 +552,7 @@ hide_ime
 tap_text a12-save "儲存"
 wait_text "e2e-added" 15 || { $ADB logcat -d | grep -E 'nsh_app|bitward' | tail -20; fail "A12 新增後列表沒出現該筆"; }
 dump /tmp/android-a12-pending.xml
-has_text /tmp/android-a12-pending.xml "待推送" || fail "A12 新增列應掛「待推送」（outbox 未推，本地先行）"
+assert_pending a12-pending e2e-added
 shot 12-vault-pending
 APP_LOG=$($ADB logcat -d)
 [[ "$APP_LOG" == *'create'*'待推送'* ]] || fail "logcat 沒有 create 入列軌跡"
@@ -548,8 +679,7 @@ hide_ime
 $ADB logcat -c
 tap_text a15-save "儲存"
 wait_text "totp-demo" 15 || { $ADB logcat -d | grep -E 'nsh_app|bitward' | tail -20; fail "A15 表單新增後列表沒出現該筆"; }
-dump /tmp/android-a15-pending.xml
-has_text /tmp/android-a15-pending.xml "待推送" || fail "A15 表單新增列應掛「待推送」"
+assert_pending a15-pending totp-demo
 APP_LOG=$($ADB logcat -d)
 [[ "$APP_LOG" == *'create'*'待推送'* ]] || fail "A15 logcat 沒有 create 入列軌跡"
 shot 15-vault-totp-pending
@@ -619,8 +749,9 @@ wait_text "登入你的密碼庫" 30 || fail "A16 重啟後登入畫面沒出現
 tap_text pw-field3 "只用於派生金鑰，不落地"
 type_text "$WP"
 hide_ime
+auth_device
 tap_text login-btn3 "登入"
-wait_text "鏡像 6 筆" 60 || { $ADB logcat -d | grep -E 'bitward|nsh|AndroidRuntime' | tail -20; fail "A16 重登後計數不對（應 6＝seed4＋totp-demo＋存檔）"; }
+wait_login "鏡像 6 筆" 60 || { $ADB logcat -d | grep -E 'bitward|nsh|AndroidRuntime' | tail -20; fail "A16 重登後計數不對（應 6＝seed4＋totp-demo＋存檔）"; }
 dump /tmp/android-a16-list.xml
 has_text /tmp/android-a16-list.xml "io.bitward.android" || fail "A16 存檔項沒進列表"
 if has_text /tmp/android-a16-list.xml "待推送"; then fail "A16 登入 drain 後「待推送」沒清"; fi
@@ -668,6 +799,167 @@ $ADB shell input keyevent 4 </dev/null >/dev/null 2>&1
 kill $HUB_PID 2>/dev/null || true
 trap - EXIT
 pass "A17 TOTP 自動碼現算渲染（code=$CODE 同值、倒數條在），詳情截圖留證"
+
+# --- 18. A18：Keystore 封存落盤＋生物辨識直接解鎖（免重派生） ------------------
+# A16 重登點在 auth_device 驗證視窗內 → 封存走靜默路（A1–A17 形態不變）；
+# 這裡先斷封存件落盤，再殺進程丟鑰，走「生物辨識直接解鎖」彈窗路。
+APP_LOG=$($ADB logcat -d)
+[[ "$APP_LOG" == *'keystore sealed user key'* ]] \
+  || fail "A18 登入封存點沒有落軌跡（seal 未跑？）"
+SEAL_JSON=$($ADB shell run-as $PKG cat no_backup/bitward/sealed.json 2>/dev/null || true)
+[[ -n "$SEAL_JSON" ]] || fail "A18 封存件缺失（no_backup/bitward/sealed.json）"
+python3 - "$SEAL_JSON" "$EMAIL" <<'PY' || fail "A18 封存記錄形態不符（v/email/puk/blob）"
+import base64, json, sys
+rec = json.loads(sys.argv[1])
+assert rec["v"] == 1, rec
+assert rec["email"] == sys.argv[2], rec["email"]
+assert rec["puk"].startswith("2."), rec["puk"][:4]
+blob = base64.b64decode(rec["blob_b64"])
+assert len(blob) >= 29, len(blob)  # IV(12)‖user key(≥32)‖tag(16)
+PY
+$ADB shell am force-stop $PKG
+$ADB shell monkey -p $PKG -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+wait_text "登入你的密碼庫" 30 || fail "A18 重啟後登入畫面沒出現"
+dump /tmp/android-a18-gate.xml
+has_text /tmp/android-a18-gate.xml "生物辨識直接解鎖" || fail "A18 解鎖閘沒出生物辨識鈕（has_sealed 閘失靈？）"
+$ADB logcat -c
+biometric_unlock "鏡像 6 筆" 18-biometric-prompt
+APP_LOG=$($ADB logcat -d)
+[[ "$APP_LOG" == *'keystore unseal ok（免重派生解鎖）'* ]] \
+  || { echo "$APP_LOG" | grep -E 'bitward|nsh' | tail -10; fail "A18 沒有 unseal 軌跡"; }
+[[ "$APP_LOG" != *'已登入：'* ]] || fail "A18 生物辨識解鎖走了密碼派生路（已登入 標記出現）"
+shot 18-biometric-unlocked
+pass "A18 封存落盤＋生物辨識直接解鎖（免 KDF 重派生、免打主密碼）"
+
+# --- 19. A19：startForeground 背景同步（週期 drain 收斂＋強制 tick） -----------
+# 形態：寫入即踢 HubService（daemon `trigger_drain` 等位）→ drain 收斂不打
+# 「重新同步」；foreground 通知（dataSync）與 JobScheduler 週期 job 都在線斷言。
+$ADB shell pm grant $PKG android.permission.POST_NOTIFICATIONS 2>/dev/null || true
+# 先立一筆待推送再殺進程：解鎖後的收斂走純背景路（無任何手動同步按鈕）。
+$ADB shell settings put secure autofill_service null >/dev/null 2>&1 || true
+$ADB shell settings put secure current_autofill_service null >/dev/null 2>&1 || true
+tap_text a19-add "新增"
+wait_text "新增項目" 10 || fail "A19 新增頁沒出現"
+tap_text a19-name "項目名稱（必填）"
+type_text "e2e-bg"
+hide_ime
+tap_text a19-user "帳號（可留空）"
+type_text "bguser"
+hide_ime
+tap_text a19-save "儲存"
+wait_text "e2e-bg" 15 || fail "A19 新增後列表沒出現該筆"
+assert_pending a19-pending e2e-bg
+$ADB shell am force-stop $PKG
+$ADB shell monkey -p $PKG -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+wait_text "登入你的密碼庫" 30 || fail "A19 重啟後登入畫面沒出現"
+$ADB logcat -c
+rm -f /tmp/android-notif-seen
+# 通知捕手與解鎖並行：unseal 的 FGS 窗只有秒級（round 收工即 stopForeground），
+# 主流程串行去抓會輸給競態——後台 0.25s 輪詢 dumpsys，見到的瞬間開簾截圖。
+# 錨點用 NotificationRecord 的 `pkg=` 行（通道註冊記錄常駐、不能當證據）。
+(
+  for _ in $(seq 1 240); do
+    if $ADB shell dumpsys notification 2>/dev/null | grep -q "pkg=$PKG"; then
+      $ADB shell cmd statusbar expand-notifications </dev/null >/dev/null 2>&1
+      sleep 1
+      $ADB exec-out screencap -p > "$SHOTS/19-foreground-notification.png"
+      $ADB shell cmd statusbar collapse </dev/null >/dev/null 2>&1
+      : >/tmp/android-notif-seen
+      exit 0
+    fi
+    sleep 0.25
+  done
+  exit 1
+) &
+NOTIF_POLL=$!
+biometric_unlock "鏡像 7 筆" 19-biometric-unlock
+# 解鎖輪（unseal 的 pull 先 drain）收斂 e2e-bg：不打重新同步也得清標記。
+wait_gone "待推送" 90 || { dump /tmp/android-a19-stuck.xml; fail "A19 解鎖後背景没收斂「待推送」"; }
+# 第二筆走「寫入即踢」純背景路徑（無任何手動同步）。
+tap_text a19b-add "新增"
+wait_text "新增項目" 10 || fail "A19 第二筆新增頁沒出現"
+tap_text a19b-name "項目名稱（必填）"
+type_text "e2e-bg2"
+hide_ime
+tap_text a19b-save "儲存"
+wait_text "e2e-bg2" 15 || fail "A19 第二筆沒進列表"
+wait $NOTIF_POLL || true
+[[ -e /tmp/android-notif-seen ]] || fail "A19 沒抓到 startForeground(dataSync) 通知（捕手全程在崗）"
+wait_gone "待推送" 90 || { dump /tmp/android-a19b-stuck.xml; fail "A19 寫入觸發的背景 drain 没收斂 e2e-bg2"; }
+APP_LOG=$($ADB logcat -d)
+[[ "$APP_LOG" == *'hub service startCommand action=io.bitward.android.action.RUN'* ]] \
+  || fail "A19 寫入觸發的 HubService 啟動軌跡缺失"
+[[ "$APP_LOG" == *'hub service round status=ok'* ]] \
+  || fail "A19 背景輪沒回 ok（drain 未結算？）"
+# 強制 tick＝JobScheduler 立即跑（契約「調短間隔」的形態；adb 直接
+# start-foreground-service 會撞 BIND_JOB_SERVICE 許可——shell uid 沒有它，
+# 13:51 實錄 Permission Denial；run -f 走系統正門、連 job 接線一起驗）。
+$ADB logcat -c
+$ADB shell cmd jobscheduler run -f "$PKG" 1001 </dev/null >/dev/null 2>&1 \
+  || fail "A19 強制 tick（jobscheduler run）失敗"
+for _ in $(seq 1 30); do
+  $ADB logcat -d | grep -q 'hub service round status=' && break
+  sleep 1
+done
+APP_LOG=$($ADB logcat -d)
+[[ "$APP_LOG" == *'hub service job fired'* ]] || fail "A19 強制 tick 沒觸發 onStartJob"
+[[ "$APP_LOG" == *'jni: background run → ok'* ]] || fail "A19 強制 tick 沒有收斂軌跡"
+$ADB shell dumpsys jobscheduler | grep -q "$PKG/.HubService" \
+  || { $ADB shell dumpsys jobscheduler | grep -A3 "$PKG" | head -8; fail "A19 JobScheduler 認不得我們的週期 job"; }
+# VW 端收斂：後台推出去的 e2e-bg/e2e-bg2 在伺服器可見（同 A12 口徑）。
+BITWARD_DATA_DIR="$PWD/$DA" "$DAEMON" --data-dir "$DA" --sock "$DA/s4" >"$DA/log4" 2>&1 &
+HUB_PID=$!
+trap 'kill $HUB_PID 2>/dev/null || true' EXIT
+sleep 1
+B4() { "$CLI" --sock "$DA/s4" "$@"; }
+echo "$WP" | B4 login --server "$SRV_HOST" --email "$EMAIL" --password-stdin >/dev/null || fail "A19 暫時 daemon 登入失敗"
+B4 sync >/dev/null
+BGID=$(B4 --json ls --text "e2e-bg" | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(rows[0]["meta"]["id"] if rows else "")')
+[[ -n "$BGID" ]] || fail "A19 背景 drain 沒把 e2e-bg 推達 VW"
+REVEAL=$(B4 --json reveal "$BGID")
+[[ "$REVEAL" == *"bguser"* ]] || fail "A19 VW 端 reveal 帳號欄缺失：$REVEAL"
+BG2ID=$(B4 --json ls --text "e2e-bg2" | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(rows[0]["meta"]["id"] if rows else "")')
+[[ -n "$BG2ID" ]] || fail "A19 寫入即踢的背景輪沒把 e2e-bg2 推達 VW"
+kill $HUB_PID 2>/dev/null || true
+trap - EXIT
+shot 19-vault-converged
+pass "A19 背景同步：FGS 通知＋JobScheduler 週期＋寫入即踢 drain 收斂＋強制 tick"
+
+# --- 20. A20：autofill 冷啟形態（視窗外→誠實鎖態＋一鍵引導→真候選） ----------
+# 定案（findings 第五批）：封存金鑰綁使用者驗證（Class 3），背景 service 沒有
+# UI 可彈窗 → 視窗外一律誠實鎖態；30 秒視窗內冷啟則靜默解封直接回真候選。
+$ADB shell am force-stop $PKG
+sleep 31   # 30 秒驗證視窗保證過期（靜默路必須明確拒絕，A20 的確定性形態）
+$ADB shell settings put secure autofill_service "$AF_SVC"
+$ADB shell settings put secure current_autofill_service "$AF_SVC"
+sleep 2
+$ADB logcat -c
+$ADB shell am start -n "$PKG/.AutofillProbeActivity" >/dev/null 2>&1
+sleep 2
+dump /tmp/android-a20-pass.xml
+tap_edittext_of /tmp/android-a20-pass.xml 1
+wait_text "尚未解鎖" 15 || { $ADB logcat -d | grep bitward-island | tail -6; fail "A20 冷啟沒回誠實鎖態"; }
+APP_LOG=$($ADB logcat -d)
+[[ "$APP_LOG" == *'silent unseal denied'* ]] || fail "A20 沒走靜默解封拒絕路（沒試？）"
+[[ "$APP_LOG" == *'fill locked sealed=true'* ]] || fail "A20 鎖態列沒報 sealed=true（封存感知丟失）"
+shot 20-cold-locked
+# 一鍵引導：點「尚未解鎖」列 → app 起解鎖閘 → 生物辨識直接解鎖。
+$ADB logcat -c
+tap_text a20-row "Bitward：尚未解鎖"
+wait_text "生物辨識直接解鎖" 30 || { dump /tmp/android-a20-guide.xml; fail "A20 一鍵引導沒拉開解鎖閘（見 /tmp/android-a20-guide.xml）"; }
+biometric_unlock "鏡像 8 筆" 20-cold-guidance
+# 解鎖後同進程中樞現鑰：下一次 fill 請求就是真候選（A11 口徑、生物解鎖路徑）。
+$ADB shell am start -n "$PKG/.AutofillProbeActivity" >/dev/null 2>&1
+sleep 1
+hide_ime
+$ADB logcat -c
+dump /tmp/android-a20-refocus.xml
+tap_edittext_of /tmp/android-a20-refocus.xml 1
+wait_text "bitward-selftest" 15 || { $ADB logcat -d | grep bitward-island | tail -6; fail "A20 解鎖後沒出現真候選"; }
+[[ "$($ADB logcat -d)" == *'onFillRequest unlocked=true'* ]] \
+  || fail "A20 解鎖後的 fill 沒走 unlocked=true 分支"
+shot 20-cold-after-unlock
+pass "A20 冷啟：視窗外誠實鎖態（sealed 感知）→一鍵引導＋生物解鎖→真候選"
 
 echo
 echo "截圖：$(ls "$SHOTS" | tr '\n' ' ')"
