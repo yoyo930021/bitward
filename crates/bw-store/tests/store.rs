@@ -1260,7 +1260,10 @@ fn archived_tristate_projection_and_filter() {
     // 2026-11-11 缺陷：reindex 以預設＋垃圾桶兩條 query 圈定，已封存列漏網）
     let mut ids = store.all_ids().unwrap();
     ids.sort();
-    let mut want = [live.parse::<Uuid>().unwrap(), archived.parse::<Uuid>().unwrap()];
+    let mut want = [
+        live.parse::<Uuid>().unwrap(),
+        archived.parse::<Uuid>().unwrap(),
+    ];
     want.sort();
     assert_eq!(ids, want.to_vec(), "已封存列不得從全鏡像清單漏掉");
 }
