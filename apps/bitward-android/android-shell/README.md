@@ -53,15 +53,17 @@ cd apps/bitward-android && android-shell/build.sh
 
 | 檔 | 角色 |
 |---|---|
-| `app/src/main/AndroidManifest.xml` | 孤島三 service＋复刻 nsh 的 application/activity 節（application 加 `android:name=".BitwardApplication"`） |
-| `app/src/main/kotlin/io/bitward/android/BitwardApplication.kt` | 進程最早期把 `BITWARD_ANDROID_DATA` 指向 `noBackupFilesDir/bitward`（鏡像目錄缺陷修） |
-| `app/src/main/kotlin/io/bitward/android/BitwardAutofillService.kt` | 填充服務＋`HubBridge` 程序內介面（unlocked/candidates/reveal/save）＋`HubHolder.ensureBridge()` |
-| `app/src/main/kotlin/io/bitward/android/NativeHub.kt` | Rust 中樞的 JNI 面（`src/jni.rs` 五支符號：ready/unlocked/candidates/reveal/save）＋`HubBridge` 的 in-process 實作 |
+| `app/src/main/AndroidManifest.xml` | 孤島三 service＋雨個透明頁（生物辨識／通知權限）＋复刻 nsh 的 application/activity 節（application 加 `android:name=".BitwardApplication"`） |
+| `app/src/main/kotlin/io/bitward/android/BitwardApplication.kt` | 進程最早期把 `BITWARD_ANDROID_DATA` 指向 `noBackupFilesDir/bitward`（鏡像目錄缺陷修）＋綁定 `KeyStoreBridge`（loadLibrary 冪等） |
+| `app/src/main/kotlin/io/bitward/android/BitwardAutofillService.kt` | 填充服務＋`HubBridge` 程序內介面（unlocked/candidates/reveal/save）＋冷啟靜默解封掛點（fill/save 同口徑）＋`HubHolder.ensureBridge()` |
+| `app/src/main/kotlin/io/bitward/android/NativeHub.kt` | Rust 中樞的 JNI 面（`src/jni.rs` 九支符號：ready/unlocked/candidates/reveal/save＋bindBridge/hasSealed/trySilentUnseal/backgroundRun）＋`HubBridge` 的 in-process 實作 |
+| `app/src/main/kotlin/io/bitward/android/KeyStoreBridge.kt` | Rust 反調對象（`src/island.rs` 綁其單例）：封存/解封雙路（靜默＝30 秒視窗內、彈窗＝生物辨識後重構 Cipher）、blob=IV‖ct‖tag、金鑰作廢清理、`ensureHubService` |
+| `app/src/main/kotlin/io/bitward/android/BiometricPromptActivity.kt` | 平台 `android.hardware.biometrics.BiometricPrompt` 宿主（透明、零佈局、不綁 CryptoObject——見 findings 實錄二） |
 | `app/src/main/kotlin/io/bitward/android/AutofillProbeActivity.kt` | e2e A16 探針頁：hint 帳密欄＋`AutofillManager.commit()`（確定性觸發存檔流；零業務語意） |
 | `app/src/main/kotlin/io/bitward/android/BitwardCredentialProviderService.kt` | API 34 `android.service.credentials.CredentialProviderService` 轉接（骨架，bridge 已預留） |
-| `app/src/main/kotlin/io/bitward/android/BitwardKeyStore.kt` | Keystore Class 3（AES wrap 金鑰＋EC 探針，StrongBox 降級路） |
-| `app/src/main/kotlin/io/bitward/android/HubService.kt` | foreground service 保命（`startForeground` 尚未接，見下） |
-| `app/src/main/res/` | app_name、「尚未解鎖」列與真候選列版面（`autofill_locked.xml`／`autofill_dataset.xml`） |
+| `app/src/main/kotlin/io/bitward/android/BitwardKeyStore.kt` | Keystore 孤島原語：AES-256-GCM Class 3 包裹鑰（prepare 不吞驗證例外）、EC 探針、StrongBox 降級路 |
+| `app/src/main/kotlin/io/bitward/android/HubService.kt` | 背景同步載具：startForeground(dataSync)＋`JobService` 15 分鐘週期＋工作線程跑 `nshBackgroundRun`；含 `PermissionRequestActivity`（33+ 通知權限補要） |
+| `app/src/main/res/` | app_name、「尚未解鎖」列與真候選列版面、FGS 鎖形小圖示 |
 | `build.sh` | 上面整條組裝鏈 |
 
 本地 `android-35` stub jar 沒打包 `android.view.ViewHints`、
@@ -69,7 +71,7 @@ cd apps/bitward-android && android-shell/build.sh
 （缺件見實測編譯錯誤）：hint 字串寫成常數、候選列呈現改掛在 username 的
 `setValue(field, value, presentation)` 第三參上，語意不變。
 
-## 孤島↔in-process 中樞的銜接（2026-11-07 第二批：1–3 已落地）
+## 孤島↔in-process 中樞的銜接（第二批 1–3 落地；第五批 2–4 升級）
 
 孤島與 `libnsh.so` **同程序**（service 不宣告 `android:process`）。落地形態：
 
@@ -77,29 +79,37 @@ cd apps/bitward-android && android-shell/build.sh
    `HubHolder.ensureBridge()` 探 `NativeHub`——UI 已起（libnsh.so 在記憶體）
    或 service 冷啟（`System.loadLibrary("nsh")` 拉同一顆 .so，Rust 側 `HUB`
    的 LazyLock 直接開 Store）。不需要 AppActivity 主動回呼。
-2. 金鑰只走 Rust 側：本批 user key 從不過橋（Keystore 封存在下一批）；
-   過橋的只有 metadata 級候選與填充用明文欄位（Dataset 必需形态）。
+2. 金鑰主權在 Rust：user key 常駐只活在 Rust 的 `Hub.unlocked` 槽；第五批起
+   只在**封存/解封兩個瞬間**以 `Zeroizing<Vec<u8>>`（byte[]）過橋給
+   `KeyStoreBridge` 做 Keystore AES-GCM，不經 Kotlin String、出橋即歸零。
+   過橋的其餘內容只有 metadata 級候選與填充用明文欄位（Dataset 必需形态）。
 3. 純 service 拉起（沒有 UI）時開 Store 的前提＝資料目錄：由
    `BitwardApplication` 把 `BITWARD_ANDROID_DATA` 指到
    `noBackupFilesDir/bitward`（鏡像目錄缺陷修：cache 可被系統清、filesDir
    會進 Auto Backup 把明文索引欄帶出裝置，noBackup 兩者皆免）。
-   但本批**未解鎖的冷啟 service 仍回鎖定態**——金鑰只活在已登入的 UI
-   進程記憶體，這是 Keystore 批之前刻意保留的邊界。
-4. 背景同步/UnifiedPush 走 `HubService.startForeground`（尚未接，含通知權限）。
+   冷啟 service 的解鎖形態（第五批定案）：30 秒驗證視窗內**靜默解封**
+   （`nshTrySilentUnseal`）自動回真候選；視窗外**誠實鎖態＋一鍵解鎖引導**
+   ——背景 service 無 UI 可彈生物辨識窗，不硬吹隨時可解（取捨見 findings 第五批）。
+4. 背景同步走 `HubService.startForeground`（dataSync，第五批已接）＋
+   JobScheduler 15 分鐘週期＋寫入即踢（create/patch/delete 等位 daemon
+   `trigger_drain`）；退避純函數在 Rust `hub::drain_backoff`。33+ 通知權限由
+   透明 `PermissionRequestActivity` 補要。UnifiedPush 喚醒仍未接（週期節拍等位）。
 5. save 真寫入（2026-11-10 第四批）：未儲存組合的 fill 回應掛 `SaveInfo`
    （USERNAME|PASSWORD，帳號欄現值對上候選＝已儲存不掛）；onSaveRequest 從
    fillContexts 結構取帳密與查詢鍵（webDomain 優先、原生退 package）過
    `nshSave` → `Hub::save_from_autofill`（同帳號改密＝patch 密碼欄；查無＝
    create；同組合＝unchanged 零寫入）。鎖態 save 回失敗不假裝存（驗收 A16）。
 
-解鎖引導：鎖定態面板列「Bitward：尚未解鎖」，點它拉開 app 走登入；
-解鎖後的下一次 fill 請求就是真候選列（驗收 A11 走的就是這條路）。
+解鎖引導：鎖定態面板列「Bitward：尚未解鎖」，點它拉開 app——有封存時解鎖閘
+直接給「生物辨識直接解鎖」（第五批），沒封存才回主密碼表單；解鎖後的
+下一次 fill 請求就是真候選列（驗收 A11/A20 走的就是這條路）。
 
 ## 接上去的紀律（別在 Kotlin 端破）
 
-1. **金鑰不進 Kotlin**：user key 留在 Rust 的 `UnlockMachine`／`Hub.unlocked`
-   （契約 §2.7 規則 1 的 `byte[]` 限制指的是金鑰；填充用的 username/password
-   明文是 Dataset 的必需形態，只活在單次 fill 回應的生命週期，不快取）。
+1. **金鑰主權在 Rust**：user key 常駐在 `Hub.unlocked`（契約 §2.7 規則 1 的
+   byte[] 紀律指的是金鑰：過橋只以 `byte[]`、不經 String、出橋歸零——封存
+   瞬間例外見 `KeyStoreBridge`）；填充用的 username/password 明文是 Dataset
+   的必需形態，只活在單次 fill 回應的生命週期，不快取。
 2. **孤島不做比對**：`candidatesFor` 只拿 metadata 級候選；分級、去重、
    衝突語意全在 Rust（`bw-vault`/`bw-store`）。
 3. **中樞不在就快速失敗**：`HubHolder.bridge == null` 時回空回應／錯誤，

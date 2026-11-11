@@ -72,17 +72,29 @@ class BitwardKeyStore(private val keyAlias: String = "bitward-user-key-wrap") {
         kg.generateKey()
     }
 
-    /** 包裹用的加密 Cipher：Keystore 自帶隨機 12-byte IV（[Cipher.getIV] 取回）。 */
-    fun sealCipher(): Cipher =
-        Cipher.getInstance("AES/GCM/NoPadding").apply {
-            init(Cipher.ENCRYPT_MODE, obtainWrappingKey())
-        }
+    /**
+     * 構造＋init 但**不吞驗證例外**：Class 3 金鑰在 30 秒視窗外 `init` 直接丟
+     * [UserNotAuthenticatedException]（實錄 13:12：解密側連 init 都擋）。回
+     * (cipher, 構造期例外)；null 例外＝視窗內、可直接 doFinal。例外為驗證族時
+     * 的正確用法見 `KeyStoreBridge`（先過彈窗開視窗、再重構 Cipher 運算——
+     * 平台 BiometricPrompt 不收 init 失敗的 CryptoObject，實錄 13:15）。IV 由
+     * Keystore 在加密側自帶隨機 12 bytes（[Cipher.getIV] 取回）；解密側從 blob 頭還原。
+     */
+    fun prepareSealCipher(): Pair<Cipher, Exception?> = prepare(Cipher.ENCRYPT_MODE, null)
 
-    /** 解封用的解密 Cipher：IV 從 blob 頭 12 bytes 還原（tag 128-bit 附在密文尾）。 */
-    fun unsealCipher(iv: ByteArray): Cipher =
-        Cipher.getInstance("AES/GCM/NoPadding").apply {
-            init(Cipher.DECRYPT_MODE, obtainWrappingKey(), GCMParameterSpec(128, iv))
+    fun prepareUnsealCipher(iv: ByteArray): Pair<Cipher, Exception?> =
+        prepare(Cipher.DECRYPT_MODE, GCMParameterSpec(128, iv))
+
+    private fun prepare(mode: Int, spec: GCMParameterSpec?): Pair<Cipher, Exception?> {
+        val c = Cipher.getInstance("AES/GCM/NoPadding")
+        val err = try {
+            if (spec == null) c.init(mode, obtainWrappingKey()) else c.init(mode, obtainWrappingKey(), spec)
+            null
+        } catch (e: Exception) {
+            e
         }
+        return c to err
+    }
 
     /** 金鑰被生物辨識重註冊作廢（KeyPermanentlyInvalidated）時清_alias_，下次重生成。 */
     fun dropWrappingKey() {
