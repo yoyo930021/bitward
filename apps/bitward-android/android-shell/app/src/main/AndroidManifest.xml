@@ -8,6 +8,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
 
     <application
         android:name=".BitwardApplication"
@@ -44,6 +46,22 @@
             android:launchMode="singleTop"
             android:windowSoftInputMode="adjustResize" />
 
+        <!-- 生物辨識彈窗宿主（第五批：Keystore 解封/封存的驗證斷言面）：
+             透明、無歷史、不進最近任務。 -->
+        <activity
+            android:name=".BiometricPromptActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!-- 33+ 通知權限補要（HubService 首起時拉，問完即收）。 -->
+        <activity
+            android:name=".PermissionRequestActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <!-- 填充服務：契約 §1「Android app＝Full（in-process 中樞）」；
              中樞與本服務同程序（不宣告 android:process），走程序內介面，不經 BTP。 -->
         <service
@@ -70,10 +88,12 @@
             </intent-filter>
         </service>
 
-        <!-- in-process 中樞的保命服務（契約 §1：foreground service） -->
+        <!-- in-process 中樞的保命服務（契約 §1：foreground service）＋背景同步
+             載具（第五批：JobService 形態，JobScheduler 15 分鐘週期）。 -->
         <service
             android:name=".HubService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="dataSync"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
     </application>
 </manifest>

@@ -2,6 +2,7 @@ package io.bitward.android
 
 import android.app.Application
 import android.system.Os
+import android.util.Log
 import java.io.File
 
 /**
@@ -22,6 +23,15 @@ import java.io.File
 class BitwardApplication : Application() {
     override fun onCreate() {
         super.onCreate()
-        Os.setenv("BITWARD_ANDROID_DATA", File(getNoBackupFilesDir(), "bitward").absolutePath, true)
+        val dir = File(getNoBackupFilesDir(), "bitward")
+        Os.setenv("BITWARD_ANDROID_DATA", dir.absolutePath, true)
+        // 孤島橋的進程最早期裝配：Rust→Kotlin 的反向呼叫（封存/解封/保命）
+        // 需要綁定對象與目錄；loadLibrary 冪等（nsh runtime 之後載同一顆）。
+        KeyStoreBridge.appContext = this
+        KeyStoreBridge.sealedFile = File(dir, "sealed.json")
+        runCatching {
+            System.loadLibrary("nsh")
+            NativeHub.nshBindBridge(KeyStoreBridge)
+        }.onFailure { Log.i(ISLAND_TAG, "island bridge early bind skipped: ${it.message}") }
     }
 }

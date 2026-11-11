@@ -86,10 +86,17 @@ class BitwardAutofillService : AutofillService() {
         callback: FillCallback,
     ) {
         val bridge = HubHolder.ensureBridge()
-        val unlocked = bridge?.unlocked() == true
+        var unlocked = bridge?.unlocked() == true
+        // 冷啟靜默解封（路線 3 契約「能靜默就自動解鎖回真候選」）：只在
+        // 30 秒使用者驗證視窗內成功、絕不彈窗；窗外保持誠實鎖態走一鍵引導
+        // （取捨實錄見 findings 第五批，別硬吹）。
+        if (!unlocked && bridge != null && NativeHub.nshHasSealed()) {
+            unlocked = NativeHub.nshTrySilentUnseal()
+        }
         Log.i(ISLAND_TAG, "onFillRequest unlocked=$unlocked")
         if (bridge == null || !unlocked) {
             // 中樞不在（未登入或程序被回收）：回「尚未解鎖」列，不自行降格持鑰（契約 §1.2）。
+            Log.i(ISLAND_TAG, "fill locked sealed=${NativeHub.nshHasSealed()}")
             callback.onSuccess(lockedResponse(request))
             return
         }
@@ -213,9 +220,13 @@ class BitwardAutofillService : AutofillService() {
             return
         }
         if (!bridge.unlocked()) {
-            // 鎖態不寫（金鑰不在記憶體，寫了也是解不開的密文）。
-            callback.onFailure("Bitward 尚未解鎖")
-            return
+            // 先試冷啟靜默解封（同 onFillRequest 口徑）；窗外才是真鎖態——
+            // 金鑰不在記憶體，寫了也是解不開的密文，不假裝存。
+            val revived = NativeHub.nshHasSealed() && NativeHub.nshTrySilentUnseal()
+            if (!revived) {
+                callback.onFailure("Bitward 尚未解鎖")
+                return
+            }
         }
         val ctx = request.fillContexts.lastOrNull()
             ?: run {

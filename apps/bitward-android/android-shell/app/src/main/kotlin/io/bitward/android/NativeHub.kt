@@ -30,6 +30,8 @@ object NativeHub {
             runCatching { System.loadLibrary("nsh") }
                 .onFailure { Log.w(ISLAND_TAG, "load libnsh.so failed: ${it.javaClass.simpleName}: ${it.message}") }
             available = runCatching { nshIsReady() }.getOrDefault(false)
+            // 封存橋的補綁（正常路徑在 BitwardApplication 已綁；冪等保底）。
+            if (available) runCatching { nshBindBridge(KeyStoreBridge) }
             probed = true
             Log.i(ISLAND_TAG, "native hub available=$available")
         }
@@ -39,8 +41,24 @@ object NativeHub {
     @JvmStatic
     private external fun nshIsReady(): Boolean
 
+    /** 反向呼叫對象綁定（`src/island.rs` 持 GlobalRef；冪等，首次為準）。 */
+    @JvmStatic
+    external fun nshBindBridge(bridge: Any): Boolean
+
     @JvmStatic
     external fun nshIsUnlocked(): Boolean
+
+    /** 有無可用封存（登入頁生物辨識閘、孤島冷啟形態判定）。 */
+    @JvmStatic
+    external fun nshHasSealed(): Boolean
+
+    /** 冷啟靜默解封（30 秒驗證視窗內成功；絕不彈窗）。成功＝中樞已解鎖。 */
+    @JvmStatic
+    external fun nshTrySilentUnseal(): Boolean
+
+    /** 背景輪：drain 退避收斂＋15 分鐘到拍 pull（時序純函數在 Rust）。 */
+    @JvmStatic
+    external fun nshBackgroundRun(): String?
 
     /** 回 `[id, label, ...]` 扁平陣列；null＝橋內錯（視同空）。 */
     @JvmStatic
