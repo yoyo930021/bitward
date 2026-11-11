@@ -49,6 +49,7 @@ class HubService : JobService() {
         const val SYNC_PERIOD_MS = 15L * 60_000L
         private const val NOTIF_ID = 41
         private const val CHANNEL_ID = "bitward-hub"
+        private const val STOP_GRACE_MS = 20_000L
 
         /** 15 分鐘週期同步（冪等：同 id 重排即覆寫）。 */
         fun scheduleJob(ctx: Context) {
@@ -69,6 +70,17 @@ class HubService : JobService() {
     }
     private val busy = AtomicBoolean(false)
     private var jobParams: JobParameters? = null
+
+    /** 收工寬限：本地 vault 的輪次只有毫秒級，即起即停讓外部觀察者（與後續
+     *  寫入）全踩空；留 20 秒吸收連發 mutation（免 FGS 重啟抖動）再退前景。 */
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val stopRunnable = Runnable {
+        runCatching {
+            if (Build.VERSION.SDK_INT >= 24) stopForeground(STOP_FOREGROUND_REMOVE)
+            else @Suppress("DEPRECATION") stopForeground(true)
+        }
+        stopSelf()
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.i(ISLAND_TAG, "hub service startCommand action=${intent?.action}")
@@ -92,6 +104,7 @@ class HubService : JobService() {
 
     private fun kick(params: JobParameters?) {
         if (params != null) jobParams = params
+        handler.removeCallbacks(stopRunnable) // 寬限期內新活：收回停機排程
         if (!busy.compareAndSet(false, true)) return
         worker.execute {
             var status: String? = null
@@ -110,11 +123,7 @@ class HubService : JobService() {
     }
 
     private fun wrapUp() {
-        runCatching {
-            if (Build.VERSION.SDK_INT >= 24) stopForeground(STOP_FOREGROUND_REMOVE)
-            else @Suppress("DEPRECATION") stopForeground(true)
-        }
-        stopSelf()
+        handler.postDelayed(stopRunnable, STOP_GRACE_MS)
     }
 
     private fun goForeground() {
