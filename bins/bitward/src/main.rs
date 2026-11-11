@@ -93,6 +93,25 @@ enum Cmd {
     Totp {
         id: String,
     },
+    /// 產生密碼：隨機數與政策解讀走 daemon `Use:GeneratePassword`（與 macOS
+    /// GUI 同源）。CLI 是 thin client（契約 §3.10），不在本地起第二套產生器；
+    /// 產生器不碰金鑰，鎖定態的 daemon 也能用。輸出僅一行密碼（A11 慣例，
+    /// 產生值非機密但照純值口徑走 stdout）。
+    Generate {
+        #[arg(long, default_value_t = 20)]
+        length: usize,
+        #[arg(long)]
+        no_lowercase: bool,
+        #[arg(long)]
+        no_uppercase: bool,
+        #[arg(long)]
+        no_numbers: bool,
+        #[arg(long)]
+        no_special: bool,
+        /// 排除易混淆字元 `I O l 0 1`（官方 avoidAmbiguous）
+        #[arg(long)]
+        avoid_ambiguous: bool,
+    },
     /// AutoType：daemon 解密後倒數 3 秒注入按鍵（明文不回程）
     Autotype {
         id: String,
@@ -1181,6 +1200,25 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             view: View::Reveal,
         }),
         Cmd::Totp { id } => Call::Use(UseCall::TotpCode { id: parse_id(id)? }),
+        // policy 欄名與 daemon 讀取端一致（length/lowercase/uppercase/numbers/
+        // special/avoidAmbiguous）；值域把關在引擎（5–128），CLI 不重複驗。
+        Cmd::Generate {
+            length,
+            no_lowercase,
+            no_uppercase,
+            no_numbers,
+            no_special,
+            avoid_ambiguous,
+        } => Call::Use(UseCall::GeneratePassword {
+            policy: serde_json::json!({
+                "length": *length as u64,
+                "lowercase": !no_lowercase,
+                "uppercase": !no_uppercase,
+                "numbers": !no_numbers,
+                "special": !no_special,
+                "avoidAmbiguous": *avoid_ambiguous,
+            }),
+        }),
         Cmd::Autotype { id, template } => Call::Fill(FillCall::AutoType {
             id: parse_id(id)?,
             template: template.clone(),

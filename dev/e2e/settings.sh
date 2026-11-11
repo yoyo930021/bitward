@@ -4,7 +4,7 @@
 # 往返＋值域拒收→自動鎖定實測（1 分鐘：解鎖帶 deadline→閒置轉 AuthLocked→
 # 解鎖可回）→重啟語意（lock_on_sleep_restart=false 啟動自動解鎖＋設定存活）→
 # passkey 刪除收斂（建→REST 看 fido2Credentials→刪→REST 清）→
-# match 寫入 REST 直讀（1→null 回落）。
+# match 寫入 REST 直讀（1→null 回落）→generate 預設 20 字元四类全開＋--no-* 關閉。
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -147,5 +147,17 @@ for _ in $(seq 1 20); do
 done
 [[ "$(jq '.login.uris[0].match' <<<"$CW")" == "null" ]] || fail "REST 端 match 未回落 null"
 pass "URI match：寫入/投影/回落全鏈 REST 直讀收斂"
+
+# 7) generate：隨機數在 daemon（Use:GeneratePassword 與 macOS GUI 同源）。
+#    預設 20 字元、四类全開——引擎保證每個啟用字集至少一個，斷言照此驗。
+GEN=$(A generate)
+[[ ${#GEN} -eq 20 ]] || fail "generate 預設長度非 20：$GEN"
+for cls in '[a-z]' '[A-Z]' '[0-9]' '[!@#$%^&*]'; do
+  grep -qE "$cls" <<<"$GEN" || fail "generate 預設缺字類 $cls：$GEN"
+done
+GEN2=$(A generate --length 8 --no-uppercase --no-numbers --no-special)
+[[ ${#GEN2} -eq 8 ]] || fail "generate --length 8 未生效：$GEN2"
+grep -qE '^[a-z]+$' <<<"$GEN2" || fail "generate --no-* 未關字類：$GEN2"
+pass "generate：預設 20 字元含四类、--length/--no-* 生效（daemon 引擎）"
 
 echo "settings.sh ALL GREEN"
