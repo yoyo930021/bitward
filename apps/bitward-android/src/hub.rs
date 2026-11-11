@@ -1364,7 +1364,11 @@ fn encrypt_login_draft(uk: &bw_crypto::UserKey, d: &CipherDraft, id: ItemId) -> 
             .collect();
         login.insert("uris".into(), json!(uris));
     }
-    if !login.is_empty() {
+    // Login 型別恒發 `login` 物件（VW 1.37.2 實錄 14:28：只填名稱的 Login
+    // 省略 login 欄 → POST /ciphers 400「Data missing」→ 列結算 dead）。
+    // jslib 形態＝空 login 帶齐 uris/password 等 null 欄，服務器全收；
+    // 其他型別（SecureNote 等）維持「有欄才帶 login」。
+    if matches!(d.kind, bw_proto::ItemKind::Login) || !login.is_empty() {
         c["login"] = Value::Object(login);
     }
     c
@@ -1722,6 +1726,28 @@ mod tests {
         let hub = Hub::open(dir.clone()).expect("hub opens");
         assert_eq!(hub.create(&draft("x")).err(), Some("尚未解鎖".to_owned()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn login_kind_always_carries_login_object() {
+        // VW 1.37.2 實錄（14:28 e2e A19）：只填名稱的 Login 省略 login 欄，
+        // POST /ciphers 回 400「Data missing」→ outbox 列結算 dead。
+        let uk = bw_crypto::UserKey::from_bytes(vec![3u8; 64]).unwrap();
+        let bare = CipherDraft {
+            username: None,
+            password: None,
+            totp: None,
+            uris: vec![],
+            ..draft("name-only")
+        };
+        let c = encrypt_login_draft(&uk, &bare, ItemId::new_v4());
+        assert!(c.get("login").is_some_and(Value::is_object), "Login 恒帶 login 物件");
+        let note = CipherDraft {
+            kind: bw_proto::ItemKind::SecureNote,
+            ..bare
+        };
+        let cn = encrypt_login_draft(&uk, &note, ItemId::new_v4());
+        assert!(cn.get("login").is_none(), "SecureNote 不帶 login");
     }
 
     #[test]
