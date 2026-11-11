@@ -99,7 +99,14 @@ D sync >/dev/null
   || fail "官方代理封存的項目混進了主列表"
 [[ "$(D ls --archived --json | jq --arg e "$EID" '[.[] | select(.meta.id==$e)] | length')" == "1" ]] \
   || fail "Query(archived=true) 未見官方代理封存項"
-pass "官方代理 archived 形態經 /sync 落庫並被三態過濾正確歸類"
+# 缺陷回歸（2026-11-11 使用者實錄「已封存的項目名都像亂碼」）：經 /sync 落盤的
+# 已封存列，名字必須是回填後的明文（或鎖定態 null），不得停在信封形態。
+ENVELOPE=$(D ls --archived --json | jq -r '[.[] | .meta.name // empty
+  | select(test("^[0-9]+\\.[^|]*\\|[^|]*\\|"))] | length')
+[[ "$ENVELOPE" == "0" ]] || fail "已封存視角吐出信封形態名稱（$ENVELOPE 筆）：reindex 覆蓋缺口"
+[[ "$(D ls --archived --json | jq -r --arg e "$EID" '.[] | select(.meta.id==$e) | .meta.name')" == "ext-arch" ]] \
+  || fail "已封存視角名稱未回填明文（官方代理封存項應為 ext-arch）"
+pass "官方代理 archived 形態經 /sync 落庫並被三態過濾正確歸類（名稱已解密回填）"
 
 # —— 3) 圖示代理：首呼打 VW（日誌計數 +1）、再呼命中快取（零重連）、PNG magic ——
 IC1=$(docker logs "$VW" 2>&1 | grep -c "icon_internal" || true)

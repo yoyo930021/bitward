@@ -4,7 +4,7 @@ use bw_proto::{ItemKind, ItemMeta, Query, SortKey};
 use rusqlite::{Connection, Row};
 use uuid::Uuid;
 
-use crate::{Store, StoreResult};
+use crate::{Store, StoreError, StoreResult};
 
 impl Store {
     pub fn query(&self, q: &Query) -> StoreResult<Vec<ItemMeta>> {
@@ -124,6 +124,20 @@ impl Store {
             });
         }
         Ok(out)
+    }
+
+    /// 鏡像全 id（不分 deleted／archived 三態）：給「每列都要處理一次」的
+    /// 回填／稽核路徑用。列表三態過濾是讀路徑語意，拿它圈定回填範圍會漏列
+    /// （2026-11-11 實錄：預設＋垃圾桶兩條查詢圈定的 reindex 永遠跳過已封存列）。
+    pub fn all_ids(&self) -> StoreResult<Vec<bw_proto::ItemId>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT id FROM meta_plain ORDER BY rowid")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.map(|r| {
+            let s = r?;
+            Uuid::parse_str(&s).map_err(|e| StoreError::Invalid(format!("meta_plain id {s}: {e}")))
+        })
+        .collect()
     }
 
     /// 單筆取回（含 tombstone 判定交給呼叫端的 `CipherRow.deleted`）。

@@ -1256,4 +1256,38 @@ fn archived_tristate_projection_and_filter() {
         })
         .unwrap();
     assert!(mixed.is_empty());
+    // 回填範圍單源：`all_ids` 不分三態全覆蓋（列表 query 組合枚舉會漏列，
+    // 2026-11-11 缺陷：reindex 以預設＋垃圾桶兩條 query 圈定，已封存列漏網）
+    let mut ids = store.all_ids().unwrap();
+    ids.sort();
+    let mut want = [live.parse::<Uuid>().unwrap(), archived.parse::<Uuid>().unwrap()];
+    want.sort();
+    assert_eq!(ids, want.to_vec(), "已封存列不得從全鏡像清單漏掉");
+}
+
+#[test]
+fn all_ids_covers_every_state() {
+    let (_d, path) = tmp_vault("allids");
+    let store = Store::open(&path).unwrap();
+    let live = Uuid::new_v4();
+    let arch = Uuid::new_v4();
+    let trash = Uuid::new_v4();
+    let both = Uuid::new_v4();
+    let mut c_arch = cipher(&arch.to_string(), "a", "2026-11-01T00:00:00.000Z", false);
+    c_arch["archivedDate"] = json!("2026-11-10T00:00:00.000Z");
+    let mut c_both = cipher(&both.to_string(), "b", "2026-11-01T00:00:00.000Z", true);
+    c_both["archivedDate"] = json!("2026-11-10T00:00:00.000Z");
+    store
+        .apply_sync(&json!({ "ciphers": [
+            cipher(&live.to_string(), "l", "2026-11-01T00:00:00.000Z", false),
+            c_arch,
+            cipher(&trash.to_string(), "t", "2026-11-01T00:00:00.000Z", true),
+            c_both,
+        ] }))
+        .unwrap();
+    let mut ids = store.all_ids().unwrap();
+    ids.sort();
+    let mut want = [live, arch, trash, both];
+    want.sort();
+    assert_eq!(ids, want.to_vec());
 }

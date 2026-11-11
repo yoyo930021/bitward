@@ -17,7 +17,7 @@ use bw_keys::{
 };
 use bw_proto::{
     AccountInfo, AdminCall, AgentCall, AuditChainInfo, AuthCall, Call, FillCall, ItemId, ItemView,
-    OutboxCounts, PROTO_VERSION, PasskeyCall, PushCall, Query, Response, StatusInfo, SyncCall,
+    OutboxCounts, PROTO_VERSION, PasskeyCall, PushCall, Response, StatusInfo, SyncCall,
     TwoFactorInput, TwoFactorProviderInfo, UseCall, VaultCall, View, WtpError,
 };
 use bw_server::{Client, PasswordLogin, ServerError, TwoFactorProviderType};
@@ -1119,29 +1119,12 @@ impl Hub {
         }
     }
 
-    /// 明文索引回填（全鏡像，含垃圾桶——官方回收桶列表要顯示解密名稱）。
+    /// 明文索引回填（全鏡像列：主列表／垃圾桶／已封存都要覆蓋——回填的範圍是
+    /// 「庫裡有這筆」，不是某條列表查詢的三態組合；2026-11-11 使用者實錄缺陷
+    /// 「已封存的項目名都像亂碼」＝此處以預設＋垃圾桶兩條 query 枚舉，
+    /// 已封存列永遠漏網、名字停在 apply_sync 落盤的信封形態）。
     pub(crate) fn reindex_all(&self) -> Result<(), WtpError> {
-        let mut ids: Vec<ItemId> = self
-            .store
-            .query(&Query {
-                limit: u32::MAX,
-                ..Default::default()
-            })
-            .map_err(denied)?
-            .into_iter()
-            .map(|m| m.id)
-            .collect();
-        ids.extend(
-            self.store
-                .query(&Query {
-                    limit: u32::MAX,
-                    deleted: Some(true),
-                    ..Default::default()
-                })
-                .map_err(denied)?
-                .into_iter()
-                .map(|m| m.id),
-        );
+        let ids = self.store.all_ids().map_err(denied)?;
         self.reindex_many(&ids)
     }
 
@@ -1912,5 +1895,62 @@ mod tests {
         let v = hub.project_one(id, View::Reveal).unwrap().unwrap();
         assert_eq!(v.password.as_deref(), Some("s3cret-ik"));
         assert_eq!(v.username.as_deref(), Some("octo"));
+    }
+
+    /// 缺陷回歸（2026-11-11 使用者實錄「已封存的項目名都像亂碼」）：`reindex_all`
+    /// 的覆蓋範圍＝全部鏡像列。已封存／軟刪列經 `/sync` 落盤時名字是伺服器原樣
+    /// 信封，回填漏網就永遠停在信封形態（列表與詳情一起現形）。
+    #[tokio::test]
+    async fn reindex_all_backfills_archived_and_trashed_names() {
+        let (hub, _d) = crate::passkey::tests::unlocked_hub("reindex-scope").await;
+        let user = hub
+            .machine
+            .with_keys(|kb| kb.user_key().as_bytes().to_vec())
+            .unwrap();
+        let enc = |pt: &str| bw_crypto::encrypt_bytes_key(&user, pt.as_bytes()).unwrap();
+        let rows = [
+            (Uuid::new_v4(), "Live", json!({})),
+            (
+                Uuid::new_v4(),
+                "Archived",
+                json!({"archivedDate": "2026-11-11T00:00:00.000000Z"}),
+            ),
+            (
+                Uuid::new_v4(),
+                "Trashed",
+                json!({"deletedDate": "2026-11-11T00:00:00.000000Z"}),
+            ),
+            (
+                Uuid::new_v4(),
+                "ArchivedTrashed",
+                json!({
+                    "archivedDate": "2026-11-11T00:00:00.000000Z",
+                    "deletedDate": "2026-11-11T00:00:00.000000Z",
+                }),
+            ),
+        ];
+        for (id, name, extra) in &rows {
+            let mut cipher = json!({"id": id.to_string(), "type": 1, "name": enc(name)});
+            for (k, v) in extra.as_object().unwrap() {
+                cipher.as_object_mut().unwrap().insert(k.clone(), v.clone());
+            }
+            hub.store.put_mirror(*id, &cipher).unwrap();
+        }
+        hub.reindex_all().unwrap();
+        for (id, name, _) in &rows {
+            let meta = hub.store.meta(*id).unwrap().unwrap();
+            assert_eq!(meta.name.as_deref(), Some(*name), "{name} 應回填明文名");
+        }
+        // 投影端同一口徑：Metadata 視窗（列表）不得再吐信封字串。
+        let listed = hub
+            .store
+            .query(&bw_proto::Query {
+                archived: Some(true),
+                deleted: Some(true),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(listed.len(), 1, "封存＋軟刪列只在該態組合查詢現形");
+        assert_eq!(listed[0].name.as_deref(), Some("ArchivedTrashed"));
     }
 }
