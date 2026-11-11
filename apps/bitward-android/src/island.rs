@@ -67,7 +67,11 @@ mod android {
                 env.convert_byte_array(&arr).map_err(|e| format!("讀取回包失敗：{e}"))
             }
             Ok(_) => Err(format!("孤島 {method} 回非位元組陣列")),
-            Err(e) => Err(format!("孤島呼叫 {method} 失敗：{e}")),
+            Err(e) => {
+                // Java 例外留在執行緒上會污染後續 JNI 呼叫：收口必清。
+                let _ = env.exception_clear();
+                Err(format!("孤島呼叫 {method} 失敗：{e}"))
+            }
         }
     }
 
@@ -142,10 +146,3 @@ pub(crate) use android::{RUNTIME, bind, ensure_hub_service, seal, unseal};
 
 #[cfg(not(target_os = "android"))]
 pub(crate) use desktop::{ensure_hub_service, seal, unseal};
-
-// 桌機沒有反向 JNI，bind 符號保留給 jni.rs 的 cfg 面（不在桌機編譯）。
-#[cfg(not(target_os = "android"))]
-#[allow(dead_code)]
-pub(crate) fn bind(_env: &(), _bridge: &()) -> bool {
-    false
-}
