@@ -689,6 +689,29 @@ impl Hub {
                 .map_err(|e| format!("服務器網址無效：{e}"))?,
         );
         client.set_refresh_token(acc.refresh_token.as_deref()).await;
+        // 續期輪換下來的 refresh token 要落地，否則下次冷啟握的是死憑證
+        // （daemon 同法：sink 直寫 account.json；Account 結構不認 access_token
+        // 欄，多寫的鍵在讀取端自然忽略）。
+        let weak = Arc::downgrade(self);
+        client.set_token_sink(Arc::new(move |access, refresh| {
+            let Some(h) = weak.upgrade() else { return };
+            let path = h.dir.join("account.json");
+            if let Ok(bytes) = std::fs::read(&path)
+                && let Ok(mut v) = serde_json::from_slice::<Value>(&bytes)
+            {
+                v["access_token"] = json!(access);
+                if let Some(r) = refresh {
+                    v["refresh_token"] = json!(r);
+                }
+                let _ = std::fs::write(path, v.to_string());
+            }
+        }));
+        // 冷啟沒有 access token（帳號檔不存它），而 401 收口只對「過期的舊
+        // token」觸發續期（`send`：`sent_with.is_some()` 閘，實錄 13:33
+        // "not authenticated"）→ 裝鑰前先主動跑一發 refresh grant。
+        if let Err(e) = client.refresh().await {
+            log::warn!("unseal refresh 未成（背景輪再試）：{e}");
+        }
         {
             let mut g = self.unlocked.lock().expect("hub mutex poisoned");
             *g = Some(Unlocked { client: client.clone(), user_key });
@@ -795,6 +818,9 @@ impl Hub {
             .map_err(|e| e.to_string())?;
         self.reindex_ids([id])?;
         log::info!("hub: create {id}（待推送）");
+        // 寫入即踢背景輪（daemon `trigger_drain` 等位）：HubService 起來 drain
+        // 收斂「待推送」，無須手動「重新同步」（路線 3 背景同步）。
+        crate::island::ensure_hub_service();
         Ok(id)
     }
 
@@ -902,6 +928,7 @@ impl Hub {
             .map_err(|e| e.to_string())?;
         self.reindex_ids([id])?;
         log::info!("hub: patch {id}（待推送）");
+        crate::island::ensure_hub_service();
         Ok(())
     }
 
@@ -993,6 +1020,7 @@ impl Hub {
             })
             .map_err(|e| e.to_string())?;
         log::info!("hub: delete {id}（軟刪，待推送）");
+        crate::island::ensure_hub_service();
         Ok(())
     }
 
