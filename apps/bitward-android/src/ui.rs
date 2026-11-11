@@ -268,13 +268,19 @@ pub fn vault_page(
     // 資料夾三態（口徑同 `Query.folder`）：None 全部、Some("") 未歸屬、
     // Some(id) 該夾。chip 列即側欄的手機替身。
     let folder: Signal<Option<String>> = signal(None);
+    // 背景輪（HubService drain/sync，第五批）結算 outbox 時不經 UI 訊號：
+    // 列表以 5 秒心跳重讀鏡像（TOTP 倒數同源的 set_interval 形態），
+    // 「待推送」膠囊不會滯留成過態。寫入／同步路徑照樣由 rev/phase 即時扳。
+    let bg_tick = signal(0_u64);
+    set_interval(Duration::from_secs(5), move || bg_tick.set(bg_tick.get() + 1));
     let filtered = computed({
         let hub = hub.clone();
         let (q, f) = (query, folder);
         move || {
-            // 同步/鎖定/寫入改動訊號時才重算：訊號驅動，不另設輪詢。
+            // 同步/鎖定/寫入改動訊號時重算；bg_tick 兜住純背景收斂。
             let _ = phase.get();
             let _ = rev.get();
+            let _ = bg_tick.get();
             Arc::new(hub.list_in(&q.get(), f.get().as_deref()))
         }
     });
