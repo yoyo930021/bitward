@@ -595,8 +595,9 @@ $ADB shell input keyevent 123 </dev/null >/dev/null 2>&1
 for _ in $(seq 1 30); do $ADB shell input keyevent 67 </dev/null >/dev/null 2>&1; done
 type_text "e2epass2"
 hide_ime
+$ADB logcat -c
 tap_text a13-save "儲存"
-wait_text "待推送" 15 || fail "A13 編輯後列表沒回到「待推送」態"
+assert_pending a13-pending e2e-added || fail "A13 編輯後沒回到「待推送」態（也無背景收斂軌跡）"
 tap_text a13-sync "重新同步"
 wait_text "重新同步" 60 || fail "A13 同步沒完成（一直卡在 Busy）"
 dump /tmp/android-a13-synced.xml
@@ -950,10 +951,16 @@ wait_text "生物辨識直接解鎖" 30 || { dump /tmp/android-a20-guide.xml; fa
 biometric_unlock "鏡像 8 筆" 20-cold-guidance
 # 解鎖後同進程中樞現鑰：下一次 fill 請求就是真候選（A11 口徑、生物解鎖路徑）。
 $ADB shell am start -n "$PKG/.AutofillProbeActivity" >/dev/null 2>&1
-sleep 1
+sleep 2
 hide_ime
 $ADB logcat -c
-dump /tmp/android-a20-refocus.xml
+# 探針頁回到前景有轉場窗（實錄：單發 dump 會抓到 vault/過渡幀而無 EditText）：
+# 輪詢等層級裡有欄位再定位。
+for _ in $(seq 1 10); do
+  dump /tmp/android-a20-refocus.xml
+  grep -q 'android.widget.EditText' /tmp/android-a20-refocus.xml && break
+  sleep 1
+done
 tap_edittext_of /tmp/android-a20-refocus.xml 1
 wait_text "bitward-selftest" 15 || { $ADB logcat -d | grep bitward-island | tail -6; fail "A20 解鎖後沒出現真候選"; }
 [[ "$($ADB logcat -d)" == *'onFillRequest unlocked=true'* ]] \
