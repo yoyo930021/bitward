@@ -10,6 +10,7 @@
 //! 證據見 `docs/design/android-findings.md` 與 `spike/android/navprobe/`。
 
 pub mod hub;
+pub(crate) mod island;
 #[cfg(target_os = "android")]
 mod jni;
 pub mod theme;

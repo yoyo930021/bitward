@@ -6,9 +6,10 @@
 //! `vault.db`；`HubHolder.bridge` 裝的就是對這幾支符號的薄封裝。
 //!
 //! 紀律：
-//! - user key 不過橋（本批解鎖態留在 Rust，Keystore 封存是下一批）；
-//!   過橋的只有 metadata 級候選與填充用的明文欄位（Dataset 本來就要在
-//!   Java 側組 AutofillValue，契約 §2.7 規則 1 的 byte[] 限制指的是金鑰）。
+//! - user key 平常不過橋；第五批起只在**封存/解封兩個瞬間**以 `byte[]` 過橋
+//!   （`src/island.rs`＋Kotlin `KeyStoreBridge`），不經 Kotlin String。
+//!   過橋的其餘內容只有 metadata 級候選與填充用的明文欄位（Dataset 本來就要
+//!   在 Java 側組 AutofillValue，契約 §2.7 規則 1 的 byte[] 限制指的是金鑰）。
 //! - 分級、比對全在 Rust（bw-store 的 host 錨定查詢）；這裡零業務語意。
 //! - 任何 Rust panic 不許穿越 JNI 邊界（會變 runtime abort）：全部 catch 後回空。
 
@@ -185,4 +186,75 @@ pub extern "system" fn Java_io_bitward_android_NativeHub_nshSave(
         },
         &mut env,
     )
+}
+
+// —— P4b 第五批：Keystore 封存橋＋背景輪 ——
+
+/// 綁定 Kotlin `KeyStoreBridge` 單例（反向呼叫的對象；冪等，重複綁定以首次
+/// 為準）。傳物件實例而非類名：附著執行緒的 classloader 認不了 app 類
+/// （假設 8 以來的老坑），方法解析直接對這個 GlobalRef 做。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_bitward_android_NativeHub_nshBindBridge(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    bridge: JObject<'_>,
+) -> jboolean {
+    let ok = catch_unwind(AssertUnwindSafe(|| crate::island::bind(&mut env, bridge)))
+        .unwrap_or(false);
+    log::info!("jni: island bridge bind ok={ok}");
+    if ok { JNI_TRUE } else { JNI_FALSE }
+}
+
+/// 有無可用封存（登入頁生物辨識鈕的閘門；孤島冷啟的形態判定也問它）。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_bitward_android_NativeHub_nshHasSealed(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+) -> jboolean {
+    match catch_unwind(AssertUnwindSafe(|| hub().is_some_and(|h| h.has_sealed()))) {
+        Ok(true) => JNI_TRUE,
+        _ => JNI_FALSE,
+    }
+}
+
+/// 孤島冷啟的靜默解封（契約路线 3：能靜默就自動解鎖回真候選）：只在
+/// 30 秒驗證視窗內成功、絕不彈窗；失敗保持誠實鎖態，由 Kotlin 走一鍵
+/// 解鎖引導。成功回 true 並記鏡像數（不記金鑰、不記欄位明文）。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_bitward_android_NativeHub_nshTrySilentUnseal(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+) -> jboolean {
+    let out = catch_unwind(AssertUnwindSafe(|| {
+        let h = HUB.as_ref().ok()?.clone();
+        let snap = crate::island::RUNTIME.block_on(h.unseal(false)).ok()?;
+        Some(snap.items)
+    }));
+    match out {
+        Ok(Some(items)) => {
+            log::info!("jni: silent unseal ok items={items}");
+            JNI_TRUE
+        }
+        _ => JNI_FALSE,
+    }
+}
+
+/// `HubService` 背景輪（drain 收斂＋到拍 pull）：Kotlin 工作執行緒上跑，
+/// 回終態字串給 logcat 斷言（`locked`|`ok`|`ok-synced`|`stalled`）；
+/// null＝橋內錯（中樞開不起來／panic），Kotlin 側照樣收工等下個 job。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_bitward_android_NativeHub_nshBackgroundRun(
+    env: JNIEnv<'_>,
+    _class: JClass<'_>,
+) -> jni::sys::jstring {
+    let out = catch_unwind(AssertUnwindSafe(|| {
+        hub().map(|h| crate::island::RUNTIME.block_on(h.background_run()))
+    }));
+    match out {
+        Ok(Some(status)) => {
+            log::info!("jni: background run → {status}");
+            env.new_string(status).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut())
+        }
+        _ => std::ptr::null_mut(),
+    }
 }

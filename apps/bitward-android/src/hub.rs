@@ -14,6 +14,7 @@
 //!   本檔不把明文寫進日誌，也不寫進帳號檔。
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use bw_proto::{CipherDraft, CipherField, FieldEdit, ItemId, ItemMeta, Query};
@@ -105,6 +106,8 @@ pub struct Hub {
     store: Store,
     unlocked: Mutex<Option<Unlocked>>,
     device: OnceLock<String>,
+    /// 最近一次全量 pull 收斂的時刻（背景節拍的依據；0＝本進程還沒拉過）。
+    last_sync_ms: AtomicU64,
     /// drain 單飛：同一時間只有一條 outbox 推送序列（租約之外再加一道保險）。
     drain_lock: tokio::sync::Mutex<()>,
     /// favicon 單飛（同 daemon icon.rs）：同 host 併發只放一發外連，
@@ -121,6 +124,7 @@ impl Hub {
             store,
             unlocked: Mutex::new(None),
             device: OnceLock::new(),
+            last_sync_ms: AtomicU64::new(0),
             drain_lock: tokio::sync::Mutex::new(()),
             icon_gate: tokio::sync::Mutex::new(()),
         });
@@ -234,6 +238,13 @@ impl Hub {
             });
         }
         let items = self.pull_and_index(client.clone()).await?;
+        // 解鎖成功點＝封存時機（P4b 第五批）：30 秒驗證視窗內靜默包裹；
+        // 窗外孤島自行退到生物辨識彈窗。失敗只記 log——登入本身已完成，
+        // 沒封存只是下次仍要主密碼，不降格、不重試到煩。
+        if let Err(e) = self.seal_now().await {
+            log::warn!("keystore 封存未落地：{e}");
+        }
+        crate::island::ensure_hub_service();
         Ok(Snapshot {
             email,
             server,
@@ -270,6 +281,7 @@ impl Hub {
             .apply_sync(&raw)
             .map_err(|e| format!("鏡像落地失敗：{e}"))?;
         self.reindex_plain()?;
+        self.last_sync_ms.store(self.store.now_ms(), Ordering::Relaxed);
         Ok(self.list("").len())
     }
 
@@ -541,10 +553,197 @@ impl Hub {
     }
 
     /// 鎖定：丟棄 user key（Drop 即清零）與 token；鏡像與帳號檔留著。
+    /// 封存檔（`sealed.json`）也留著——鎖定不等於登出，解鎖閘因此能給
+    /// 「生物辨識直接解鎖」（同 macOS 裝置斷言語意：鑰匙歸零、封存不動）。
     pub fn sign_out(&self) {
         let mut g = self.unlocked.lock().expect("hub mutex poisoned");
         g.take();
         log::info!("hub: signed out（金鑰已歸零）");
+    }
+}
+
+// —— Keystore 封存與免重派生解鎖（P4b 第五批，契約 §1「Keystore 封存」列）——
+//
+// 形態（實測收斂，findings 第五批）：Kotlin 持 AndroidKeyStore AES-256-GCM
+// Class 3 金鑰（需使用者驗證＋30 秒視窗＋解鎖裝置要求；emulator 無 StrongBox
+// 走軟體 Keystore 降級路），金鑰材料永不出 Keystore；Rust 持 `sealed.json`
+// 的記錄格式、漂移判定與落地。user key 明文只在 seal/unseal 兩個瞬間以
+// `Zeroizing<Vec<u8>>` 過橋（契約 §2.7 規則 1：不經 Kotlin String）。
+// `puk` 錨定封存當下的 Protected Symmetric Key：主密碼在別處改過 → 下次
+// 登入換 PUK → 漂移即作廢舊封存（寧可多打一次主密碼，不拿錯鑰解鏡像）。
+
+/// `sealed.json` 的落盤記錄（`v` 留格式升級位；blob = IV‖密文‖tag base64，
+/// 對 Rust 不透明——切 IV 是 Keystore 側的事）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SealedRecord {
+    pub v: u8,
+    pub email: String,
+    pub puk: String,
+    pub blob_b64: String,
+}
+
+const SEALED_V: u8 = 1;
+
+/// 封存記錄 ↔ 帳號檔的一致性判定（純函數）：版本、信箱、PUK 三者全對才算
+/// 可用；任一漂移＝封存作廢。
+pub fn sealed_matches(rec: &SealedRecord, acc: &Account) -> bool {
+    rec.v == SEALED_V
+        && rec.email == acc.email
+        && Some(rec.puk.as_str()) == acc.protected_user_key.as_deref()
+}
+
+/// blob 解碼（base64 破損或短於 `IV(12)+tag(16)+最小 key(1)` 視同無封存）。
+pub fn sealed_blob(rec: &SealedRecord) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let raw = base64::engine::general_purpose::STANDARD.decode(&rec.blob_b64).ok()?;
+    (raw.len() >= 29).then_some(raw)
+}
+
+/// 背景推送退避（純函數，節拍語意同 daemon `drain_backoff`）：連續失敗第
+/// n 次 → 30s·2^(n-1)，上限 10 分鐘；n=0 回 0（首輪直接跑）。
+pub fn drain_backoff(failures: u32) -> std::time::Duration {
+    if failures == 0 {
+        return std::time::Duration::ZERO;
+    }
+    let secs = 30u64
+        .saturating_mul(1u64 << (failures - 1).min(16))
+        .min(600);
+    std::time::Duration::from_secs(secs)
+}
+
+/// 背景 pull 節拍（契約路线 3：15 分鐘；JobScheduler 週期同值，這裡是
+/// 「解鎖期間順手拉」的閘門）。
+pub const SYNC_PERIOD: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// 背景輪連續失敗上限（超過即讓位：`HubService` 收工，下個 job 再來）。
+const DRAIN_MAX_FAILURES: u32 = 6;
+
+impl Hub {
+    fn sealed_path(&self) -> PathBuf {
+        self.dir.join("sealed.json")
+    }
+
+    /// 讀封存記錄（檔不存在／JSON 破損＝None；判定可用性另走 `has_sealed`）。
+    fn read_sealed(&self) -> Option<SealedRecord> {
+        let text = std::fs::read_to_string(self.sealed_path()).ok()?;
+        serde_json::from_str(&text).ok()
+    }
+
+    /// 有可用封存（記錄存在且與帳號檔無漂移）：登入頁生物辨識鈕的閘門，
+    /// 也是孤島冷啟「靜默解封 or 誠實鎖態」的判定依據。
+    pub fn has_sealed(&self) -> bool {
+        match (self.read_sealed(), self.account()) {
+            (Some(rec), Some(acc)) => sealed_matches(&rec, &acc) && sealed_blob(&rec).is_some(),
+            _ => false,
+        }
+    }
+
+    /// 解鎖成功點呼叫：user key 交孤島包裹後落地（覆寫舊封存）。
+    pub async fn seal_now(&self) -> Result<(), String> {
+        let acc = self.account().ok_or("沒有帳號檔，無從封存")?;
+        let puk = acc
+            .protected_user_key
+            .clone()
+            .ok_or("帳號檔沒有 Protected User Key")?;
+        let key = self.unlocked_user_key().ok_or("尚未解鎖")?;
+        let blob = crate::island::seal(Zeroizing::new(key.as_bytes().to_vec())).await?;
+        use base64::Engine;
+        let rec = SealedRecord {
+            v: SEALED_V,
+            email: acc.email,
+            puk,
+            blob_b64: base64::engine::general_purpose::STANDARD.encode(blob.as_slice()),
+        };
+        let text = serde_json::to_string_pretty(&rec).map_err(|e| format!("封存序列化失敗：{e}"))?;
+        std::fs::write(self.sealed_path(), text).map_err(|e| format!("封存落地失敗：{e}"))?;
+        log::info!("keystore sealed user key（冷啟免重派生就緒）");
+        Ok(())
+    }
+
+    /// 免主密碼解鎖：讀封存 → 孤島解封（`prompt` 決定可否拉生物辨識）→
+    /// 以 refresh token 重建 client → 裝回 `unlocked` 槽 → 順手 pull
+    /// （失敗不擋：鏡像本來就在本地，離線照讀）。
+    pub async fn unseal(self: &Arc<Self>, prompt: bool) -> Result<Snapshot, String> {
+        if self.is_unlocked() {
+            return self.local_snapshot().ok_or_else(|| "已解鎖但帳號檔缺失".to_owned());
+        }
+        let acc = self.account().ok_or("尚未登入過，無從解封")?;
+        let Some(rec) = self.read_sealed() else {
+            return Err("沒有封存記錄".to_owned());
+        };
+        if !sealed_matches(&rec, &acc) || sealed_blob(&rec).is_none() {
+            let _ = std::fs::remove_file(self.sealed_path());
+            log::info!("keystore sealed user key 作廢（漂移或破損），需主密碼重登");
+            return Err("封存已失效（主密碼在別處改過？），請以主密碼登入".to_owned());
+        }
+        let blob = sealed_blob(&rec).unwrap_or_default();
+        let plain = crate::island::unseal(blob, prompt).await.map_err(|e| {
+            // 靜默路失敗只是「驗證視窗過了」，封存保留；彈窗路失敗（取消／
+            // 逾時／金鑰作廢）由 Kotlin 側自行清鑰，這裡不誤刪記錄。
+            if prompt { e } else { format!("{e}（需生物辨識或主密碼）") }
+        })?;
+        let user_key = bw_crypto::UserKey::from_bytes(plain.to_vec())
+            .map_err(|e| format!("解封出的金鑰形態不對：{e}"))?;
+        let client = Arc::new(
+            Client::with_options(&acc.server, Self::options())
+                .map_err(|e| format!("服務器網址無效：{e}"))?,
+        );
+        client.set_refresh_token(acc.refresh_token.as_deref()).await;
+        {
+            let mut g = self.unlocked.lock().expect("hub mutex poisoned");
+            *g = Some(Unlocked { client: client.clone(), user_key });
+        }
+        log::info!("keystore unseal ok（免重派生解鎖）");
+        if let Err(e) = self.pull_and_index(client).await {
+            log::warn!("unseal 後同步未完成（本地鏡像照讀）：{e}");
+        }
+        crate::island::ensure_hub_service();
+        self.local_snapshot().ok_or_else(|| "解封後狀態丟失".to_owned())
+    }
+
+    /// 本地態 Snapshot（帳號檔＋鏡像計數；unseal／背景路徑共用）。
+    fn local_snapshot(&self) -> Option<Snapshot> {
+        let acc = self.account()?;
+        Some(Snapshot {
+            email: acc.email,
+            server: acc.server,
+            items: self.list("").len(),
+            last_sync_ms: self.last_sync_ms.load(Ordering::Relaxed),
+        })
+    }
+
+    /// `HubService` 的背景輪（Kotlin 工作執行緒經 JNI `block_on` 這條）：
+    /// 解鎖態才做事——drain 到結算（連續失敗退避 30s→10min，純函數測），
+    /// 結算後距上次 pull 超過 [`SYNC_PERIOD`] 就順手拉。回終態字串給 logcat：
+    /// `locked` | `ok` | `ok-synced` | `stalled`。
+    pub async fn background_run(&self) -> String {
+        if !self.is_unlocked() {
+            return "locked".to_owned();
+        }
+        let mut failures = 0u32;
+        loop {
+            if self.drain().await {
+                let now = self.store.now_ms();
+                let last = self.last_sync_ms.load(Ordering::Relaxed);
+                if now.saturating_sub(last) >= SYNC_PERIOD.as_millis() as u64
+                    && let Some(client) = self.unlocked_client()
+                {
+                    match self.pull_and_index(client).await {
+                        Ok(n) => {
+                            log::info!("background sync: 鏡像 {n} 筆");
+                            return "ok-synced".to_owned();
+                        }
+                        Err(e) => log::warn!("background sync 失敗：{e}"),
+                    }
+                }
+                return "ok".to_owned();
+            }
+            failures += 1;
+            if failures > DRAIN_MAX_FAILURES || !self.is_unlocked() {
+                return "stalled".to_owned();
+            }
+            tokio::time::sleep(drain_backoff(failures)).await;
+        }
     }
 }
 
@@ -1743,6 +1942,103 @@ mod tests {
         assert_eq!(hub.list_in("", Some(&fid)).len(), 1);
         assert_eq!(hub.list_in("", Some("")).len(), 1);
         assert_eq!(hub.list_in("", None).len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sealed_record_roundtrips_and_gates_on_drift() {
+        use base64::Engine;
+        let blob = vec![9u8; 12 + 64 + 16]; // IV‖user key‖tag 的最小正形
+        let rec = SealedRecord {
+            v: SEALED_V,
+            email: "a@x.io".to_owned(),
+            puk: "2.aaa|bbb|ccc".to_owned(),
+            blob_b64: base64::engine::general_purpose::STANDARD.encode(&blob),
+        };
+        let acc = Account {
+            email: "a@x.io".to_owned(),
+            protected_user_key: Some("2.aaa|bbb|ccc".to_owned()),
+            ..Default::default()
+        };
+        assert!(sealed_matches(&rec, &acc));
+        assert_eq!(sealed_blob(&rec), Some(blob.clone()));
+        // 主密碼在別處改過（PUK 漂移）→ 記錄不可用。
+        let rotated = Account {
+            protected_user_key: Some("2.ddd|eee|fff".to_owned()),
+            ..acc.clone()
+        };
+        assert!(!sealed_matches(&rec, &rotated));
+        // 換帳號（email 漂移）同判；版本不認得也作廢。
+        assert!(!sealed_matches(&rec, &Account { email: "b@x.io".to_owned(), ..acc.clone() }));
+        assert!(!sealed_matches(&SealedRecord { v: 9, ..rec.clone() }, &acc));
+        // JSON round-trip（落盤形態就是 serde_json）。
+        let text = serde_json::to_string(&rec).expect("encode");
+        let back: SealedRecord = serde_json::from_str(&text).expect("decode");
+        assert_eq!(back.blob_b64, rec.blob_b64);
+        assert!(sealed_matches(&back, &acc));
+    }
+
+    #[test]
+    fn sealed_blob_rejects_broken_or_short() {
+        use base64::Engine;
+        let rec = SealedRecord {
+            v: SEALED_V,
+            email: "a@x.io".to_owned(),
+            puk: "2.x".to_owned(),
+            blob_b64: "!!!not base64!!!".to_owned(),
+        };
+        assert!(sealed_blob(&rec).is_none());
+        let short = SealedRecord { blob_b64: base64::engine::general_purpose::STANDARD.encode(&[0u8; 28]), ..rec };
+        assert!(sealed_blob(&short).is_none());
+    }
+
+    #[test]
+    fn hub_has_sealed_tracks_file_and_account() {
+        use base64::Engine;
+        let dir =
+            std::env::temp_dir().join(format!("bitward-android-test-seal-{}", uuid::Uuid::new_v4()));
+        let hub = Hub::open(dir.clone()).expect("hub opens");
+        let acc = Account {
+            server: "http://127.0.0.1:1".to_owned(),
+            email: "seal@x.io".to_owned(),
+            protected_user_key: Some("2.puk".to_owned()),
+            refresh_token: Some("rt".to_owned()),
+            ..Default::default()
+        };
+        // 沒帳號沒封存＝無；帳號落地但仍無封存檔。
+        assert!(!hub.has_sealed());
+        hub.persist_account(&acc);
+        assert!(!hub.has_sealed());
+        let rec = SealedRecord {
+            v: SEALED_V,
+            email: acc.email.clone(),
+            puk: "2.puk".to_owned(),
+            blob_b64: base64::engine::general_purpose::STANDARD.encode(vec![1u8; 92]),
+        };
+        std::fs::write(dir.join("sealed.json"), serde_json::to_string(&rec).unwrap())
+            .expect("write sealed");
+        assert!(hub.has_sealed());
+        // PUK 換掉（下次登入的帳號檔形態）→ 舊封存不再可用。
+        hub.persist_account(&Account { protected_user_key: Some("2.puk2".to_owned()), ..acc.clone() });
+        assert!(!hub.has_sealed());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn drain_backoff_sequence_caps_at_ten_minutes() {
+        use std::time::Duration;
+        assert_eq!(drain_backoff(0), Duration::ZERO);
+        for (n, secs) in [(1, 30), (2, 60), (3, 120), (4, 240), (5, 480), (6, 600), (7, 600), (64, 600)] {
+            assert_eq!(drain_backoff(n), Duration::from_secs(secs), "n={n}");
+        }
+    }
+
+    #[tokio::test]
+    async fn background_run_locked_hub_converges_immediately() {
+        let dir = std::env::temp_dir()
+            .join(format!("bitward-android-test-bg-{}", uuid::Uuid::new_v4()));
+        let hub = Hub::open(dir.clone()).expect("hub opens");
+        assert_eq!(hub.background_run().await, "locked");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
