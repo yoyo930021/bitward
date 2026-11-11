@@ -288,15 +288,14 @@ impl Hub {
     /// 鏡像落盤後的明文索引回填（與 daemon 同語意、同函數：欄位路徑見
     /// `bw_vault::plain_index`）：解密只在拿得到 user key 時發生，單筆失敗
     /// 容忍跳過（欄位漂移防禦）。登入＝本批唯一的解鎖完成點，回填接在這裡。
+    /// 覆蓋範圍＝全部鏡像列（`Store::all_ids`，不分 deleted／archived），
+    /// 不是列表查詢的三態組合：2026-11-11 macOS 實錄缺陷「已封存的項目名都
+    /// 像亂碼」（daemon b00dc86）即此處以預設查詢圈定，封存／軟刪列永遠漏網、
+    /// 名字停在 apply_sync 落盤的伺服器原樣信封。Android 目前無封存／垃圾桶
+    /// 視角，尚未成為活缺陷，但列已落庫，回填不能挑列。
     fn reindex_plain(&self) -> Result<(), String> {
-        let metas = self
-            .store
-            .query(&Query {
-                limit: u32::MAX,
-                ..Default::default()
-            })
-            .map_err(|e| e.to_string())?;
-        self.reindex_ids(metas.iter().map(|m| m.id))
+        let ids = self.store.all_ids().map_err(|e| e.to_string())?;
+        self.reindex_ids(ids)
     }
 
     /// 單筆／複數 id 的明文索引回填（寫路徑 enqueue 後就地刷新，搜尋與列表
@@ -2144,6 +2143,64 @@ mod tests {
             .join(format!("bitward-android-test-bg-{}", uuid::Uuid::new_v4()));
         let hub = Hub::open(dir.clone()).expect("hub opens");
         assert_eq!(hub.background_run().await, "locked");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 缺陷回歸（與 macOS daemon b00dc86「已封存的項目名都像亂碼」同形）：
+    /// `reindex_plain` 的覆蓋範圍＝全部鏡像列（`Store::all_ids`）。封存／軟刪列
+    /// 經 `apply_sync` 落盤時名字是伺服器原樣信封，回填以列表預設查詢圈定就
+    /// 永遠漏網。Android 目前無封存／垃圾桶視角、尚未成為活缺陷，此測罩住
+    /// 「未來接視角不會以同樣方式壞」。
+    #[test]
+    fn reindex_plain_backfills_archived_and_trashed_names() {
+        let (hub, dir) = unlocked_hub("reindex-scope");
+        let user = hub.unlocked_user_key().expect("unlocked");
+        let enc = |pt: &str| bw_crypto::encrypt_bytes_key(user.as_bytes(), pt.as_bytes()).unwrap();
+        let rows = [
+            (ItemId::new_v4(), "Live", serde_json::json!({})),
+            (
+                ItemId::new_v4(),
+                "Archived",
+                serde_json::json!({"archivedDate": "2026-11-11T00:00:00.000000Z"}),
+            ),
+            (
+                ItemId::new_v4(),
+                "Trashed",
+                serde_json::json!({"deletedDate": "2026-11-11T00:00:00.000000Z"}),
+            ),
+            (
+                ItemId::new_v4(),
+                "ArchivedTrashed",
+                serde_json::json!({
+                    "archivedDate": "2026-11-11T00:00:00.000000Z",
+                    "deletedDate": "2026-11-11T00:00:00.000000Z",
+                }),
+            ),
+        ];
+        for (id, name, extra) in &rows {
+            let mut cipher =
+                serde_json::json!({"id": id.to_string(), "type": 1, "name": enc(name)});
+            for (k, v) in extra.as_object().unwrap() {
+                cipher.as_object_mut().unwrap().insert(k.clone(), v.clone());
+            }
+            hub.store.put_mirror(*id, &cipher).expect("mirror 落盤");
+        }
+        hub.reindex_plain().expect("reindex ok");
+        for (id, name, _) in &rows {
+            let meta = hub.store.meta(*id).expect("store").expect("鏡像列存在");
+            assert_eq!(meta.name.as_deref(), Some(*name), "{name} 應回填明文名");
+        }
+        // 投影端同一口徑：封存＋軟刪組合態查詢不得再吐信封字串。
+        let listed = hub
+            .store
+            .query(&Query {
+                archived: Some(true),
+                deleted: Some(true),
+                ..Default::default()
+            })
+            .expect("query");
+        assert_eq!(listed.len(), 1, "封存＋軟刪列只在該態組合查詢現形");
+        assert_eq!(listed[0].name.as_deref(), Some("ArchivedTrashed"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
