@@ -47,7 +47,7 @@ cd apps/bitward-gui
 BITWARD_GUI_SOCK=<repo>/dev/e2e/demo/s NSH_GUI_SHOTS=$PWD nsh run --target macos
 ```
 
-依指令序列跑完整驗收流並寫 `shot-1..23、26..43、50..55-*.png`（24/25 徽章流、44..47 登入流、48/49 2FA 流見下）後退出：列表全量（三欄骨架、
+依指令序列跑完整驗收流並寫 `shot-1..23、26..43、50..57-*.png`（24/25 徽章流、44..47 登入流、48/49 2FA 流見下）後退出：列表全量（三欄骨架、
 型別磚、未同步膠囊，右欄空態為「選取一個項目」佔位）→ 搜尋 "GitHub" →
 詳情遮罩 → 詳情 revealed → 新增編輯器（右欄 inline）→ 真送新增（Create+AddTag）
 → TOTP 缺席路徑（無 seed → 自動取碼靜默收合，驗證碼節不渲染，shot-6-totp-absent）→ 排序下拉 → 標籤 chips 選取 →
@@ -150,7 +150,7 @@ access token 壽命約 2 小時；daemon 自 4c 起**自動續期**（401 出口
 |---|---|
 | `btp.rs` | BTP 精簡同步 client：u32 LE 長度前綴 + JSON 幀、`Hello{Enroll pair_code:null}`→`Welcome`→`Invoke`/`Reply`；鎖撤銷（A6）自動重連重 Enroll 一次；`listen` 事件監聽連線（wants 訂閱，OutboxDrained/VaultChanged 交 state 幫浦） |
 | `state.rs` | 應用狀態機：`AppCore`（訊號集）+ `Cmd` 命令佇列 + 唯一 `reduce`；UI handler 只投遞命令，worker 執行緒只回傳命令，訊號全在引擎執行緒寫入；`watch_events` 事件幫浦（斷線 1s 重連；`EventsRefresh` 連詳情一起重取） |
-| `lib.rs` | 根元件 `App`：命令幫浦（`set_interval` 50ms + `batch`）、TOTP 心跳（1s 引擎計時器）、批准佇列節拍（1.5s 輪詢，照殼節奏）、主題 effect（`theme_mode`→`set_color_scheme`，即時翻轉不重建視窗；`theme.txt` 持久化）、頂部列（置中搜尋＋新增項目）、左側欄（我的密碼庫＋資料夾樹／已共享佔位／垃圾桶／待批准＋計數徽章／帳號列（email＋上次同步／未登入／憑證失效三態）／匯出/匯入/改密／主題三態選擇）、錯誤橫條、needs_reauth 橫幅（warning 色、點擊進登入卡）、Phase×Route 三欄版面與鎖態頁、SignedOut 登入卡（server/email/主密碼＋登入即解鎖）與側欄帳號列三態 |
+| `lib.rs` | 根元件 `App`：命令幫浦（`set_interval` 50ms + `batch`）、TOTP 心跳（1s 引擎計時器）、批准佇列節拍（1.5s 輪詢，照殼節奏）、主題 effect（`theme_mode`→`set_color_scheme`，即時翻轉不重建視窗；`theme.txt` 持久化）、頂部列（置中搜尋＋新增項目）、左側欄（批次 11 漸進揭露：檯面常駐＝全部項目／(未分類)／資料夾樹／待批准＋計數徽章／垃圾桶／產生密碼／「更多」disclosure，收合組＝已封存／已共享／報告／Send／設定；底部僅帳號列（email＋上次同步／未登入／憑證失效三態）＋立即同步；快捷 cmd+1..4 直跳全部/垃圾桶/產生密碼/設定）、錯誤橫條、needs_reauth 橫幅（warning 色、點擊進登入卡）、Phase×Route 三欄版面與鎖態頁、SignedOut 登入卡（server/email/主密碼＋登入即解鎖）與側欄帳號列三態 |
 | `approvals.rs` | 批准佇列右欄視角（自殼批准中心併入）：每筆＝去敏 summary＋請求時間（`requested_at_ms`，daemon 補欄即顯示）＋單鍵批准/拒絕（官方語意無二次確認，按錯以拒絕補救）；空佇列佔位卡；epoch→UTC 時分純函數 |
 | `list.rs` | 置中搜尋框（Query.text 交 daemon FTS；掛頂部列）、標籤 chips 行＋排序/重新整理（中欄工具列）、排序選單、44px 列（favicon 磚（有 host 走 `ui::icon_tile` 實圖、否則字母型別磚）、選中列淡藍底＋藍指示條）、未同步膠囊、垃圾桶條目顯示刪除時間、已封存條目顯示封存時間、`virtual_list` |
 | `detail.rs` | 右欄詳情面板：官方表單感——大名稱＋型別磚，分節與官方同序（帳密／驗證碼／備註／自訂欄位／附件／資訊），欄位為淺灰圓角值塊（label 12 粗灰在上、值 14 塊內、複製鈕塊右側），布爾欄渲染開關樣；垃圾桶條目動作改還原／永久刪除；密碼遮罩 →「顯示密碼」發 Get(Reveal)，明文只存 `revealed` 訊號、離開詳情即清；**編輯態＝同骨架原地變形**（`Route::Edit` 時名稱/帳號/密碼/標籤/備註值塊就地變同幾何輸入框、網址走多列編輯器、自訂欄位換編輯列、頂部鈕變取消/儲存，切換零跳動）；TOTP 進詳情自動取碼（無 seed 整節不渲染、真錯顯示可懂一行）＋倒數細进度條（≤5 秒轉 warning）；附件列＝檔名＋大小＋下載／刪除，節尾內聯上傳編輯器 |

@@ -148,6 +148,18 @@ pub fn App() -> impl IntoElement {
     effect(move || {
         set_color_scheme(theme_watch.theme_mode.get());
     });
+    // 批次 11 直跳捷徑（nsh keymap 支援 cmd 修飾，查證 keymap.rs 519）：
+    // cmd+1 全部項目、cmd+2 垃圾桶、cmd+3 產生密碼、cmd+4 設定。
+    for (key, cmd) in [
+        ("cmd+1", Cmd::ChooseFolder(None)),
+        ("cmd+2", Cmd::ToggleTrash),
+        ("cmd+3", Cmd::OpenGenerator),
+        ("cmd+4", Cmd::OpenSettings),
+    ] {
+        let core = core.clone();
+        let cmd = cmd.clone();
+        on_key(key, move |_| core.send(cmd.clone()));
+    }
     on_key("escape", {
         let core = core.clone();
         move |_| core.send(Cmd::RequestCloseForm)
@@ -341,6 +353,8 @@ fn topbar(core: AppCore) -> View {
 /// 左側欄（官方三欄骨架）：我的密碼庫（資料夾樹）／已共享／垃圾桶＋
 /// 底部同步狀態與其他動作。資料夾與垃圾桶互斥（`VaultFilter`）。
 fn sidebar(core: AppCore) -> View {
+    // 驗收不變量：檯面常駐 ≤8（清單單源 `state::sidebar_rail`）。
+    debug_assert!(state::sidebar_rail().len() <= 8);
     let all_sel = core.clone();
     let all_press = core.clone();
     let uncat_sel = core.clone();
@@ -363,10 +377,7 @@ fn sidebar(core: AppCore) -> View {
     let send_sel = core.clone();
     let send_press = core.clone();
     let sync_core = core.clone();
-    let export_core = core.clone();
-    let import_core = core.clone();
-    let pw_cond = core.clone();
-    let pw_build = core.clone();
+    let more_cond = core.clone();
     view()
         .w(px(theme::SIDEBAR_W))
         .flex_col()
@@ -430,20 +441,12 @@ fn sidebar(core: AppCore) -> View {
             },
         ))
         .child(side_item(
-            "已共享".to_owned(),
-            || false,
-            || {},
-            true,
-            Some("組織共享：待 daemon 資料源就緒後開放"),
-            || 0,
-        ))
-        .child(side_item(
-            "已封存".to_owned(),
-            move || arch_sel.filter.get().archived,
-            move || arch_press.send(Cmd::ToggleArchived),
+            "待批准".to_owned(),
+            move || app_sel.route.get() == Route::Approvals,
+            move || app_press.send(Cmd::OpenApprovals),
             false,
             None,
-            || 0,
+            move || app_cnt.pending.get().len(),
         ))
         .child(side_item(
             "垃圾桶".to_owned(),
@@ -454,14 +457,6 @@ fn sidebar(core: AppCore) -> View {
             || 0,
         ))
         .child(side_item(
-            "待批准".to_owned(),
-            move || app_sel.route.get() == Route::Approvals,
-            move || app_press.send(Cmd::OpenApprovals),
-            false,
-            None,
-            move || app_cnt.pending.get().len(),
-        ))
-        .child(side_item(
             "產生密碼".to_owned(),
             move || gen_sel.route.get() == Route::Generator,
             move || gen_press.send(Cmd::OpenGenerator),
@@ -469,29 +464,64 @@ fn sidebar(core: AppCore) -> View {
             None,
             || 0,
         ))
-        .child(side_item(
-            "報告".to_owned(),
-            move || rep_sel.route.get() == Route::Reports,
-            move || rep_press.send(Cmd::OpenReports),
-            false,
-            None,
-            || 0,
-        ))
-        .child(side_item(
-            "Send".to_owned(),
-            move || send_sel.route.get() == Route::Send,
-            move || send_press.send(Cmd::OpenSend),
-            false,
-            None,
-            || 0,
-        ))
-        .child(side_item(
-            "設定".to_owned(),
-            move || set_sel.route.get() == Route::Settings,
-            move || set_press.send(Cmd::OpenSettings),
-            false,
-            None,
-            || 0,
+        // 批次 11 漸進揭露：低頻節點收進「更多」（本 session 記憶）。
+        .child(side_disclosure(core.clone()))
+        .child(when(
+            move || more_cond.sidebar_more.get(),
+            move || {
+                let arch_sel = arch_sel.clone();
+                let arch_press = arch_press.clone();
+                let rep_sel = rep_sel.clone();
+                let rep_press = rep_press.clone();
+                let send_sel = send_sel.clone();
+                let send_press = send_press.clone();
+                let set_sel = set_sel.clone();
+                let set_press = set_press.clone();
+                view()
+                    .flex_col()
+                    .gap_0p5()
+                    .pl_3()
+                    .child(side_item(
+                        "已封存".to_owned(),
+                        move || arch_sel.filter.get().archived,
+                        move || arch_press.send(Cmd::ToggleArchived),
+                        false,
+                        None,
+                        || 0,
+                    ))
+                    .child(side_item(
+                        "已共享".to_owned(),
+                        || false,
+                        || {},
+                        true,
+                        Some("組織共享：待 daemon 資料源就緒後開放"),
+                        || 0,
+                    ))
+                    .child(side_item(
+                        "報告".to_owned(),
+                        move || rep_sel.route.get() == Route::Reports,
+                        move || rep_press.send(Cmd::OpenReports),
+                        false,
+                        None,
+                        || 0,
+                    ))
+                    .child(side_item(
+                        "Send".to_owned(),
+                        move || send_sel.route.get() == Route::Send,
+                        move || send_press.send(Cmd::OpenSend),
+                        false,
+                        None,
+                        || 0,
+                    ))
+                    .child(side_item(
+                        "設定".to_owned(),
+                        move || set_sel.route.get() == Route::Settings,
+                        move || set_press.send(Cmd::OpenSettings),
+                        false,
+                        None,
+                        || 0,
+                    ))
+            },
         ))
         .child(view().flex_1())
         .child(
@@ -503,21 +533,37 @@ fn sidebar(core: AppCore) -> View {
                 .child(account_row(sync_core.clone()))
                 .child(side_text_button("立即同步", move || {
                     sync_core.send(Cmd::TriggerSync)
-                }))
-                .child(side_text_button("匯出", move || {
-                    export_core.send(Cmd::AskExport)
-                }))
-                .child(side_text_button("匯入", move || {
-                    import_core.send(Cmd::OpenImport)
-                }))
-                .child(when(
-                    move || state::can_change_password(&pw_cond.vault.get()),
-                    move || {
-                        let c = pw_build.clone();
-                        side_text_button("變更主密碼", move || c.send(Cmd::OpenChangePassword))
-                    },
-                ))
-                .child(theme_picker(core.clone())),
+                })),
+        )
+}
+
+/// 「更多」disclosure 列：▸/▾ 動詞前綴＋翻轉命令（批次 11）。
+fn side_disclosure(core: AppCore) -> View {
+    let press = core.clone();
+    let arrow = core.clone();
+    view()
+        .h(px(theme::SIDE_ITEM_H))
+        .w_full()
+        .px_3()
+        .rounded(px(theme::RADIUS_CONTROL))
+        .flex_row()
+        .items_center()
+        .cursor_pointer()
+        .transition_colors()
+        .duration(120.0)
+        .hover(|s| s.bg(theme::SURFACE_RAISED))
+        .on_press(move || press.send(Cmd::ToggleSidebarMore))
+        .child(
+            text(move || {
+                if arrow.sidebar_more.get() {
+                    "▾ 更多".to_owned()
+                } else {
+                    "▸ 更多".to_owned()
+                }
+            })
+            .text_size(px(13.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(theme::TEXT_SECONDARY),
         )
 }
 
@@ -646,7 +692,7 @@ fn side_text_button(label: &'static str, on_press: impl Fn() + 'static) -> View 
 }
 
 /// 主題三態選擇（官方桌面同款；預設跟隨系統）。
-fn theme_picker(core: AppCore) -> View {
+pub(crate) fn theme_picker(core: AppCore) -> View {
     let sys = core.clone();
     let light = core.clone();
     let dark = core.clone();

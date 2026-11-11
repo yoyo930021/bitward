@@ -6,6 +6,7 @@
 use bw_proto::{AUTO_LOCK_IMMEDIATE, Settings};
 use nsh_core::prelude::*;
 
+use crate::state;
 use crate::state::{AppCore, Cmd};
 use crate::theme;
 use crate::ui;
@@ -38,6 +39,11 @@ pub fn pane(core: AppCore) -> View {
     let clip_core = core.clone();
     let restart_core = core.clone();
     let search_core = core.clone();
+    let export_core = core.clone();
+    let import_core = core.clone();
+    let pw_cond = core.clone();
+    let pw_build = core.clone();
+    let theme_core = core.clone();
     view()
         .flex_1()
         .flex_col()
@@ -114,6 +120,41 @@ pub fn pane(core: AppCore) -> View {
                                 .text_size(px(theme::TEXT_PAGE_SUB))
                                 .text_color(theme::TEXT_MUTED),
                         ),
+                )
+                // 批次 11：側欄收合後，庫工具與外觀搬進設定頁分節。
+                .child(
+                    view()
+                        .flex_col()
+                        .gap_2()
+                        .child(ui::section_title("庫工具"))
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(ui::button("匯出", ui::Btn::Ghost, move || {
+                                    export_core.send(Cmd::AskExport)
+                                }))
+                                .child(ui::button("匯入", ui::Btn::Ghost, move || {
+                                    import_core.send(Cmd::OpenImport)
+                                }))
+                                .child(when(
+                                    move || state::can_change_password(&pw_cond.vault.get()),
+                                    move || {
+                                        let c = pw_build.clone();
+                                        ui::button("變更主密碼", ui::Btn::Ghost, move || {
+                                            c.send(Cmd::OpenChangePassword)
+                                        })
+                                    },
+                                )),
+                        ),
+                )
+                .child(
+                    view()
+                        .flex_col()
+                        .gap_2()
+                        .child(ui::section_title("外觀"))
+                        .child(crate::theme_picker(theme_core.clone())),
                 ),
         ))
 }

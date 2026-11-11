@@ -207,6 +207,18 @@ pub fn icon_data_uri(bytes: &[u8]) -> Option<String> {
     Some(format!("data:{mime};base64,{b64}"))
 }
 
+/// 側欄資訊架構（批次 11：漸進揭露）——檯面常駐節點清單（純函數，驗收
+/// 「檯面 ≤8」斷言源）。資料夾樹屬動態列不計；「更多」收合組（已封存／
+/// 已共享／報告／Send／設定）不計。
+pub fn sidebar_rail() -> [&'static str; 6] {
+    ["全部項目", "(未分類)", "待批准", "垃圾桶", "產生密碼", "更多"]
+}
+
+/// 「更多」展開狀態機（純函數，單測點）：本 session 記憶、翻轉即新態。
+pub fn more_toggle(open: bool) -> bool {
+    !open
+}
+
 /// 資料夾鏡像列（ListFolders 投影）：鎖定態 name 為 null → 節點隱藏。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct FolderEntry {
@@ -325,6 +337,8 @@ pub enum Cmd {
     OpenReports,
     /// 進入獨立密碼產生器頁（批次 9；進頁若無碼自動產生一組）。
     OpenGenerator,
+    /// 側欄「更多」分組收合翻轉（批次 11）。
+    ToggleSidebarMore,
     /// 產生器頁「重新產生」：現行政策走 daemon `Use:GeneratePassword`。
     GenerateTool,
     /// 產生器頁回包（Ok＝新碼；Err＝橫條可懂化）。
@@ -863,6 +877,8 @@ pub struct AppCore {
     pub pending: Signal<Arc<Vec<PendingRow>>>,
     pub sort: Signal<SortKey>,
     pub sort_menu: Signal<bool>,
+    /// 「更多」分組展開態（批次 11）：本 session 記憶，不持久化。
+    pub sidebar_more: Signal<bool>,
     pub list_gen: Signal<u64>,
     pub busy: Signal<usize>,
     pub error_text: Signal<Option<String>>,
@@ -947,6 +963,7 @@ impl AppCore {
             icon_sent: signal(0),
             sort: signal(SortKey::Name),
             sort_menu: signal(false),
+            sidebar_more: signal(false),
             list_gen: signal(0),
             busy: signal(0),
             error_text: signal(None),
@@ -2044,6 +2061,10 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         Cmd::SettingsLoaded(v) => {
             core.settle();
             core.settings.set(v);
+        }
+        Cmd::ToggleSidebarMore => {
+            let next = more_toggle(core.sidebar_more.get());
+            core.sidebar_more.set(next);
         }
         Cmd::OpenGenerator => {
             core.leave_detail();
@@ -3216,6 +3237,16 @@ mod tests {
         assert!(!icon_request_due(Some(&fresh), now));
         let stale = IconState::Failed(now - (ICON_RETRY_AFTER + Duration::from_secs(1)));
         assert!(icon_request_due(Some(&stale), now));
+    }
+
+    #[test]
+    fn sidebar_rail_fits_eight_and_more_toggles() {
+        // 檯面常駐 ≤8（資料夾樹動態列不計、收合組不計）。
+        assert!(sidebar_rail().len() <= 8);
+        assert!(sidebar_rail().contains(&"產生密碼"));
+        assert!(!sidebar_rail().contains(&"已封存"), "已封存應收進更多");
+        assert!(!sidebar_rail().contains(&"設定"));
+        assert!(more_toggle(false) && !more_toggle(true));
     }
 
     #[test]

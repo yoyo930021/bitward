@@ -1054,6 +1054,15 @@ fn poll_attachment_row(dir: PathBuf, core: AppCore, ms: u64) {
                 "列表刷新不得重發任何已快取 host 的 GetIcon"
             );
         });
+        // —— 側欄資訊架構（批次 11）：展開「更多」＋設定頁含搬入項目 ——
+        let c = core.clone();
+        at(ms + 11000, move || c.send(Cmd::ToggleSidebarMore));
+        let d = dir.clone();
+        at(ms + 11400, move || capture(&d, "shot-56-sidebar-expanded.png"));
+        let c = core.clone();
+        at(ms + 11700, move || c.send(Cmd::OpenSettings));
+        let d = dir.clone();
+        at(ms + 12100, move || capture(&d, "shot-57-settings-tools.png"));
         // —— 產生器頁（批次 9）：進頁自動現算一碼 ——
         let cg = core.clone();
         at(ms + 9700, move || cg.send(Cmd::OpenGenerator));
@@ -1061,27 +1070,27 @@ fn poll_attachment_row(dir: PathBuf, core: AppCore, ms: u64) {
         at(ms + 10500, move || capture(&dg, "shot-55-generator-page.png"));
         // —— 暗色皮自查三張（列表／詳情／新增器）；收尾復原 system 預設 ——
         let c11 = core.clone();
-        at(ms + 10900, move || {
+        at(ms + 12500, move || {
             c11.send(Cmd::SetTheme(Appearance::Dark));
             c11.send(Cmd::OpenList);
         });
         let d3 = dir.clone();
-        at(ms + 11500, move || capture(&d3, "shot-38-dark-list.png"));
+        at(ms + 13100, move || capture(&d3, "shot-38-dark-list.png"));
         let c12 = core.clone();
-        at(ms + 11700, move || {
+        at(ms + 13300, move || {
             if let Some(id) = find_id(&c12, "2b 筆記範例") {
                 c12.send(Cmd::OpenDetail(id));
             }
         });
         let d4 = dir.clone();
-        at(ms + 12300, move || capture(&d4, "shot-39-dark-detail.png"));
+        at(ms + 13900, move || capture(&d4, "shot-39-dark-detail.png"));
         let c13 = core.clone();
-        at(ms + 12500, move || c13.send(Cmd::OpenCreate));
+        at(ms + 14100, move || c13.send(Cmd::OpenCreate));
         let d5 = dir.clone();
-        at(ms + 13100, move || capture(&d5, "shot-40-dark-modal.png"));
+        at(ms + 14700, move || capture(&d5, "shot-40-dark-modal.png"));
         let c14 = core.clone();
-        at(ms + 13400, move || c14.send(Cmd::SetTheme(Appearance::System)));
-        at(ms + 13800, quit);
+        at(ms + 15000, move || c14.send(Cmd::SetTheme(Appearance::System)));
+        at(ms + 15400, quit);
     });
 }
 
