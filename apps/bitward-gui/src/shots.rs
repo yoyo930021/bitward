@@ -1032,6 +1032,28 @@ fn poll_attachment_row(dir: PathBuf, core: AppCore, ms: u64) {
         });
         let df = dir.clone();
         at(ms + 9300, move || capture(&df, "shot-53-favicon.png"));
+        // 批次 10 防閃斷言：強制兩次列表刷新，GetIcon 發送數不得增加
+        // （同 host 已在 Loading/Ready/Failed 任態＝不重發；榜等值不重建）。
+        let probe = std::rc::Rc::new(std::cell::Cell::new(0u64));
+        let c = core.clone();
+        let p1 = probe.clone();
+        at(ms + 9500, move || {
+            p1.set(c.icon_sent.get());
+            c.send(Cmd::RefetchList);
+        });
+        let c = core.clone();
+        at(ms + 10100, move || {
+            c.send(Cmd::RefetchList);
+        });
+        let c = core.clone();
+        let p2 = probe.clone();
+        at(ms + 10700, move || {
+            assert_eq!(
+                c.icon_sent.get(),
+                p2.get(),
+                "列表刷新不得重發任何已快取 host 的 GetIcon"
+            );
+        });
         // —— 產生器頁（批次 9）：進頁自動現算一碼 ——
         let cg = core.clone();
         at(ms + 9700, move || cg.send(Cmd::OpenGenerator));

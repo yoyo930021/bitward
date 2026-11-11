@@ -149,14 +149,29 @@ pub fn archived_filter(archived: bool) -> Option<bool> {
     archived.then_some(true)
 }
 
-/// 網站圖示快取態（批次 C）：host → 狀態。缺席＝尚未請求；`Loading` 即單飛
+/// 網站圖示快取態（批次 C）：host → 態。缺席＝尚未請求；`Loading` 即單飛
 /// 令牌（同 host 併發只發一次 `GetIcon`）。`Ready` 存 data: URI 字串（PNG/ICO
 /// 原樣位元組經 magic 嗅探定 MIME，macOS 端 CGImageSource 兩者皆吃）。
+/// `Failed` 帶時刻＝負快取：退避 `ICON_RETRY_AFTER` 後才重試（批次 10：
+/// 修「解不了的 host 每輪重試→磚↔圖來回閃」）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IconState {
     Loading,
     Ready(String),
-    Failed,
+    Failed(Instant),
+}
+
+/// 負快取退避（批次 10）：失敗 host 十分鐘後才再試。
+pub const ICON_RETRY_AFTER: Duration = Duration::from_secs(600);
+
+/// 該 host 現在是否該發 GetIcon（純函數，單測點）：缺席→發；Loading/Ready
+/// →不發（單飛長駐）；Failed→退避期滿才發。
+pub fn icon_request_due(state: Option<&IconState>, now: Instant) -> bool {
+    match state {
+        None => true,
+        Some(IconState::Loading) | Some(IconState::Ready(_)) => false,
+        Some(IconState::Failed(at)) => now.saturating_duration_since(*at) >= ICON_RETRY_AFTER,
+    }
 }
 
 /// magic 嗅探（純函數，單測點）：PNG(`89 50 4E 47`)／ICO(`00 00 01 00`)
@@ -823,6 +838,12 @@ pub fn validate_change_password(
 #[derive(Clone)]
 pub struct AppCore {
     pub session: Arc<Session>,
+    /// 每 host 一條圖示訊號（批次 10 手術式失效）：某 host 狀態變動只重繪
+    /// 該 host 的磚，不再因整包 map 更新重建全部列的圖示元素（閃爍根因）。
+    /// 僅引擎執行緒觸碰（request/回包落地都在 reduce 脈絡）。
+    pub icon_sigs: Arc<std::sync::Mutex<HashMap<String, Signal<IconState>>>>,
+    /// GetIcon 累計發送數（e2e 斷言「重建不重發」用）。
+    pub icon_sent: Signal<u64>,
     /// favicon 專用第二連線（批次 C）：GetIcon 在 daemon 端要代理抓外站
     /// （秒級），若走互動 session 的 Mutex 會塞死一切命令（e2e14 實錄）；
     /// 自開一條只跑 icon 的連線，延遲彼此隔離。
@@ -840,8 +861,6 @@ pub struct AppCore {
     pub folders: Signal<Arc<Vec<FolderEntry>>>,
     /// 待批准佇列（側欄徽章＋右欄佇列視角的共同真相源）。
     pub pending: Signal<Arc<Vec<PendingRow>>>,
-    /// 網站圖示快取（批次 C）：host → 態。單飛＝請求前先插 `Loading`。
-    pub icons: Signal<Arc<HashMap<String, IconState>>>,
     pub sort: Signal<SortKey>,
     pub sort_menu: Signal<bool>,
     pub list_gen: Signal<u64>,
@@ -924,7 +943,8 @@ impl AppCore {
             filter: signal(VaultFilter::default()),
             folders: signal(Arc::new(Vec::new())),
             pending: signal(Arc::new(Vec::new())),
-            icons: signal(Arc::new(HashMap::new())),
+            icon_sigs: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            icon_sent: signal(0),
             sort: signal(SortKey::Name),
             sort_menu: signal(false),
             list_gen: signal(0),
@@ -1185,7 +1205,11 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         Cmd::ListLoaded { seq, rows } => {
             core.settle();
             if seq == core.list_gen.get() {
-                core.items.set(rows);
+                // 批次 10：內容等值就不換 Arc——輪詢/事件刷新常帶回全同榜，
+                // 無謂的 items 更新會重建整列（favicon 閃爍源之一）。
+                if core.items.get().as_slice() != rows.as_slice() {
+                    core.items.set(rows);
+                }
                 core.error_text.set(None);
                 request_icons(core);
             }
@@ -1717,14 +1741,11 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             });
         }
         Cmd::IconLoaded { host, res } => {
-            core.icons.update(|m| {
-                let map = Arc::make_mut(m);
-                let state = match res {
-                    Ok(b) => icon_data_uri(&b).map_or(IconState::Failed, IconState::Ready),
-                    Err(_) => IconState::Failed,
-                };
-                map.insert(host, state);
-            });
+            let state = match res {
+                Ok(b) => icon_data_uri(&b).map_or(IconState::Failed(Instant::now()), IconState::Ready),
+                Err(_) => IconState::Failed(Instant::now()),
+            };
+            icon_signal(core, &host).set(state);
         }
         Cmd::ChooseFolder(folder) => {
             core.filter.update(|f| f.pick_folder(folder));
@@ -2542,16 +2563,32 @@ pub fn request_icons(core: &AppCore) {
 }
 
 fn request_hosts(core: &AppCore, hosts: Vec<String>) {
+    let now = Instant::now();
     let mut missing: Vec<String> = Vec::new();
-    core.icons.update(|m| {
-        let map = Arc::make_mut(m);
-        for h in hosts {
-            if !map.contains_key(&h) {
-                map.insert(h.clone(), IconState::Loading);
+    for h in hosts {
+        let mut guard = core
+            .icon_sigs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match guard.get(&h) {
+            // 單飛／長駐：Loading、Ready 不重發；Failed 退避期滿才重試。
+            Some(sig) => {
+                let due = icon_request_due(Some(&sig.get()), now);
+                if due {
+                    sig.set(IconState::Loading);
+                    missing.push(h);
+                }
+            }
+            None => {
+                let sig = signal(IconState::Loading);
+                guard.insert(h.clone(), sig);
                 missing.push(h);
             }
         }
-    });
+    }
+    if !missing.is_empty() {
+        core.icon_sent.update(|n| *n += missing.len() as u64);
+    }
     for host in missing {
         // 走 icon 專用連線：daemon 代理抓外站是秒級延遲，絕不佔互動 session。
         let session = core.icon_session.clone();
@@ -2570,12 +2607,19 @@ fn request_hosts(core: &AppCore, hosts: Vec<String>) {
     }
 }
 
-/// 快取查閱：僅 Ready 回 data URI（Loading/Failed/缺席＝字母磚退路）。
-pub fn icon_ready(core: &AppCore, host: &str) -> Option<String> {
-    match core.icons.get().get(host) {
-        Some(IconState::Ready(uri)) => Some(uri.clone()),
-        _ => None,
+/// 取（或建立）某 host 的圖示訊號——渲染端訂閱**單一 host**，
+/// 別 host 到貨不再牽動本磚重繪（批次 10 閃爍修復核心）。
+pub fn icon_signal(core: &AppCore, host: &str) -> Signal<IconState> {
+    let mut guard = core
+        .icon_sigs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(sig) = guard.get(host) {
+        return *sig;
     }
+    let sig = signal(IconState::Loading);
+    guard.insert(host.to_owned(), sig);
+    sig
 }
 
 /// 表單送出：Create 走 CipherDraft，Edit 走欄位 diff（FieldEdit）；
@@ -3159,6 +3203,20 @@ pub fn is_unlocked(st: &Option<UnlockStateView>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icon_request_due_gates_single_flight_and_backoff() {
+        let now = Instant::now();
+        // 缺席→發；Loading/Ready→永不重發（單飛長駐）。
+        assert!(icon_request_due(None, now));
+        assert!(!icon_request_due(Some(&IconState::Loading), now));
+        assert!(!icon_request_due(Some(&IconState::Ready("data:".into())), now));
+        // Failed：退避期內不重發，期滿重試（負快取）。
+        let fresh = IconState::Failed(now - Duration::from_secs(300));
+        assert!(!icon_request_due(Some(&fresh), now));
+        let stale = IconState::Failed(now - (ICON_RETRY_AFTER + Duration::from_secs(1)));
+        assert!(icon_request_due(Some(&stale), now));
+    }
 
     #[test]
     fn vault_filter_four_way_exclusion() {
