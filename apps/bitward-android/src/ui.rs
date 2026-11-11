@@ -1378,12 +1378,13 @@ pub fn editor_page(
     let name = signal(base_name.clone());
     let user = signal(base_user.clone().unwrap_or_default());
     let pass = signal(base_pass.clone().unwrap_or_default());
-    let pass_shown = signal(false);
     let totp_seed = signal(String::new());
     let notes = signal(base_notes.clone().unwrap_or_default());
     let folder = signal::<Option<String>>(base_folder.clone());
     let fav = signal(base_fav);
     let err = signal(String::new());
+    let panel = signal(GenState::default());
+    let gen_draft = signal::<Option<String>>(None);
     let uris = signal(Arc::new(if base_uris.is_empty() {
         vec![UriRow { key: rand_key(), uri: String::new(), match_type: None }]
     } else {
@@ -1555,46 +1556,7 @@ pub fn editor_page(
                     .py_4()
                     .child(form_field("名稱", "項目名稱（必填）", name, false))
                     .child(form_field("帳號", "帳號（可留空）", user, false))
-                    .child(
-                        view()
-                            .flex_col()
-                            .gap_1p5()
-                            .child(field_label("密碼"))
-                            .child(
-                                view()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        input()
-                                            .value(move || pass.get())
-                                            .placeholder("密碼（可留空）".to_owned())
-                                            .placeholder_color(move || color(theme::TEXT_MUTED))
-                                            .masked(move || !pass_shown.get())
-                                            .on_change(move |t: &str| pass.set(t.to_owned()))
-                                            .h(px(theme::INPUT_H))
-                                            .px_3()
-                                            .flex_1()
-                                            .rounded(px(theme::RADIUS_CONTROL))
-                                            .border(px(1.0))
-                                            .border_color(theme::HAIRLINE)
-                                            .bg(theme::SURFACE)
-                                            .text_color(theme::TEXT_PRIMARY)
-                                            .text_size(px(theme::TEXT_FIELD_VALUE))
-                                            .focus(|s| s.border_color(theme::ACCENT)),
-                                    )
-                                    .child(ghost_button(
-                                        move || {
-                                            if pass_shown.get() {
-                                                "隱藏"
-                                            } else {
-                                                "顯示"
-                                            }
-                                        },
-                                        move || pass_shown.set(!pass_shown.get()),
-                                    )),
-                            ),
-                    )
+                    .child(password_with_generator(hub.clone(), pass, panel, gen_draft, err))
                     .child(form_field(
                         "驗證碼 seed",
                         "驗證碼 seed（可留空；編輯不改動＝保留原 seed）",
@@ -1712,6 +1674,270 @@ pub fn editor_page(
             dismiss_editor.set(None);
         })
         .child(content)
+}
+
+/// 密碼產生器面板狀態（語意同 macOS `passgen::GenState`：長度夾官方界
+/// 5–128、預設 20、六旗＝長度＋五開關）。純結構可單測；隨機數在 hub 引擎。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct GenState {
+    pub open: bool,
+    pub length: usize,
+    pub uppercase: bool,
+    pub lowercase: bool,
+    pub digits: bool,
+    pub symbols: bool,
+    /// 官方 avoid_ambiguous：排除易混淆字元 `I O l 0 1`。
+    pub avoid_ambiguous: bool,
+}
+
+pub const GEN_LENGTH_MIN: usize = 5;
+pub const GEN_LENGTH_MAX: usize = 128;
+pub const GEN_LENGTH_DEFAULT: usize = 20;
+
+impl Default for GenState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            length: GEN_LENGTH_DEFAULT,
+            uppercase: true,
+            lowercase: true,
+            digits: true,
+            symbols: true,
+            avoid_ambiguous: false,
+        }
+    }
+}
+
+impl GenState {
+    pub fn set_length(&mut self, length: usize) {
+        self.length = length.clamp(GEN_LENGTH_MIN, GEN_LENGTH_MAX);
+    }
+
+    /// 至少留一個字元集：全關時引擎空集必錯，前端先擋（macOS 同形）。
+    pub fn has_charset(&self) -> bool {
+        self.uppercase || self.lowercase || self.digits || self.symbols
+    }
+
+    /// 面板旗標 → 引擎參數的唯一換算點（digits↔numbers、symbols↔special
+    /// 的欄名對應活在這裡，不散進呼叫端）。
+    pub fn to_options(&self) -> bw_crypto::PasswordOptions {
+        bw_crypto::PasswordOptions {
+            length: self.length.clamp(GEN_LENGTH_MIN, GEN_LENGTH_MAX),
+            lowercase: self.lowercase,
+            uppercase: self.uppercase,
+            numbers: self.digits,
+            special: self.symbols,
+            avoid_ambiguous: self.avoid_ambiguous,
+        }
+    }
+}
+
+/// 密碼欄＋產生器（手機表單；語意同 macOS `form::password_with_generator`）：
+/// 「產生」摺疊面板，隨機數走 `Hub::generate_password`（共用 bw-crypto 引擎），
+/// 這裡只做訊號與排版。顯示／隱藏與產生共用同一個 `password` 訊號，套用＝
+/// 把草稿寫回該訊號，差量與存檔路徑不變。
+fn password_with_generator(
+    hub: Arc<Hub>,
+    password: Signal<String>,
+    panel: Signal<GenState>,
+    draft: Signal<Option<String>>,
+    err: Signal<String>,
+) -> View {
+    let shown = signal(false);
+    let toggle_gen = panel;
+    let label_gen = panel;
+    let panel_hub = hub;
+    view()
+        .flex_col()
+        .gap_1p5()
+        .child(field_label("密碼"))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    input()
+                        .value(move || password.get())
+                        .placeholder("密碼（可留空）".to_owned())
+                        .placeholder_color(move || color(theme::TEXT_MUTED))
+                        .masked(move || !shown.get())
+                        .on_change(move |t: &str| password.set(t.to_owned()))
+                        .h(px(theme::INPUT_H))
+                        .px_3()
+                        .flex_1()
+                        .rounded(px(theme::RADIUS_CONTROL))
+                        .border(px(1.0))
+                        .border_color(theme::HAIRLINE)
+                        .bg(theme::SURFACE)
+                        .text_color(theme::TEXT_PRIMARY)
+                        .text_size(px(theme::TEXT_FIELD_VALUE))
+                        .focus(|s| s.border_color(theme::ACCENT)),
+                )
+                .child(ghost_button(
+                    move || if shown.get() { "隱藏" } else { "顯示" },
+                    move || shown.set(!shown.get()),
+                ))
+                .child(ghost_button(
+                    move || if label_gen.get().open { "收起" } else { "產生" },
+                    move || toggle_gen.update(|g| g.open = !g.open),
+                )),
+        )
+        .child(when(
+            move || panel.get().open,
+            move || generator_panel(panel_hub.clone(), password, panel, draft, err),
+        ))
+}
+
+/// 產生器面板（手機版式，macOS `form::generator` 的語意等位）：長度 −/+
+/// 步進、五開關 chip、草稿行＋重新產生／套用。有草稿才現「套用」。
+fn generator_panel(
+    hub: Arc<Hub>,
+    password: Signal<String>,
+    panel: Signal<GenState>,
+    draft: Signal<Option<String>>,
+    err: Signal<String>,
+) -> View {
+    let minus_gen = panel;
+    let plus_gen = panel;
+    let draft_now = draft;
+    let regen_hub = hub;
+    let regen_gen = panel;
+    let regen_draft = draft;
+    let regen_err = err;
+    let draft_present = draft;
+    let apply_draft = draft;
+    let apply_pw = password;
+    view()
+        .flex_col()
+        .gap_2p5()
+        .p_4()
+        .rounded(px(theme::RADIUS_BLOCK))
+        .border(px(1.0))
+        .border_color(theme::HAIRLINE)
+        .bg(theme::SURFACE)
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(field_label("長度"))
+                .child(step_button("−", move || {
+                    minus_gen.update(|g| g.set_length(g.length.saturating_sub(1)))
+                }))
+                .child(
+                    text(move || format!("{}", panel.get().length))
+                        .text_size(px(theme::TEXT_ROW))
+                        .text_color(theme::TEXT_PRIMARY),
+                )
+                .child(step_button("+", move || {
+                    plus_gen.update(|g| g.set_length(g.length.saturating_add(1)))
+                })),
+        )
+        .child(scroll().horizontal().scrollbar(false).child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(toggle_chip(panel, "大寫", |g| g.uppercase, |g| g.uppercase = !g.uppercase))
+                .child(toggle_chip(panel, "小寫", |g| g.lowercase, |g| g.lowercase = !g.lowercase))
+                .child(toggle_chip(panel, "數字", |g| g.digits, |g| g.digits = !g.digits))
+                .child(toggle_chip(panel, "符號", |g| g.symbols, |g| g.symbols = !g.symbols))
+                .child(toggle_chip(
+                    panel,
+                    "易讀",
+                    |g| g.avoid_ambiguous,
+                    |g| g.avoid_ambiguous = !g.avoid_ambiguous,
+                )),
+        ))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(dynamic(move || match draft_now.get() {
+                    Some(pw) => text(pw)
+                        .text_size(px(theme::TEXT_FIELD_VALUE))
+                        .text_color(theme::TEXT_PRIMARY)
+                        .flex_1(),
+                    None => text("按「重新產生」生成草稿")
+                        .text_size(px(theme::TEXT_ROW_SUB))
+                        .text_color(theme::TEXT_MUTED)
+                        .flex_1(),
+                }))
+                .child(ghost_button("重新產生", move || {
+                    let g = regen_gen.get();
+                    if !g.has_charset() {
+                        regen_err.set("請至少保留一個字元集".to_owned());
+                        return;
+                    }
+                    regen_err.set(String::new());
+                    match regen_hub.generate_password(&g.to_options()) {
+                        Ok(pw) => regen_draft.set(Some(pw)),
+                        Err(e) => regen_err.set(e),
+                    }
+                }))
+                .child(when(
+                    move || draft_present.get().is_some(),
+                    move || {
+                        primary_button("套用", move || {
+                            if let Some(pw) = apply_draft.get() {
+                                apply_pw.set(pw);
+                            }
+                        })
+                    },
+                )),
+        )
+}
+
+/// 開關 chip（膠囊選中態＝ACCENT，同 `pick_chip` 語言）：get 讀旗標、
+/// set 輪轉，選集由呼叫端給，狀態仍集中在 `GenState`。
+fn toggle_chip(
+    panel: Signal<GenState>,
+    label: &'static str,
+    get: fn(&GenState) -> bool,
+    set: fn(&mut GenState),
+) -> View {
+    let press_gen = panel;
+    view()
+        .h(px(theme::CHIP_H))
+        .px_3()
+        .rounded(px(theme::CHIP_H / 2.0))
+        .flex_row()
+        .items_center()
+        .cursor_pointer()
+        .active(|s| s.bg(theme::SURFACE_RAISED))
+        .on_press(move || press_gen.update(set))
+        .bg(move || if get(&panel.get()) { theme::ACCENT } else { theme::CHIP_BG })
+        .child(
+            text(label)
+                .text_size(px(theme::TEXT_CHIP))
+                .text_color(move || {
+                    if get(&panel.get()) {
+                        theme::TEXT_ON_ACCENT
+                    } else {
+                        theme::TEXT_SECONDARY
+                    }
+                }),
+        )
+}
+
+/// 方形步進鈕（44 觸控下限，同收藏星方鈕語彙）。
+fn step_button(label: &'static str, on_press: impl Fn() + 'static) -> View {
+    view()
+        .h(px(theme::BTN_H))
+        .w(px(theme::BTN_H))
+        .rounded(px(theme::RADIUS_CONTROL))
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .bg(theme::SURFACE_RAISED)
+        .border(px(1.0))
+        .border_color(theme::HAIRLINE)
+        .active(|s| s.opacity(0.7))
+        .on_press(on_press)
+        .child(text(label).text_size(px(18.0)).text_color(theme::TEXT_PRIMARY))
 }
 
 /// 網址列編輯器：每列＝輸入框＋match 輪轉膠囊＋✕；「新增網址」落尾。
@@ -2410,6 +2636,63 @@ mod tests {
     fn warn_threshold_within_period() {
         assert!(TOTP_WARN_SECS < TOTP_PERIOD_SECS);
         assert!(totp_remaining(5, 0) <= TOTP_WARN_SECS);
+    }
+
+    #[test]
+    fn gen_state_defaults_like_macos_panel() {
+        let g = GenState::default();
+        assert!(!g.open);
+        assert_eq!(g.length, GEN_LENGTH_DEFAULT);
+        assert!(g.has_charset());
+        assert!(!g.avoid_ambiguous);
+    }
+
+    #[test]
+    fn gen_state_clamps_length_to_official_bounds() {
+        let mut g = GenState::default();
+        g.set_length(2);
+        assert_eq!(g.length, GEN_LENGTH_MIN);
+        g.set_length(999);
+        assert_eq!(g.length, GEN_LENGTH_MAX);
+        // 步進到界內後再越界仍夾回端點（−/+ 鈕走 saturating＋set_length）。
+        g.set_length(5);
+        assert_eq!(g.length, GEN_LENGTH_MIN);
+    }
+
+    #[test]
+    fn gen_state_options_maps_flag_names_once() {
+        // digits↔numbers、symbols↔special 的換算只活在 to_options：
+        // 面板五旗逐一翻成引擎參數，错一個就產生錯字集（e2e A21 走真引擎）。
+        let g = GenState {
+            open: true,
+            length: 30,
+            uppercase: false,
+            lowercase: true,
+            digits: false,
+            symbols: true,
+            avoid_ambiguous: true,
+        };
+        let o = g.to_options();
+        assert_eq!(
+            o,
+            bw_crypto::PasswordOptions {
+                length: 30,
+                lowercase: true,
+                uppercase: false,
+                numbers: false,
+                special: true,
+                avoid_ambiguous: true,
+            }
+        );
+        // 全關字集＝has_charset 擋下（引擎端 NoCharacterSetEnabled 的同義前閘）。
+        let off = GenState {
+            uppercase: false,
+            lowercase: false,
+            digits: false,
+            symbols: false,
+            ..Default::default()
+        };
+        assert!(!off.has_charset());
     }
 
     fn row(key: u32, uri: &str, m: Option<u8>) -> UriRow {

@@ -322,7 +322,7 @@ x=1188，「重新同步」文字截斷、「鎖定」整個出屏，uiautomator
 | `Vault:Attachment` | 附件上傳／下載／刪除 | 詳情無附件節 |
 | `Vault:FindDuplicates`／`Merge` | 查重與合併 | — |
 | `Passkey:*` 全面 | GetPasskeys/DeletePasskey/Register/Assert；CredentialProviderService 只骨架 | 詳情無 passkey 節；孤島 passkey 未接線 |
-| `Use:GeneratePassword` | 密碼產生器 | 表單無產生器面板（macOS 有） |
+| `Use:GeneratePassword` | ~~密碼產生器~~ 收尾批已補：`Hub::generate_password`（bw-crypto 引擎等位）＋表單產生面板（長度步進＋五開關＋重新產生／套用） | 已了結（驗收 A21） |
 | `Sync:ListConflicts`／`ResolveConflict` | 衝突收件匣 | outbox 衝突進 bw-store 表，app 無 UI 入口 |
 | `Admin:GetSettings`／`SetSettings` | 本機設定面（自動鎖定／剪貼簿清除／重啟鎖定／鎖定清搜尋） | app 無設定頁；複製鈕無定時清除；**無自動鎖定**（金鑰長駐記憶體至手動「鎖定」） |
 | `Auth:ChangePassword` | 改主密碼 | — |

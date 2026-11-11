@@ -496,6 +496,17 @@ impl Hub {
         Ok(Some((code, (30 - now % 30) as u32)))
     }
 
+    /// 密碼產生器（daemon `Use:GeneratePassword` 的 in-process 等位物）：
+    /// 隨機數與字集組裝全在共用 bw-crypto 引擎，本層只把引擎錯誤翻成可懂
+    /// 字串（邊界紀律：UI 收字串不收 CryptoError）。不需解鎖——產生器不碰金鑰。
+    pub fn generate_password(&self, opts: &bw_crypto::PasswordOptions) -> Result<String, String> {
+        bw_crypto::generate_password(opts).map_err(|e| match e {
+            bw_crypto::CryptoError::InvalidLength => "長度需介於 5–128".to_owned(),
+            bw_crypto::CryptoError::NoCharacterSetEnabled => "請至少啟用一個字元集".to_owned(),
+            other => format!("產生失敗：{other}"),
+        })
+    }
+
     /// favicon 取圖（daemon `icon.rs` 的 in-process 等位物）：磁碟快取命中
     /// （TTL 7 天）直接回 data URI；miss → 單飛閘＋雙重檢查 → 打伺服器
     /// `{base}icons/{host}/icon.png`（root 路徑，VW 實錄）→ 原子落盤 → 回包。
@@ -1684,6 +1695,44 @@ mod tests {
         assert!(!hub.is_unlocked());
         assert!(hub.list("").is_empty());
         assert!(hub.reveal(ItemId::new_v4()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn generate_password_surface_honors_opts_and_maps_errors() {
+        let dir =
+            std::env::temp_dir().join(format!("bitward-android-test-{}", uuid::Uuid::new_v4()));
+        let hub = Hub::open(dir.clone()).expect("hub opens");
+        // 鎖定態可用（產生器不碰金鑰）＋只開數字：現值全為數字、長度如請求。
+        let only_digits = bw_crypto::PasswordOptions {
+            length: 12,
+            lowercase: false,
+            uppercase: false,
+            numbers: true,
+            special: false,
+            avoid_ambiguous: false,
+        };
+        let pw = hub.generate_password(&only_digits).expect("digits-only generates");
+        assert_eq!(pw.len(), 12);
+        assert!(pw.chars().all(|c| c.is_ascii_digit()), "got {pw}");
+        // 引擎錯誤在本邊界翻成可懂字串（UI 直接顯示）。
+        assert_eq!(
+            hub.generate_password(&bw_crypto::PasswordOptions {
+                length: 20,
+                lowercase: false,
+                uppercase: false,
+                numbers: false,
+                special: false,
+                avoid_ambiguous: false,
+            })
+            .unwrap_err(),
+            "請至少啟用一個字元集"
+        );
+        assert_eq!(
+            hub.generate_password(&bw_crypto::PasswordOptions { length: 4, ..Default::default() })
+                .unwrap_err(),
+            "長度需介於 5–128"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Android P4b 驗收（契約 §5 P4 列「Android track 自此起平行」）。
 #
-# 二十斷言（A1–A20）：
+# 二十一斷言（A1–A21）：
 #   A1 in-process 核心（bw-crypto/bw-server/bw-store）交叉編譯進三 ABI 的 APK
 #   A2 app 裝進 emulator 並啟動到登入畫面（原生 nav 標題渲染）
 #   A3 真實 UI 路徑完成登入：prelogin→派生→password grant→user key 解封→sync→明文索引
@@ -37,6 +37,10 @@
 #   A20 autofill 冷啟定案：封存金鑰綁使用者驗證 → service 冷啟無 UI 彈窗，
 #       30 秒視窗外誠實鎖態（silent unseal denied＋fill locked sealed=true＋
 #       「尚未解鎖」截圖）；一鍵引導拉開解鎖閘→生物解鎖→下一次 fill 真候選
+#   A21 表單密碼產生器：「產生」展開面板（長度步進＋五開關 chip）→「重新產生」
+#       走真引擎出 20 字元草稿（關符號避免 dump 轉義）→「套用」後密碼欄現值
+#       ＝草稿（遮罩解開比對）→存檔「待推送」→drain 收斂→暫時 daemon 對 VW
+#       reveal 出該產生值。產生值隨機、不走打字（IME 教訓沿用：段先關服務）
 # 產物：apps/bitward-android/shots/*.png（截圖）與 .nsh/out/bitward-islands.apk
 #       （孤島＋nsh 中樞的合併 APK；A1–A7 裝的就是這顆）
 set -euo pipefail
@@ -960,6 +964,72 @@ wait_text "bitward-selftest" 15 || { $ADB logcat -d | grep bitward-island | tail
   || fail "A20 解鎖後的 fill 沒走 unlocked=true 分支"
 shot 20-cold-after-unlock
 pass "A20 冷啟：視窗外誠實鎖態（sealed 感知）→一鍵引導＋生物解鎖→真候選"
+
+# --- 21. A21：表單密碼產生器（展開→真引擎草稿→套用→存檔收斂 VW） -------------
+# 產生值是隨機數，不走打字通道；表單段照 A12 教訓先關 autofill 服務再重啟
+# 登入（名稱欄仍要 focus 打字）。關「符號」讓草稿＝純英數，uiautomator dump
+# 的 text 屬性免 XML 轉義，可直接抽取比對。
+$ADB shell am force-stop $PKG
+$ADB shell settings put secure autofill_service null >/dev/null 2>&1 || true
+$ADB shell settings put secure current_autofill_service null >/dev/null 2>&1 || true
+$ADB shell monkey -p $PKG -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+wait_text "登入你的密碼庫" 30 || fail "A21 重啟後登入畫面沒出現"
+tap_text a21-pw "只用於派生金鑰，不落地"
+type_text "$WP"
+hide_ime
+auth_device
+tap_text a21-login "登入"
+wait_login "鏡像 8 筆" 40 || { $ADB logcat -d | grep -E 'nsh|AndroidRuntime' | tail -20; fail "A21 重新登入失敗"; }
+tap_text a21-add "新增"
+wait_text "新增項目" 10 || fail "A21 表單沒出現"
+tap_text a21-name "項目名稱（必填）"
+type_text "e2e-gen"
+hide_ime
+tap_text a21-gen "產生"
+dump /tmp/android-a21-panel.xml
+has_text /tmp/android-a21-panel.xml "大寫" \
+  || fail "A21「產生」沒展開面板（缺開關 chip，見 /tmp/android-a21-panel.xml）"
+shot 21-generator-panel
+tap_text a21-sym "符號"
+tap_text a21-regen "重新產生"
+dump /tmp/android-a21-draft.xml
+GENPW=$(python3 -c "
+import re, sys
+x = open(sys.argv[1]).read()
+for m in re.finditer(r'text=\"([^\"]*)\"', x):
+    if re.fullmatch(r'[A-Za-z0-9]{20}', m.group(1)):
+        print(m.group(1)); break
+" /tmp/android-a21-draft.xml)
+[[ -n "$GENPW" ]] || fail "A21 面板沒出現 20 字元英數草稿（見 /tmp/android-a21-draft.xml）"
+# 套用＝草稿寫回密碼欄：解遮罩讀現值與草稿逐字比對（「值改變」的觀察形態）。
+tap_text a21-apply "套用"
+tap_text a21-show "顯示"
+dump /tmp/android-a21-applied.xml
+has_text /tmp/android-a21-applied.xml "$GENPW" \
+  || fail "A21 套用後密碼欄現值非草稿 $GENPW（見 /tmp/android-a21-applied.xml）"
+shot 21-generator-applied
+tap_text a21-save "儲存"
+wait_text "e2e-gen" 15 || fail "A21 新增後列表沒出現該筆"
+assert_pending a21-pending e2e-gen || fail "A21 沒進「待推送」態（也無背景收斂軌跡）"
+tap_text a21-sync "重新同步"
+wait_text "重新同步" 60 || fail "A21 同步沒完成（一直卡在 Busy）"
+dump /tmp/android-a21-synced.xml
+if has_text /tmp/android-a21-synced.xml "待推送"; then fail "A21 同步後「待推送」沒清"; fi
+# VW 端收斂：暫時 daemon reveal 的密碼必須就是套用那組隨機值（金鑰鏈同 A12 口徑）。
+BITWARD_DATA_DIR="$PWD/$DA" "$DAEMON" --data-dir "$DA" --sock "$DA/s5" >"$DA/log5" 2>&1 &
+HUB_PID=$!
+trap 'kill $HUB_PID 2>/dev/null || true' EXIT
+sleep 1
+B5() { "$CLI" --sock "$DA/s5" "$@"; }
+echo "$WP" | B5 login --server "$SRV_HOST" --email "$EMAIL" --password-stdin >/dev/null \
+  || fail "A21 暫時 daemon 登入失敗"
+B5 sync >/dev/null
+GENID=$(B5 --json ls --text "e2e-gen" | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(rows[0]["meta"]["id"] if rows else "")')
+[[ -n "$GENID" ]] || fail "A21 伺服器鏡像沒有 e2e-gen（push 未送達 VW）"
+REVEAL=$(B5 --json reveal "$GENID")
+[[ "$REVEAL" == *"\"password\": \"$GENPW\""* ]] || fail "A21 VW 端密碼非產生值：$REVEAL"
+shot 21-vault-converged
+pass "A21 產生器：面板展開→真引擎 20 字元草稿→套用改密碼欄現值→存檔收斂 VW"
 
 echo
 echo "截圖：$(ls "$SHOTS" | tr '\n' ' ')"

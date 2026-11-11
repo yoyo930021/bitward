@@ -19,7 +19,7 @@ Full 形態＝app 內等位物）。
 | 手機皮（`src/theme.rs` tokens）：44px 列表＋favicon/字母/型別磚三級退路、資料夾 chip 列取代側欄、右下 FAB、詳情分節值塊＋TOTP 自動碼（進頁即取、倒數條、跨窗重取） | 卡片／身份／安全備忘型別的表單（列表與詳情認得四型別，表單只建 Login） |
 | 列表（搜尋走 bw-store 的 FTS5／LIKE）、詳情 Reveal、收藏星真寫入 | 標籤寫入（daemon `Vault:Overlay` 等位物缺，tags 唯讀） |
 | 鎖定＝丟棄 user key（Drop 歸零）、重新同步 | 資料夾建立／刪除（chip 列唯讀鏡像） |
-| 新增／編輯＝全頁表單：多網址（含官方六態 match 輪轉）、自訂欄（文字／隱藏／布林）、TOTP seed、備註、收藏、資料夾；預填走 Reveal、送欄位級差量（key 對齊三批）；刪除二次確認＝軟刪；寫入走鏡像＋outbox 同交易（契約 §2.4），「待推送」由背景輪收斂（寫入即踢＋15 分鐘週期，第五批；手動「重新同步」仍是立刻收斂的捷徑，驗收 A12–A15） | |
+| 新增／編輯＝全頁表單：多網址（含官方六態 match 輪轉）、自訂欄（文字／隱藏／布林）、TOTP seed、備註、收藏、資料夾；密碼欄附產生器面板（「產生」摺疊：長度 5–128 步進＋大寫/小寫/數字/符號/易讀五開關＋重新產生／套用，隨機數走共用 bw-crypto 引擎，驗收 A21）；預填走 Reveal、送欄位級差量（key 對齊三批）；刪除二次確認＝軟刪；寫入走鏡像＋outbox 同交易（契約 §2.4），「待推送」由背景輪收斂（寫入即踢＋15 分鐘週期，第五批；手動「重新同步」仍是立刻收斂的捷徑，驗收 A12–A15） | |
 
 ## 建與跑
 
@@ -67,6 +67,9 @@ commit 後欄位出現真 username）。A15–A17 驗第四批：新皮層級（
 44dp 列節拍）、全頁表單建 TOTP 項目、autofill save 全鏈（探針頁 SaveInfo→
 onSaveRequest→outbox→drain→VW reveal 實帳密）、詳情 TOTP 自動碼與本機
 HMAC 同值。連跑兩輪皆綠才算收案（IME 教訓：打字段關服務、驗證段開服務）。
+A21 驗表單產生器：「產生」展開面板、「重新產生」走真引擎出隨機草稿、
+「套用」後解遮罩比對密碼欄現值、存檔收斂 VW reveal＝該草稿（產生值隨機，
+不走打字通道）。
 
 ## 檔案
 
@@ -75,7 +78,7 @@ HMAC 同值。連跑兩輪皆綠才算收案（IME 教訓：打字段關服務�
 | `src/lib.rs` | 根元件：`nav_stack` + 狀態機（SignedOut → Busy → Vault），詳情與全頁表單是 push 上去的頁 |
 | `src/ui.rs` | 登入頁、列表（chip 列＋FAB）、詳情頁（分節值塊＋TOTP 自動碼）、全頁表單；純排版與訊號，零業務語意 |
 | `src/theme.rs` | 設計 tokens（雙槽色板、觸控密度 44/44/56）；視圖層唯一的顏色與尺寸真相源 |
-| `src/hub.rs` | in-process 中樞編排（KDF/登入/sync/索引/Reveal/候選/資料夾/TOTP/取圖/寫入/autofill 存檔/鎖定＋**Keystore 封存記錄、漂移判定、免重派生解鎖、背景輪與退避純函數**） |
+| `src/hub.rs` | in-process 中樞編排（KDF/登入/sync/索引/Reveal/候選/資料夾/TOTP/產生器（`generate_password`＝daemon `Use:GeneratePassword` 等位物）/取圖/寫入/autofill 存檔/鎖定＋**Keystore 封存記錄、漂移判定、免重派生解鎖、背景輪與退避純函數**） |
 | `src/island.rs` | Rust→Kotlin 反向 JNI 橋（`nshBindBridge` 綁 object 實例 GlobalRef；seal/unseal 走 `Zeroizing<Vec<u8>>`；專屬 tokio 池擋生物辨識閂，不佔 nsh 引擎線） |
 | `src/jni.rs` | 孤島↔中樞的 JNI 橋（`NativeHub` 的九支符號：ready/unlocked/candidates/reveal/save＋bindBridge/hasSealed/trySilentUnseal/backgroundRun；panic 擋在邊界內） |
 | `android-shell/` | Kotlin 孤島的 Gradle 外殼（AutofillService／CredentialProviderService／Keystore／HubService＋`build.sh` 組裝鏈；說明見其 README） |
@@ -121,6 +124,7 @@ commit 的**未追蹤**原始檔（例：`apps/bitward-gui/src/*.rs` 曾被這�
    惰性裝載在 `HubHolder.ensureBridge()`，驗收 A11。）
 4. 匯出（未加密提醒）與 UnifiedPush distributor 接單。
 5. daemon 面缺角（本機中樞等位物尚未提供的呼叫面，全表見
-   `docs/design/android-findings.md` P4b 第四批「缺角清單」）：Restore／Purge／
-   SetArchived 寫入與垃圾桶視角、標籤寫入、資料夾建立／刪除、密碼產生器、
+   `docs/design/android-findings.md` P4b 第四批「缺角清單」；密碼產生器已補，
+   見驗收 A21）：Restore／Purge／
+   SetArchived 寫入與垃圾桶視角、標籤寫入、資料夾建立／刪除、
    本機設定面（自動鎖定／剪貼簿清除）、Passkey 面、附件、org 共享寫入。
