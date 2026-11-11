@@ -410,7 +410,7 @@ fn find_view(core: &AppCore, name: &str) -> Option<bw_proto::ItemView> {
 /// 批准佇列（gated session 造真 pending：41 佇列有筆＋時間欄斷言、42 批准後
 /// 清空＋徽章消失）→ 髒退出閘（編輯器弄髒被導航攔下走確認框，shot-43，
 /// 拒絕留 edit、確認放棄完成重投）→ 已封存視角（封存→主列表消失→視角帶時間可見→
-/// 取消回主列表，shot-52）→ favicon 實圖（GitHub 測試詳情＋列表圖示磚，shot-53）→
+/// 取消回主列表，shot-52）→ favicon 實圖（GitHub 測試詳情＋列表圖示磚，shot-53）→ 產生器兩幀（編輯態產生面板展開 shot-54、獨立產生器頁 shot-55）→
 /// 暗色皮自查三張（列表/詳情/新增器，SetTheme(Dark) 即時翻轉不重建視窗），
 /// 各步存一張 shot-N-*.png 後結束行程。時序裕量對齊
 /// spike（Background
@@ -688,11 +688,21 @@ pub fn script(dir: PathBuf, core: AppCore) {
         let fid = folder_id_by_name(&c, "工作資料夾");
         if !fid.is_empty() {
             c.form.folder_id.set(fid);
-            c.send(Cmd::SubmitForm);
         }
     });
+    // 批次 9：編輯態產生器——morph 密碼欄的「產生」鈕接回面板（共用元件），
+    // 展開＋現算草稿＝shot-54。
     let c = core.clone();
-    at(41000, move || {
+    at(40200, move || {
+        c.form.gen_panel.update(|g| g.open = true);
+        c.send(Cmd::GeneratePassword);
+    });
+    let d = dir.clone();
+    at(40700, move || capture(&d, "shot-54-edit-generator.png"));
+    let c = core.clone();
+    at(41000, move || c.send(Cmd::SubmitForm));
+    let c = core.clone();
+    at(41400, move || {
         let fid = folder_id_by_name(&c, "工作資料夾");
         if !fid.is_empty() {
             c.send(Cmd::ChooseFolder(Some(fid)));
@@ -1022,29 +1032,34 @@ fn poll_attachment_row(dir: PathBuf, core: AppCore, ms: u64) {
         });
         let df = dir.clone();
         at(ms + 9300, move || capture(&df, "shot-53-favicon.png"));
+        // —— 產生器頁（批次 9）：進頁自動現算一碼 ——
+        let cg = core.clone();
+        at(ms + 9700, move || cg.send(Cmd::OpenGenerator));
+        let dg = dir.clone();
+        at(ms + 10500, move || capture(&dg, "shot-55-generator-page.png"));
         // —— 暗色皮自查三張（列表／詳情／新增器）；收尾復原 system 預設 ——
         let c11 = core.clone();
-        at(ms + 9900, move || {
+        at(ms + 10900, move || {
             c11.send(Cmd::SetTheme(Appearance::Dark));
             c11.send(Cmd::OpenList);
         });
         let d3 = dir.clone();
-        at(ms + 10500, move || capture(&d3, "shot-38-dark-list.png"));
+        at(ms + 11500, move || capture(&d3, "shot-38-dark-list.png"));
         let c12 = core.clone();
-        at(ms + 10700, move || {
+        at(ms + 11700, move || {
             if let Some(id) = find_id(&c12, "2b 筆記範例") {
                 c12.send(Cmd::OpenDetail(id));
             }
         });
         let d4 = dir.clone();
-        at(ms + 11300, move || capture(&d4, "shot-39-dark-detail.png"));
+        at(ms + 12300, move || capture(&d4, "shot-39-dark-detail.png"));
         let c13 = core.clone();
-        at(ms + 11500, move || c13.send(Cmd::OpenCreate));
+        at(ms + 12500, move || c13.send(Cmd::OpenCreate));
         let d5 = dir.clone();
-        at(ms + 12100, move || capture(&d5, "shot-40-dark-modal.png"));
+        at(ms + 13100, move || capture(&d5, "shot-40-dark-modal.png"));
         let c14 = core.clone();
-        at(ms + 12400, move || c14.send(Cmd::SetTheme(Appearance::System)));
-        at(ms + 12800, quit);
+        at(ms + 13400, move || c14.send(Cmd::SetTheme(Appearance::System)));
+        at(ms + 13800, quit);
     });
 }
 

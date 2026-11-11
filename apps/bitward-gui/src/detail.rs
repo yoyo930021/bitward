@@ -366,7 +366,7 @@ fn credentials_section(core: AppCore, copied: Signal<Option<&'static str>>, edit
     if editing {
         return vec![
             edit_field("帳號", "使用者名稱或電子信箱", core.form.username, false),
-            edit_field("密碼", "（不變更；輸入新值以替換）", core.form.password, true),
+            form::password_with_generator(core.clone()),
             form::uris_editor(core.clone()),
             edit_field("標籤", "逗號分隔，例：dev, 工作", core.form.tags, false),
             form::folder_dropdown(core.clone()),

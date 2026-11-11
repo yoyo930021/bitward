@@ -127,11 +127,6 @@ fn password_hint(route: Route) -> &'static str {
 /// 帳密區塊（僅 Login 型別）：帳號、密碼＋產生器、網址。
 fn credentials_block(core: AppCore) -> View {
     let username = core.form.username;
-    let password = core.form.password;
-    let gen_panel = core.form.gen_panel;
-    let gen_cond = core.clone();
-    let gen_build = core.clone();
-    let pw_hint = password_hint(core.route.get());
     view()
         .flex_col()
         .gap(px(theme::FORM_GAP))
@@ -142,6 +137,21 @@ fn credentials_block(core: AppCore) -> View {
             false,
             move |v| username.set(v),
         ))
+        .child(password_with_generator(core.clone()))
+        .child(uris_editor(core.clone()))
+}
+
+/// 密碼列＋產生器摺疊面板（批次 9 抽共用：新增表單與詳情 inline 編輯態
+/// 同一份，零複製）。提示依 Route（編輯＝不變更語意）。
+pub(crate) fn password_with_generator(core: AppCore) -> View {
+    let password = core.form.password;
+    let gen_panel = core.form.gen_panel;
+    let gen_cond = core.clone();
+    let gen_build = core.clone();
+    let pw_hint = password_hint(core.route.get());
+    view()
+        .flex_col()
+        .gap_2()
         .child(
             view()
                 .flex_row()
@@ -161,7 +171,6 @@ fn credentials_block(core: AppCore) -> View {
             move || gen_cond.form.gen_panel.get().open,
             move || generator(gen_build.clone()),
         ))
-        .child(uris_editor(core.clone()))
 }
 
 /// 網址多列編輯器（批次 A＃1＋C）：每列＝uri 輸入框＋✕刪列、＋ 新增網址。
@@ -806,7 +815,7 @@ fn generator(core: AppCore) -> View {
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme::TEXT_MUTED),
                 )
-                .child(slider(core.clone()))
+                .child(slider_on(gen_panel))
                 .child(
                     text(move || format!("{}", gen_panel.get().length))
                         .text_size(px(theme::TEXT_ROW))
@@ -820,9 +829,14 @@ fn generator(core: AppCore) -> View {
                 .items_center()
                 .gap_2()
                 .child(switch_chip(
-                    "大小寫",
-                    move || gen_panel.get().letters,
-                    move || gen_panel.update(|g| g.letters = !g.letters),
+                    "大寫",
+                    move || gen_panel.get().uppercase,
+                    move || gen_panel.update(|g| g.uppercase = !g.uppercase),
+                ))
+                .child(switch_chip(
+                    "小寫",
+                    move || gen_panel.get().lowercase,
+                    move || gen_panel.update(|g| g.lowercase = !g.lowercase),
                 ))
                 .child(switch_chip(
                     "數字",
@@ -833,6 +847,13 @@ fn generator(core: AppCore) -> View {
                     "符號",
                     move || gen_panel.get().symbols,
                     move || gen_panel.update(|g| g.symbols = !g.symbols),
+                ))
+                .child(switch_chip(
+                    "易讀",
+                    move || gen_panel.get().avoid_ambiguous,
+                    move || {
+                        gen_panel.update(|g| g.avoid_ambiguous = !g.avoid_ambiguous)
+                    },
                 )),
         )
         .child(
@@ -877,9 +898,9 @@ fn generator(core: AppCore) -> View {
 }
 
 /// 長度滑桿：點擊定位、按住拖動連動；比例→長度由 `GenState` 純函數夾取。
-fn slider(core: AppCore) -> View {
-    let gen_panel = core.form.gen_panel;
-    let knob_gen = core.form.gen_panel;
+/// 綁定傳入的 `GenState` 訊號（表單面板與獨立產生器頁共用，零複製）。
+pub(crate) fn slider_on(gen_panel: Signal<GenState>) -> View {
+    let knob_gen = gen_panel;
     let pressed = signal(false);
     let hover_x = signal(0.0f32);
     view()
@@ -940,7 +961,7 @@ fn slider(core: AppCore) -> View {
 }
 
 /// 字元集開關膠囊（選中＝accent 描邊提亮，同 chips 語彙）。
-fn switch_chip(
+pub(crate) fn switch_chip(
     label: &'static str,
     on: impl Fn() -> bool + 'static,
     on_press: impl Fn() + 'static,

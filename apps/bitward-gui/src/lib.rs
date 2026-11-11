@@ -14,6 +14,7 @@ mod btp;
 mod detail;
 mod export;
 mod form;
+mod genpage;
 mod import;
 mod list;
 mod passgen;
@@ -355,6 +356,8 @@ fn sidebar(core: AppCore) -> View {
     let app_cnt = core.clone();
     let set_sel = core.clone();
     let set_press = core.clone();
+    let gen_sel = core.clone();
+    let gen_press = core.clone();
     let rep_sel = core.clone();
     let rep_press = core.clone();
     let send_sel = core.clone();
@@ -457,6 +460,14 @@ fn sidebar(core: AppCore) -> View {
             false,
             None,
             move || app_cnt.pending.get().len(),
+        ))
+        .child(side_item(
+            "產生密碼".to_owned(),
+            move || gen_sel.route.get() == Route::Generator,
+            move || gen_press.send(Cmd::OpenGenerator),
+            false,
+            None,
+            || 0,
         ))
         .child(side_item(
             "報告".to_owned(),
@@ -735,6 +746,7 @@ fn split(core: AppCore) -> View {
     let approvals_build = core.clone();
     let settings_build = core.clone();
     let reports_build = core.clone();
+    let gen_build = core.clone();
     let send_build = core.clone();
     let form_build = core.clone();
     view()
@@ -761,6 +773,7 @@ fn split(core: AppCore) -> View {
                         Route::Approvals => approvals::pane(approvals_build.clone()),
                         Route::Settings => settings::pane(settings_build.clone()),
                         Route::Reports => reports::pane(reports_build.clone()),
+                        Route::Generator => genpage::pane(gen_build.clone()),
                         Route::Send => send::pane(send_build.clone()),
                         Route::Create => form::pane(form_build.clone()),
                         Route::Edit(_) | Route::Detail(_) => {

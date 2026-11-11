@@ -46,6 +46,8 @@ pub enum Route {
     Settings,
     /// 報告儀表板（右欄視角，側欄「報告」進入；卡面→清單兩層同訊號切換）。
     Reports,
+    /// 獨立密碼產生器頁（批次 9：官方同款工具，右欄視角，側欄「產生密碼」）。
+    Generator,
     /// Send 加密分享（右欄視角，側欄「Send」進入；清單↔新增↔成功三態同訊號切換）。
     Send,
 }
@@ -306,6 +308,12 @@ pub enum Cmd {
     FetchSettings,
     /// 報告儀表板（路線 4）：卡面彙整＋兩份清單＋詳情頁歷史節。
     OpenReports,
+    /// 進入獨立密碼產生器頁（批次 9；進頁若無碼自動產生一組）。
+    OpenGenerator,
+    /// 產生器頁「重新產生」：現行政策走 daemon `Use:GeneratePassword`。
+    GenerateTool,
+    /// 產生器頁回包（Ok＝新碼；Err＝橫條可懂化）。
+    ToolGenerated(Result<String, String>),
     ShowReportsTab(ReportsTab),
     FetchReuse,
     FetchWeak,
@@ -883,6 +891,10 @@ pub struct AppCore {
     pub passkeys: Signal<Arc<Vec<bw_proto::PasskeyEntry>>>,
     /// 報告儀表板：視角兩態＋兩份報告鏡（daemon 現算、每次進入重取，不落盤）。
     pub reports_tab: Signal<ReportsTab>,
+    /// 產生器頁狀態機（批次 9）：政策六旗＋長度；與表單面板同型不同实例。
+    pub gen_tool: Signal<crate::passgen::GenState>,
+    /// 產生器頁現值（進頁/重新產生時由 daemon 現算）。
+    pub gen_tool_pw: Signal<Option<String>>,
     pub reports_reuse: Signal<Arc<Vec<bw_proto::DupGroup>>>,
     pub reports_weak: Signal<Arc<serde_json::Value>>,
     /// 詳情頁歷史節（Reports:CipherHistory 回包鏡；離開詳情即清，有才渲染）。
@@ -960,6 +972,8 @@ impl AppCore {
             settings: signal(bw_proto::Settings::default()),
             passkeys: signal(Arc::new(Vec::new())),
             reports_tab: signal(ReportsTab::Cards),
+            gen_tool: signal(crate::passgen::GenState::default()),
+            gen_tool_pw: signal(None),
             reports_reuse: signal(Arc::new(Vec::new())),
             reports_weak: signal(Arc::new(serde_json::json!({"threshold": bw_proto::WEAK_PASSWORD_THRESHOLD, "items": []}))),
             history: signal(Arc::new(serde_json::json!({"supported": false, "versions": []}))),
@@ -2010,6 +2024,36 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.settle();
             core.settings.set(v);
         }
+        Cmd::OpenGenerator => {
+            core.leave_detail();
+            core.sort_menu.set(false);
+            core.route.set(Route::Generator);
+            // 進頁即開即用（官方工具頁語意）：無碼補一發現算。
+            if core.gen_tool_pw.get().is_none() {
+                core.send(Cmd::GenerateTool);
+            }
+        }
+        Cmd::GenerateTool => {
+            let policy = core.gen_tool.get().policy();
+            if !core.gen_tool.get().has_charset() {
+                core.error_text.set(Some("請至少保留一個字元集".into()));
+                return;
+            }
+            core.ipc(move |s| match s.call(&Call::Use(UseCall::GeneratePassword { policy })) {
+                Ok(Response::Secret(pw)) => Cmd::ToolGenerated(Ok(pw)),
+                Ok(other) => Cmd::ToolGenerated(Err(format!(
+                    "GeneratePassword 回應形態不符：{other:?}"
+                ))),
+                Err(e) => Cmd::ToolGenerated(Err(e.display())),
+            });
+        }
+        Cmd::ToolGenerated(res) => {
+            core.settle();
+            match res {
+                Ok(pw) => core.gen_tool_pw.set(Some(pw)),
+                Err(e) => core.error_text.set(Some(e)),
+            }
+        }
         Cmd::OpenReports => {
             core.leave_detail();
             core.sort_menu.set(false);
@@ -3009,6 +3053,8 @@ fn nav_interrupts(cmd: &Cmd) -> bool {
             | Cmd::ChooseFolder(_)
             | Cmd::ToggleTrash
             | Cmd::ToggleArchived
+            | Cmd::OpenReports
+            | Cmd::OpenGenerator
     )
 }
 
