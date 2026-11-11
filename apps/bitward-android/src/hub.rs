@@ -717,10 +717,12 @@ impl Hub {
             *g = Some(Unlocked { client: client.clone(), user_key });
         }
         log::info!("keystore unseal ok（免重派生解鎖）");
+        // 保命先起再拉：FGS 覆蓋整個 unseal-sync（drain_lock 單飛讓背景輪
+        // 排隊而不是搶跑；通知存活＝pull＋round 的合力窗，e2e 抓得住）。
+        crate::island::ensure_hub_service();
         if let Err(e) = self.pull_and_index(client).await {
             log::warn!("unseal 後同步未完成（本地鏡像照讀）：{e}");
         }
-        crate::island::ensure_hub_service();
         self.local_snapshot().ok_or_else(|| "解封後狀態丟失".to_owned())
     }
 
