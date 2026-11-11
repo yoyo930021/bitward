@@ -6,19 +6,20 @@ NSH（`longbridge/nsh` 0.3.0，契約 §0.2）的純 Rust app，以 **in-process
 綁定面，也沒有「GUI 內嵌第二份金鑰」之外的信任邊界（契約 §1：Android 的
 Full 形態＝app 內等位物）。
 
-已交付的是**能用的登入路徑＋autofill 真候選與存檔＋vault 寫入 UI（手機皮）**，不是完整 UI：
+已交付的是**能用的登入路徑＋Keystore 封存與生物辨識解鎖＋autofill 真候選與存檔＋vault 寫入 UI（手機皮）＋startForeground 背景同步**，不是完整 UI：
 
 | 有 | 還沒有 |
 |---|---|
-| 登入頁（伺服器／信箱／主密碼，預填上次帳號） | Keystore 封存本體（Class 3 生成路徑已通，wrap/unwrap 接 `UnlockMachine` 在下一批） |
-| prelogin → 派生 → password grant → user key 解封 | 背景同步（`HubService` 已宣告，`startForeground` 尚未接；drain 目前只在「重新同步」與登入 pull 前觸發） |
+| 登入頁（伺服器／信箱／主密碼，預填上次帳號）＋**生物辨識直接解鎖**（Keystore 封存存在時；彈窗指紋／裝置憑證免 KDF 重派生） | 自動鎖定計時器（settings 面 daemon 已有，App 未接；30 秒驗證視窗只管 Keystore 金鑰可用性，不管鎖屏） |
+| prelogin → 派生 → password grant → user key 解封＋**Keystore 封存落盤**（`sealed.json`＝IV‖ct‖tag＋PUK 漂移錨，驗收 A18） | 金鑰輪換重封（改主密碼在別端 → 漂移作廢舊封存、誠實回密碼登入；rotate-user-account-keys 範圍外） |
 | 全量 sync → 鏡像落地 → 明文索引回填 | 附件、org 共享（共享項目寫入直接拒絕，不產生壞密文）、衝突收件匣 UI |
-| AutofillService 解鎖態真候選填充（JNI 橋接同程序中樞；鎖定態面板列「尚未解鎖」，點它拉開 app 解鎖＝解鎖引導） | Autofill 存檔的系統提示自訂 UI（現行走框架預設 Save 鈕；存檔鏈本身已真寫入） |
+| **背景同步**：`HubService` startForeground（dataSync＋33+ 通知權限）＋JobScheduler 15 分鐘週期＋寫入即踢 drain（退避 30s→10min 純函數測）＋e2e 強制 tick（驗收 A19） | UnifiedPush／推播喚醒（節拍靠週期 job 與事件，非伺服器推） |
+| AutofillService 解鎖態真候選填充（JNI 橋接同程序中樞；鎖定態面板列「尚未解鎖」，點它拉開 app 解鎖＝解鎖引導；**冷啟在 30 秒驗證視窗內靜默解封直接回真候選**，視窗外誠實鎖態，驗收 A20） | Autofill 存檔的系統提示自訂 UI（現行走框架預設 Save 鈕；存檔鏈本身已真寫入） |
 | Autofill save 真寫入：未儲存組合 fill 回 SaveInfo→提交→`Hub::save_from_autofill`（同帳號改密＝patch 密碼欄、查無＝create）→outbox「待推送」→drain 收斂（驗收 A16） | 衝突收件匣、自動鎖定／剪貼簿清除（本機設定面 daemon 已有，App 未接） |
 | 手機皮（`src/theme.rs` tokens）：44px 列表＋favicon/字母/型別磚三級退路、資料夾 chip 列取代側欄、右下 FAB、詳情分節值塊＋TOTP 自動碼（進頁即取、倒數條、跨窗重取） | 卡片／身份／安全備忘型別的表單（列表與詳情認得四型別，表單只建 Login） |
 | 列表（搜尋走 bw-store 的 FTS5／LIKE）、詳情 Reveal、收藏星真寫入 | 標籤寫入（daemon `Vault:Overlay` 等位物缺，tags 唯讀） |
 | 鎖定＝丟棄 user key（Drop 歸零）、重新同步 | 資料夾建立／刪除（chip 列唯讀鏡像） |
-| 新增／編輯＝全頁表單：多網址（含官方六態 match 輪轉）、自訂欄（文字／隱藏／布林）、TOTP seed、備註、收藏、資料夾；預填走 Reveal、送欄位級差量（key 對齊三批）；刪除二次確認＝軟刪；寫入走鏡像＋outbox 同交易（契約 §2.4），「待推送」由「重新同步」drain 收斂（驗收 A12–A15） | |
+| 新增／編輯＝全頁表單：多網址（含官方六態 match 輪轉）、自訂欄（文字／隱藏／布林）、TOTP seed、備註、收藏、資料夾；預填走 Reveal、送欄位級差量（key 對齊三批）；刪除二次確認＝軟刪；寫入走鏡像＋outbox 同交易（契約 §2.4），「待推送」由背景輪收斂（寫入即踢＋15 分鐘週期，第五批；手動「重新同步」仍是立刻收斂的捷徑，驗收 A12–A15） | |
 
 ## 建與跑
 
@@ -74,8 +75,9 @@ HMAC 同值。連跑兩輪皆綠才算收案（IME 教訓：打字段關服務�
 | `src/lib.rs` | 根元件：`nav_stack` + 狀態機（SignedOut → Busy → Vault），詳情與全頁表單是 push 上去的頁 |
 | `src/ui.rs` | 登入頁、列表（chip 列＋FAB）、詳情頁（分節值塊＋TOTP 自動碼）、全頁表單；純排版與訊號，零業務語意 |
 | `src/theme.rs` | 設計 tokens（雙槽色板、觸控密度 44/44/56）；視圖層唯一的顏色與尺寸真相源 |
-| `src/hub.rs` | in-process 中樞編排（KDF/登入/sync/索引/Reveal/候選/資料夾/TOTP/取圖/寫入/autofill 存檔/鎖定） |
-| `src/jni.rs` | 孤島↔中樞的 JNI 橋（`NativeHub` 的五支符號：ready/unlocked/candidates/reveal/save；panic 擋在邊界內） |
+| `src/hub.rs` | in-process 中樞編排（KDF/登入/sync/索引/Reveal/候選/資料夾/TOTP/取圖/寫入/autofill 存檔/鎖定＋**Keystore 封存記錄、漂移判定、免重派生解鎖、背景輪與退避純函數**） |
+| `src/island.rs` | Rust→Kotlin 反向 JNI 橋（`nshBindBridge` 綁 object 實例 GlobalRef；seal/unseal 走 `Zeroizing<Vec<u8>>`；專屬 tokio 池擋生物辨識閂，不佔 nsh 引擎線） |
+| `src/jni.rs` | 孤島↔中樞的 JNI 橋（`NativeHub` 的九支符號：ready/unlocked/candidates/reveal/save＋bindBridge/hasSealed/trySilentUnseal/backgroundRun；panic 擋在邊界內） |
 | `android-shell/` | Kotlin 孤島的 Gradle 外殼（AutofillService／CredentialProviderService／Keystore／HubService＋`build.sh` 組裝鏈；說明見其 README） |
 | `nsh.json` | app 中繼資料；`"root": "App"` 指到 Rust 根元件 |
 

@@ -410,3 +410,175 @@ A16 修綠後 A17 首次真跑即紅。排查鏈：app 顯示碼 770097 不在�
 碰巧仍對）；斷言失敗先驗斷言本體。另注：VW 端 `totp_available:false`——server sync 回應不含 `login.totp`
 （push 是否帶到無從直接觀察；本地鏡像經欄位級合併存活，A17 只依賴本地碼值，
 不受擾）。此觀察屬 daemon/Hub 面既有邊界，本批不动。
+
+## P4b 第五批（2026-11-11）：Keystore 封存上鎖＋冷啟解鎖＋startForeground 背景同步（A18–A20）
+
+### 定案形態（契約「形態以實測為準」）
+
+- **封存鑰＝AndroidKeyStore AES-256-GCM Class 3**（`setUserAuthenticationRequired`
+  ＋30 秒視窗＋`setUnlockedDeviceRequired(30+)`＋允許指紋 STRONG／裝置憑證；
+  emulator 無 StrongBox，A10 的降級路就是正式行為）。Class 3 EC 探針金鑰留作
+  A10 橋通證明，不參與包裹（EC 無 encrypt 面）。
+- **分工**：Kotlin 持鑰與密碼學（`KeyStoreBridge`＋`BitwardKeyStore`），Rust 持
+  記錄格式與判定（`hub.rs` 的 `SealedRecord`/`sealed_matches`/`drain_backoff`
+  純函數＋單測）。`sealed.json`（`noBackupFilesDir/bitward/`，即資料目錄根）＝
+  `{v,email,puk,blob_b64}`，blob＝IV(12)‖密文‖tag；`puk` 錨定封存當下的
+  Protected Symmetric Key——主密碼在別處改過→下次登入換 PUK→漂移即作廢
+  （刪檔、誠實回密碼登入）。user key 只在 seal/unseal 兩個瞬間以
+  `Zeroizing<Vec<u8>>` 過反向 JNI，不經 Kotlin String（§2.7 規則 1）。
+- **反向呼叫（Rust→Kotlin）**：`nshBindBridge(Any)` 把 Kotlin object 實例的
+  GlobalRef＋JavaVM 存進 `island.rs`（不靠 FindClass——附著執行緒的
+  classloader 認不了 app 類）；生物辨識閂擋在專屬 tokio 池（2 worker）的
+  blocking 線上，**nsh 引擎線只 await**，彈窗 UI 不會自鎖死。
+- **冷啟判定**（路線 3「依實測能力定案」）：封存金鑰綁使用者驗證，背景
+  service 無 UI 可彈窗 → **視窗外一律誠實鎖態＋一鍵引導**（既有
+  lockedResponse，A20 實測形態）；**視窗內**（使用者剛 PIN／指紋解鎖裝置
+  ≤30s）冷啟走靜默 `unsealUserKeySilent` 自動回真候選（onFillRequest／
+  onSaveRequest 同口徑）。不硬吹「後台隨時可解」：那是無驗證綁定的
+  Class 2 形態，本批選了與 macOS Keychain biometric ACL 同語意的那條。
+
+### 實錄一：`@JvmStatic` 的 object 方法只有 static 面（13:07）
+
+登入成功點反調 `sealUserKey` 直接 `NoSuchMethodError: no non-static method`。
+Kotlin `object` 成員加 `@JvmStatic` 後**只生成 class 上的 static 方法**，
+INSTANCE 上不再有可 `call_method` 的實例方法（javap 實查：
+`public static final byte[] sealUserKey(byte[])`）。jni-rs 的 `call_method`
+走實例面 → 四支反調入口全部撤掉 `@JvmStatic`。教訓：**反向 JNI 的綁定對象
+若是 Kotlin object，方法簽名要先 javap 驗證存在性**，編譯期完全無感。
+
+### 實錄二：Class 3 金鑰在視窗外連 `init` 都擋；平台 BiometricPrompt 不收 init 失敗的 CryptoObject（13:12／13:15）
+
+彈窗解封路先炸 `UserNotAuthenticatedException`（`Cipher.init(DECRYPT,key,spec)`
+即拋，不是 doFinal 才拋——`BitwardKeyStore` 改出 `prepareSealCipher/
+prepareUnsealCipher` 把構造期例外原樣回傳）。照 androidx 慣例改綁
+CryptoObject 後換 `IllegalStateException: Crypto primitive not initialized`
+（`CryptoObject.getOpId`，平台 `android.hardware.biometrics.BiometricPrompt`
+要求 Cipher **init 成功**才收——init-throw 兜底是 androidx 才有的）。定案：
+**彈窗不綁 CryptoObject**，驗證通過＝開啟 30 秒視窗，回呼後重構 Cipher 靜默
+運算——28／29／30+ 三個世代同一條路，無版本分岔。
+
+### 實錄三：`doFinal` 不含 IV，Keystore 的隨機 IV 在 `Cipher.getIV`（13:28）
+
+指紋註冊後重封的 blob 解回 `AEADBadTagException`：trySeal 把 `doFinal` 輸出
+直接當 IV‖ct‖tag 落地，其實只有 ct‖tag——解密側把密文頭 12 bytes 當 IV。
+修＝`cipher.iv + ct` 前置（並斷言 IV=12）；另把 `AEADBadTagException` 收斂成
+「封存作廢刪檔、鑰留著重封」（舊格式殘檔／位元損壞同路）。教訓：**GCM 的
+落地形態要自帶 IV；「能加密」證明不了「能解密」，封存鏈的 e2e 必須跨進程
+重啟驗解封**（A18 正是為此存在）。
+
+### 實錄四：emulator 指紋不是天生可用的（註冊向導兩處坑）
+
+`pm list features` 有 fingerprint、`dumpsys fingerprint` 甚至列出
+`prints:[{id:0,count:0}]`，但 HAL 對 `emu finger touch` 回
+「incorrect fingerprint」——**那是幽靈列，框架側其實無註冊**；未註冊時
+BiometricPrompt 直接渲染憑證輸入頁（`CredentialPasswordViewBinder`＋IME），
+`current operation: null`。註冊只能走向導：`am start -a
+android.settings.BIOMETRIC_ENROLL` → PIN → 首屏唯一可點＝「更多」→ 告知頁
+選 **「我同意」**（點「不用了」＝退出向導，13:2x 白跑兩輪）→「触摸传感器」
+頁 `adb emu finger touch 1` 約十下即「已添加指纹」。e2e 已把這段做成冪等
+前置（prints 有 id 就跳過）。教訓：**假指紋通道要先驗「註冊存在」再驗
+「比對成功」**，dumpsys 的靜態列不能信。
+
+### 實錄五：`wm dismiss-keyguard` 不是使用者驗證事件
+
+既有 `unlock_device`（wake＋dismiss-keyguard）不產生 Keystore 驗證事件——
+30 秒視窗從不開啟，登入封存全數落到彈窗路（會蓋住 vault 頁、
+`wait_text "鏡像 N 筆"` 擷取不到底層節點）。新增 `auth_device`（電源鍵鎖屏
+→喚醒→上滑→打 PIN）產生**真驗證事件**，接在 A3/A11/A12/A16 的登入按下前
+→ 封存走靜默路，A1–A17 形態零變化；`wait_login` 同時容忍彈窗搶先（假指紋
+放行），兩條 seal 路都綠。
+
+### 實錄六：JobScheduler 的網路約束要 ACCESS_NETWORK_STATE（13:09）
+
+`setRequiredNetworkType(NETWORK_TYPE_ANY)` 的 job 排程直接被拒：
+`SecurityException: ACCESS_NETWORK_STATE required for jobs with a
+connectivity constraint`。補 uses-permission 後排程成功（實測排程即刻跑第一
+輪：`hub service job fired`）。
+
+### 排程器取捨：JobScheduler（不用 WorkManager）
+
+零 androidx 前提下 WorkManager＝拖進 androidx 全家桶，換來的約束組合／存活
+率最佳化這裡用不上；需求只有「15 分鐘週期＋網路可用＋裝置不太缺電」，
+平台 `JobService`（HubService 直接繼承，started-FGS 與 job 雙身）全覆蓋，
+且週期下限 15 分鐘恰好就是契約節拍，無妥協。FGS 走 dataSync 型別＋
+POST_NOTIFICATIONS（33+ 未授權時 HubService 拉透明 `PermissionRequestActivity`
+問一次；e2e 直接 `pm grant`）；**不做無限期常駐**——dataSync 有 6 小時預算
+（Android 12+），乾活掛 foreground、收工 `stopForeground+stopSelf`。
+
+### 觸發源與退避
+
+背景輪（`Hub::background_run`：drain 到結算、連續失敗退避 30s·2^(n-1) 上限
+10 分鐘、距上次全量 pull ≥15 分鐘順手拉）的觸發源：解鎖成功點（login／
+unseal 的 `ensure_hub_service`）、**寫入即踢**（create/patch/delete 等位 daemon
+`trigger_drain`）、JobScheduler 週期、e2e 強制 tick
+（`am start-foreground-service -a io.bitward.android.action.RUN`）。寫入即踢
+讓第三批「自動 push 會把待推送斷言變競態」成真——`assert_pending` helper
+收斂：膠囊還在＝過；已清＝必須有 `background run → ok` 軌跡，誰清的說得出來。
+
+### unseal 的 token 形態（13:33）
+
+帳號檔不存 access token，而 `Client::send` 的 401 收口只救「過期的舊 token」
+（`sent_with.is_some()` 閘）→ 冷啟首拉 `not authenticated`。修＝unseal 裝鑰後
+**先起保命再拉**（`ensure_hub_service()` 移到 pull 前）＋主動 `client.refresh()`
+（refresh grant 換新對），並掛 token_sink 把輪換後的 refresh token 寫回
+account.json（daemon 同法；`Account` 反序列化自然忽略多寫的 access_token 鍵）。
+FGS 覆蓋整個 unseal-sync 也順帶把通知存活窗從 round-only（idle 輪只有毫秒級，
+13:52 實錄）拉成 pull＋round 的合力窗。
+
+### e2e 時序四錄（13:36–14:1x，A19 首兩紅的根因）
+
+1. **`pm clear` 收回 runtime 權限**：A3 登入後 HubService 的通知權限補要窗
+   （`PermissionRequestActivity`）蓋住 vault 頁，`wait_login` 的層級斷言餓死
+   ——登入/seal/round 全對、斷言卻紅。修＝A2 清資料後立刻 `pm grant
+   POST_NOTIFICATIONS`，同時 `wait_login` 見到權限窗就點「允許」（真實裝置
+   上用戶也可能先拒後放，斷言要撐得住）。
+2. **強制 tick 走錯門**：`am start-foreground-service` 從 adb shell（uid 2000）
+   打帶 `BIND_JOB_SERVICE` 的 service＝`Permission Denial`（該許可只有系統
+   排程器持有）。正解 `cmd jobscheduler run -f <pkg> <jobId>`——走系統正門，
+   連 `onStartJob` 接線一起驗，語意就是契約的「e2e 內調短間隔」。
+3. **通知斷言的錨點**：`dumpsys notification` 裡通道註冊記錄常駐（搜
+   「Bitwarden 背景同步」/通道名會假陽性），live 通知的判據是
+   `NotificationRecord … pkg=<包名>` 行；FGS 通知存活窗只有秒級，主流程串行
+   抓會輸給競態——捕手用後台 0.25s 輪詢、見到的瞬間開簾截圖，主流程繼續。
+4. **純背景收斂不經 UI 訊號**（14:1x 實錄，A19 第二紅根因）：寫入即踢的
+   背景輪在 DB 結算了 outbox，但列表 `computed` 只訂閱 `rev/phase`——
+   「待推送」膠囊滯留成過態（層級斷言餓死，VW 端其實早已收到）。第三批
+   「不另設輪詢」的取捨在背景同步落地後過期：列表加 5 秒 `set_interval`
+   心跳扳重算（TOTP 倒數同源形態）。教訓：**新增無訊號寫者（後台執行緒）
+   時，所有讀它的渲染都要重新審視訂閱鏈**——「訊號驅動」的前提是世上只
+   有訊號會改狀態。
+
+### 線格式與寬限兩錄（14:28，A19 第三四紅的根因）
+
+1. **只填名稱的 Login 被 VW 拒收**：`encrypt_login_draft` 對 username/password/
+   totp/uris 全空的草稿省略 `login` 物件 → `POST /ciphers` 400「Data missing」
+   → outbox 列結算 dead → 該筆永不上伺服器（且 dead 不計入「outbox 未結算跳過
+   重建」閘，鏡像重建後本地列也被吞）。jslib 形態＝空 login 照帶齐 null 欄，
+   VW 全收。修＝Login 型別恒發 `login`（SecureNote 等維持不帶）＋單測。
+   教訓：**「服務器收過這個形狀」要按型別全集證，不是按手邊試過的那一筆**。
+2. **本地 vault 的 FGS 窗是毫秒級**：unseal→refresh→drain→sync 全跑在 LAN
+   Vaultwarden 上，通知從 post 到 remove 不足 100ms，0.25s 輪詢照樣輸——
+   「即起即停」在快環境等於「不可觀察」。修＝收工留 20 秒寬限再退前景
+   （順帶吸收連發 mutation、省 FGS 重啟抖動；dataSync 6 小時預算下誠實）。
+3. **排查陷阱（非 bug）**：`run-as tar vault.db` 不含 `-wal`，讀到的是舊快照
+   ——本輪「鏡像索引變信封」的假象就是它造的（真態其實全部解密成功）。
+   拉 SQLite 證據要嘛連 wal 一起 tar，要嘛 `sqlite3 ".backup"`。
+
+### 測試形態與 Kotlin 單測查證
+
+外殼 Gradle 無任何 test 依賴（零 androidx 一貫；`app/build.gradle.kts` 查證
+無 testImplementation）。判定：純邏輯（封存記錄/漂移/退避表/鎖態收斂）全部
+壓在 Rust 側可測（本批單測＋6 條，桌機 28 條全綠）；Keystore／生物辨識／FGS
+行為只有真機（emulator）可證 → e2e A18–A20。不為湊數在 Kotlin 加 junit 依賴。
+
+### e2e 結果（實錄）
+
+`dev/e2e/android-app.sh` A1–A20 **連兩輪全綠**（2026-11-11，每輪 7.5–8 分鐘）：
+seed→三 ABI 打包→A1–A17 不回歸→A18 封存落盤＋假指紋免重派生解鎖→A19 FGS
+通知截圖＋JobScheduler 週期在冊＋寫入即踢 drain 收斂＋`jobscheduler run -f`
+強制 tick＋VW 端兩筆收斂→A20 視窗外誠實鎖態（`silent unseal denied`＋
+`fill locked sealed=true`）→一鍵引導→生物解鎖→真候選（`unlocked=true`）。
+截圖留證：18-biometric-prompt／18-biometric-unlocked／19-biometric-unlock／
+19-foreground-notification／19-vault-converged／20-cold-locked／
+20-cold-guidance／20-cold-after-unlock。首輪（修 A20 探針置頂前）A1–A19 綠、
+A20 紅在 e2e 自身的探針重啟通道（非產品缺陷，改 A11 同款搜尋欄 focus 後綠）。
