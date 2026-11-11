@@ -112,6 +112,8 @@ pub const CHIP_H: f32 = 22.0;
 /// 小號狀態膠囊（未同步）：高與字級。
 pub const BADGE_H: f32 = 16.0;
 pub const TEXT_BADGE: f32 = 11.0;
+/// 側欄組標題（批次 12：11px uppercase muted）。
+pub const TEXT_SECTION: f32 = 11.0;
 /// 模態欄距。
 pub const FORM_GAP: f32 = 12.0;
 /// 置中卡（鎖態／佔位／連線失敗）標題字級與 glyph 尺寸。

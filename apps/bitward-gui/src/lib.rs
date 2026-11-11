@@ -350,11 +350,14 @@ fn topbar(core: AppCore) -> View {
         )
 }
 
-/// 左側欄（官方三欄骨架）：我的密碼庫（資料夾樹）／已共享／垃圾桶＋
-/// 底部同步狀態與其他動作。資料夾與垃圾桶互斥（`VaultFilter`）。
+/// 左側欄（批次 12：按 kind 重構）——待批准＋徽章頂部獨立，其下三組：
+/// 密碼庫（全部項目／(未分類)／資料夾樹／已共享／已封存／垃圾桶＝庫視圖全回檯面）、
+/// 工具（產生密碼／Send／報告）、系統（設定）。組標題 11px uppercase muted，
+/// 「工具／系統」兩組可收合（本 session 記憶）。底部＝帳號列＋立即同步。
+/// 資料夾／垃圾桶／已封存互斥（`VaultFilter`）；cmd+1..4 直跳目標不變。
 fn sidebar(core: AppCore) -> View {
-    // 驗收不變量：檯面常駐 ≤8（清單單源 `state::sidebar_rail`）。
-    debug_assert!(state::sidebar_rail().len() <= 8);
+    // 驗收不變量：分組條目單源 `state::group_items`（資料夾樹＝庫組動態列不計）。
+    debug_assert!(state::group_items(state::SideGroup::Vault).len() <= 6);
     let all_sel = core.clone();
     let all_press = core.clone();
     let uncat_sel = core.clone();
@@ -377,7 +380,8 @@ fn sidebar(core: AppCore) -> View {
     let send_sel = core.clone();
     let send_press = core.clone();
     let sync_core = core.clone();
-    let more_cond = core.clone();
+    let tools_cond = core.clone();
+    let system_cond = core.clone();
     view()
         .w(px(theme::SIDEBAR_W))
         .flex_col()
@@ -387,7 +391,16 @@ fn sidebar(core: AppCore) -> View {
         .border_color(theme::HAIRLINE)
         .px_2()
         .pt_3()
-        .child(side_label("我的密碼庫"))
+        // 批准佇列不是庫視角：獨立在頂，徽章＝待決筆數。
+        .child(side_item(
+            "待批准".to_owned(),
+            move || app_sel.route.get() == Route::Approvals,
+            move || app_press.send(Cmd::OpenApprovals),
+            false,
+            None,
+            move || app_cnt.pending.get().len(),
+        ))
+        .child(side_group_header(state::SideGroup::Vault, core.clone()))
         .child(side_item(
             "全部項目".to_owned(),
             move || {
@@ -441,12 +454,20 @@ fn sidebar(core: AppCore) -> View {
             },
         ))
         .child(side_item(
-            "待批准".to_owned(),
-            move || app_sel.route.get() == Route::Approvals,
-            move || app_press.send(Cmd::OpenApprovals),
+            "已共享".to_owned(),
+            || false,
+            || {},
+            true,
+            Some("組織共享：待 daemon 資料源就緒後開放"),
+            || 0,
+        ))
+        .child(side_item(
+            "已封存".to_owned(),
+            move || arch_sel.filter.get().archived,
+            move || arch_press.send(Cmd::ToggleArchived),
             false,
             None,
-            move || app_cnt.pending.get().len(),
+            || 0,
         ))
         .child(side_item(
             "垃圾桶".to_owned(),
@@ -456,51 +477,23 @@ fn sidebar(core: AppCore) -> View {
             None,
             || 0,
         ))
-        .child(side_item(
-            "產生密碼".to_owned(),
-            move || gen_sel.route.get() == Route::Generator,
-            move || gen_press.send(Cmd::OpenGenerator),
-            false,
-            None,
-            || 0,
-        ))
-        // 批次 11 漸進揭露：低頻節點收進「更多」（本 session 記憶）。
-        .child(side_disclosure(core.clone()))
+        .child(side_group_header(state::SideGroup::Tools, core.clone()))
         .child(when(
-            move || more_cond.sidebar_more.get(),
+            move || !tools_cond.sidebar_fold.get().collapsed(state::SideGroup::Tools),
             move || {
-                let arch_sel = arch_sel.clone();
-                let arch_press = arch_press.clone();
-                let rep_sel = rep_sel.clone();
-                let rep_press = rep_press.clone();
+                let gen_sel = gen_sel.clone();
+                let gen_press = gen_press.clone();
                 let send_sel = send_sel.clone();
                 let send_press = send_press.clone();
-                let set_sel = set_sel.clone();
-                let set_press = set_press.clone();
+                let rep_sel = rep_sel.clone();
+                let rep_press = rep_press.clone();
                 view()
                     .flex_col()
                     .gap_0p5()
-                    .pl_3()
                     .child(side_item(
-                        "已封存".to_owned(),
-                        move || arch_sel.filter.get().archived,
-                        move || arch_press.send(Cmd::ToggleArchived),
-                        false,
-                        None,
-                        || 0,
-                    ))
-                    .child(side_item(
-                        "已共享".to_owned(),
-                        || false,
-                        || {},
-                        true,
-                        Some("組織共享：待 daemon 資料源就緒後開放"),
-                        || 0,
-                    ))
-                    .child(side_item(
-                        "報告".to_owned(),
-                        move || rep_sel.route.get() == Route::Reports,
-                        move || rep_press.send(Cmd::OpenReports),
+                        "產生密碼".to_owned(),
+                        move || gen_sel.route.get() == Route::Generator,
+                        move || gen_press.send(Cmd::OpenGenerator),
                         false,
                         None,
                         || 0,
@@ -513,6 +506,25 @@ fn sidebar(core: AppCore) -> View {
                         None,
                         || 0,
                     ))
+                    .child(side_item(
+                        "報告".to_owned(),
+                        move || rep_sel.route.get() == Route::Reports,
+                        move || rep_press.send(Cmd::OpenReports),
+                        false,
+                        None,
+                        || 0,
+                    ))
+            },
+        ))
+        .child(side_group_header(state::SideGroup::System, core.clone()))
+        .child(when(
+            move || !system_cond.sidebar_fold.get().collapsed(state::SideGroup::System),
+            move || {
+                let set_sel = set_sel.clone();
+                let set_press = set_press.clone();
+                view()
+                    .flex_col()
+                    .gap_0p5()
                     .child(side_item(
                         "設定".to_owned(),
                         move || set_sel.route.get() == Route::Settings,
@@ -537,48 +549,45 @@ fn sidebar(core: AppCore) -> View {
         )
 }
 
-/// 「更多」disclosure 列：▸/▾ 動詞前綴＋翻轉命令（批次 11）。
-fn side_disclosure(core: AppCore) -> View {
+/// 組標題：11px uppercase muted。可收合組（工具／系統）帶 ▸/▾ 動詞前綴＋
+/// 點擊翻轉（本 session 記憶）；庫視圖組恆常駐＝純標籤。
+fn side_group_header(group: state::SideGroup, core: AppCore) -> View {
+    let collapsible = state::group_collapsible(group);
+    let label = state::group_title(group).to_uppercase();
     let press = core.clone();
-    let arrow = core.clone();
-    view()
-        .h(px(theme::SIDE_ITEM_H))
+    let fold = core;
+    let row = view()
         .w_full()
-        .px_3()
-        .rounded(px(theme::RADIUS_CONTROL))
-        .flex_row()
-        .items_center()
-        .cursor_pointer()
-        .transition_colors()
-        .duration(120.0)
-        .hover(|s| s.bg(theme::SURFACE_RAISED))
-        .on_press(move || press.send(Cmd::ToggleSidebarMore))
-        .child(
-            text(move || {
-                if arrow.sidebar_more.get() {
-                    "▾ 更多".to_owned()
-                } else {
-                    "▸ 更多".to_owned()
-                }
-            })
-            .text_size(px(13.0))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(theme::TEXT_SECONDARY),
-        )
-}
-
-/// 側欄分節標籤（不可點）。
-fn side_label(label: &'static str) -> View {
-    view()
         .px_3()
         .pt_1p5()
         .pb_0p5()
+        .flex_row()
+        .items_center()
+        .rounded(px(theme::RADIUS_CONTROL))
         .child(
-            text(label)
-                .text_size(px(11.5))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme::TEXT_MUTED),
-        )
+            text(move || {
+                let mark = if !collapsible {
+                    ""
+                } else if fold.sidebar_fold.get().collapsed(group) {
+                    "▸ "
+                } else {
+                    "▾ "
+                };
+                format!("{mark}{label}")
+            })
+            .text_size(px(theme::TEXT_SECTION))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme::TEXT_MUTED),
+        );
+    if collapsible {
+        row.cursor_pointer()
+            .transition_colors()
+            .duration(120.0)
+            .hover(|s| s.bg(theme::SURFACE_RAISED))
+            .on_press(move || press.send(Cmd::ToggleSidebarGroup(group)))
+    } else {
+        row
+    }
 }
 
 /// 側欄條目：32px 行；選中＝淡藍底＋左 3px 藍條；停用＝灰字＋tooltip；

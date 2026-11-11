@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use nsh_core::prelude::*;
 
-use crate::state::{AppCore, Cmd, FieldDraft, Route};
+use crate::state::{AppCore, Cmd, FieldDraft, Route, SideGroup, name_is_envelope};
 
 /// 在 AppKit main thread 上執行 `f`（macOS 限定；其餘平台直接跑）。
 #[cfg(target_os = "macos")]
@@ -918,6 +918,15 @@ pub fn script(dir: PathBuf, core: AppCore) {
             row.as_ref().is_some_and(|v| v.meta.archived_at.is_some()),
             "已封存視角應含該項目且帶封存時間"
         );
+        // 投影紀律（同批次 12 daemon 修復）：封存視角每一列名稱都得是
+        // 回填明文（或鎖定態 null），不得是信封字串。
+        for r in c.items.get().iter() {
+            assert!(
+                !r.meta.name.as_deref().is_some_and(name_is_envelope),
+                "已封存視角名稱未回填明文：{:?}",
+                r.meta.name
+            );
+        }
         capture(&d, "shot-52-archived-view.png");
         if let Some(id) = row.map(|v| v.meta.id) {
             c.send(Cmd::SetArchived { id, archived: false });
@@ -1054,13 +1063,40 @@ fn poll_attachment_row(dir: PathBuf, core: AppCore, ms: u64) {
                 "列表刷新不得重發任何已快取 host 的 GetIcon"
             );
         });
-        // —— 側欄資訊架構（批次 11）：展開「更多」＋設定頁含搬入項目 ——
+        // —— 側欄資訊架構（批次 12：按 kind 分組）：默認態三組全開 →
+        //    收合「工具／系統」→ 展開回預設 → 設定頁含搬入項目 ——
         let c = core.clone();
-        at(ms + 11000, move || c.send(Cmd::ToggleSidebarMore));
         let d = dir.clone();
-        at(ms + 11400, move || capture(&d, "shot-56-sidebar-expanded.png"));
+        at(ms + 11000, move || {
+            let fold = c.sidebar_fold.get();
+            assert!(
+                !fold.collapsed(SideGroup::Tools) && !fold.collapsed(SideGroup::System),
+                "默認態＝工具／系統全開（700px 窗實測定的預設）"
+            );
+            capture(&d, "shot-56-sidebar-groups.png");
+        });
         let c = core.clone();
-        at(ms + 11700, move || c.send(Cmd::OpenSettings));
+        at(ms + 11200, move || {
+            c.send(Cmd::ToggleSidebarGroup(SideGroup::Tools));
+            c.send(Cmd::ToggleSidebarGroup(SideGroup::System));
+        });
+        let c = core.clone();
+        let d = dir.clone();
+        at(ms + 11500, move || {
+            let fold = c.sidebar_fold.get();
+            assert!(
+                fold.collapsed(SideGroup::Tools) && fold.collapsed(SideGroup::System),
+                "組標題點擊應翻轉兩組收合態（庫視圖恆常駐）"
+            );
+            assert!(!fold.collapsed(SideGroup::Vault), "庫視圖不得被收合");
+            capture(&d, "shot-58-sidebar-folded.png");
+        });
+        let c = core.clone();
+        at(ms + 11700, move || {
+            c.send(Cmd::ToggleSidebarGroup(SideGroup::Tools));
+            c.send(Cmd::ToggleSidebarGroup(SideGroup::System));
+            c.send(Cmd::OpenSettings);
+        });
         let d = dir.clone();
         at(ms + 12100, move || capture(&d, "shot-57-settings-tools.png"));
         // —— 產生器頁（批次 9）：進頁自動現算一碼 ——
@@ -1110,8 +1146,27 @@ pub fn script_cand(dir: PathBuf, core: AppCore) {
     });
     let c = core.clone();
     at(4600, move || c.send(Cmd::ToggleArchived));
+    let c = core.clone();
     let d2 = dir.clone();
-    at(5600, move || capture(&d2, "cand-2-archived.png"));
+    at(5600, move || {
+        // 缺陷回歸（2026-11-11 使用者實錄）：真庫（555 筆、含經 /sync 落盤的
+        // 封存項）的封存視角名稱必須是回填明文或 null，不得是信封字串。
+        let rows = c.items.get();
+        assert!(!rows.is_empty(), "真庫應有已封存項目可拍");
+        for r in rows.iter() {
+            assert!(
+                r.meta.archived_at.is_some(),
+                "封存視角不得混入未封存列：{:?}",
+                r.meta.name
+            );
+            assert!(
+                !r.meta.name.as_deref().is_some_and(name_is_envelope),
+                "已封存視角名稱未回填明文：{:?}",
+                r.meta.name
+            );
+        }
+        capture(&d2, "cand-2-archived.png");
+    });
     let c = core.clone();
     at(6200, move || c.send(Cmd::ToggleArchived));
     let c = core.clone();

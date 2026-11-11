@@ -207,16 +207,89 @@ pub fn icon_data_uri(bytes: &[u8]) -> Option<String> {
     Some(format!("data:{mime};base64,{b64}"))
 }
 
-/// 側欄資訊架構（批次 11：漸進揭露）——檯面常駐節點清單（純函數，驗收
-/// 「檯面 ≤8」斷言源）。資料夾樹屬動態列不計；「更多」收合組（已封存／
-/// 已共享／報告／Send／設定）不計。
-pub fn sidebar_rail() -> [&'static str; 6] {
-    ["全部項目", "(未分類)", "待批准", "垃圾桶", "產生密碼", "更多"]
+/// 信封形態名稱判定（純函數，單測＋實拍斷言源）：協定密文＝`<type>.<iv>|<mac>|<ct>`。
+/// 列表／詳情名稱長這樣＝投影端吐了未解密原文（2026-11-11 缺陷：已封存視角名稱像亂碼）。
+pub fn name_is_envelope(name: &str) -> bool {
+    let Some((head, rest)) = name.split_once('.') else {
+        return false;
+    };
+    head.len() == 1
+        && head.as_bytes()[0].is_ascii_digit()
+        && rest.split('|').count() >= 3
+        && !rest.contains(' ')
 }
 
-/// 「更多」展開狀態機（純函數，單測點）：本 session 記憶、翻轉即新態。
-pub fn more_toggle(open: bool) -> bool {
-    !open
+/// 側欄分組（批次 12：按 kind 重構）。三組＝庫視圖／工具／系統，
+/// 「待批准」不屬任何組（佇列是動作入口，不是視角，獨立在頂部）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SideGroup {
+    Vault,
+    Tools,
+    System,
+}
+
+/// 組標題（11px uppercase muted 的文案單源）。
+pub fn group_title(g: SideGroup) -> &'static str {
+    match g {
+        SideGroup::Vault => "密碼庫",
+        SideGroup::Tools => "工具",
+        SideGroup::System => "系統",
+    }
+}
+
+/// 各組的檯面條目（純函數，驗收斷言源）。資料夾樹屬「密碼庫」組的動態列，
+/// 不在靜態清單內；「已共享」是佔位節點（待 daemon 資料源）。
+pub fn group_items(g: SideGroup) -> &'static [&'static str] {
+    match g {
+        // 庫視圖全回檯面（批次 11 的「更多」混類收合已拆）。
+        SideGroup::Vault => &["全部項目", "（未分類）", "已共享", "已封存", "垃圾桶"],
+        SideGroup::Tools => &["產生密碼", "Send", "報告"],
+        SideGroup::System => &["設定"],
+    }
+}
+
+/// 只有「工具／系統」兩組可收合（庫視圖是主任務，恆常駐）。
+pub fn group_collapsible(g: SideGroup) -> bool {
+    !matches!(g, SideGroup::Vault)
+}
+
+/// 「工具／系統」收合態（批次 12）：本 session 記憶、不持久化。
+/// 預設態＝實測決定（見 `DEFAULT_FOLD`），翻轉即新態（純函數，單測點）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct SidebarFold {
+    pub tools: bool,
+    pub system: bool,
+}
+
+/// 700px 窗實測（批次 12）：庫視圖全回檯面後，工具組 3 列＋系統組 1 列
+/// 仍進得去可视區，故預設全開；使用者手動收合只在本 session 記憶。
+pub const DEFAULT_FOLD: SidebarFold = SidebarFold {
+    tools: false,
+    system: false,
+};
+
+impl SidebarFold {
+    pub fn collapsed(self, g: SideGroup) -> bool {
+        match g {
+            SideGroup::Vault => false,
+            SideGroup::Tools => self.tools,
+            SideGroup::System => self.system,
+        }
+    }
+
+    pub fn toggled(self, g: SideGroup) -> Self {
+        match g {
+            SideGroup::Vault => self,
+            SideGroup::Tools => Self {
+                tools: !self.tools,
+                ..self
+            },
+            SideGroup::System => Self {
+                system: !self.system,
+                ..self
+            },
+        }
+    }
 }
 
 /// 資料夾鏡像列（ListFolders 投影）：鎖定態 name 為 null → 節點隱藏。
@@ -337,8 +410,8 @@ pub enum Cmd {
     OpenReports,
     /// 進入獨立密碼產生器頁（批次 9；進頁若無碼自動產生一組）。
     OpenGenerator,
-    /// 側欄「更多」分組收合翻轉（批次 11）。
-    ToggleSidebarMore,
+    /// 側欄分組收合翻轉（批次 12：工具／系統兩組）。
+    ToggleSidebarGroup(SideGroup),
     /// 產生器頁「重新產生」：現行政策走 daemon `Use:GeneratePassword`。
     GenerateTool,
     /// 產生器頁回包（Ok＝新碼；Err＝橫條可懂化）。
@@ -877,8 +950,8 @@ pub struct AppCore {
     pub pending: Signal<Arc<Vec<PendingRow>>>,
     pub sort: Signal<SortKey>,
     pub sort_menu: Signal<bool>,
-    /// 「更多」分組展開態（批次 11）：本 session 記憶，不持久化。
-    pub sidebar_more: Signal<bool>,
+    /// 「工具／系統」兩組收合態（批次 12）：本 session 記憶，不持久化。
+    pub sidebar_fold: Signal<SidebarFold>,
     pub list_gen: Signal<u64>,
     pub busy: Signal<usize>,
     pub error_text: Signal<Option<String>>,
@@ -963,7 +1036,7 @@ impl AppCore {
             icon_sent: signal(0),
             sort: signal(SortKey::Name),
             sort_menu: signal(false),
-            sidebar_more: signal(false),
+            sidebar_fold: signal(DEFAULT_FOLD),
             list_gen: signal(0),
             busy: signal(0),
             error_text: signal(None),
@@ -2062,9 +2135,9 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.settle();
             core.settings.set(v);
         }
-        Cmd::ToggleSidebarMore => {
-            let next = more_toggle(core.sidebar_more.get());
-            core.sidebar_more.set(next);
+        Cmd::ToggleSidebarGroup(g) => {
+            let next = core.sidebar_fold.get().toggled(g);
+            core.sidebar_fold.set(next);
         }
         Cmd::OpenGenerator => {
             core.leave_detail();
@@ -3240,13 +3313,50 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_rail_fits_eight_and_more_toggles() {
-        // 檯面常駐 ≤8（資料夾樹動態列不計、收合組不計）。
-        assert!(sidebar_rail().len() <= 8);
-        assert!(sidebar_rail().contains(&"產生密碼"));
-        assert!(!sidebar_rail().contains(&"已封存"), "已封存應收進更多");
-        assert!(!sidebar_rail().contains(&"設定"));
-        assert!(more_toggle(false) && !more_toggle(true));
+    fn name_is_envelope_catches_wire_ciphertext_only() {
+        // 真信封（協定 `<type>.<iv>|<mac>|<ct>`）：常駐庫實錄形態。
+        assert!(name_is_envelope(
+            "2.965ItzmL77d+yjblZ3wdnA==|qn7d960bywpT4ozkuvQogW6XIxH+4GJr1aP2DS5zmjk=|7GeUPvVStXuaAJBYpJQeKmdov1t5PqDOuZjX7QMhPyA="
+        ));
+        assert!(name_is_envelope("4.AB|CD|EF"), "RSA 形態同規");
+        // 明文名不得誤判（小數點／版本號／含空格的長名都是真實名字）。
+        assert!(!name_is_envelope("永豐銀行"));
+        assert!(!name_is_envelope("v2.3 token"));
+        assert!(!name_is_envelope("1.2.3"));
+        assert!(!name_is_envelope("GitHub"));
+    }
+
+    #[test]
+    fn sidebar_groups_split_by_kind_and_fold_toggles() {
+        // 批次 12：按 kind 分組——庫視圖全回檯面、工具／系統另組、待批准獨立在頂。
+        assert_eq!(
+            group_items(SideGroup::Vault),
+            ["全部項目", "（未分類）", "已共享", "已封存", "垃圾桶"]
+        );
+        assert_eq!(group_items(SideGroup::Tools), ["產生密碼", "Send", "報告"]);
+        assert_eq!(group_items(SideGroup::System), ["設定"]);
+        let all: Vec<&str> = [SideGroup::Vault, SideGroup::Tools, SideGroup::System]
+            .into_iter()
+            .flat_map(|g| group_items(g).to_vec())
+            .collect();
+        assert!(!all.contains(&"待批准"), "待批准是頂部獨立節點，不進組");
+        assert!(!all.contains(&"更多"), "批次 11 的混類「更多」收合組已拆");
+        for a in &all {
+            assert_eq!(
+                all.iter().filter(|b| **b == *a).count(),
+                1,
+                "{a} 不得跨組重複掛點"
+            );
+        }
+        // 收合面：只有工具／系統兩組可收，庫視圖恆常駐。
+        assert!(!group_collapsible(SideGroup::Vault));
+        assert!(group_collapsible(SideGroup::Tools) && group_collapsible(SideGroup::System));
+        let f = DEFAULT_FOLD;
+        assert!(!f.collapsed(SideGroup::Vault), "不可收合組恆展開");
+        let t = f.toggled(SideGroup::Tools);
+        assert!(t.tools && !t.system, "翻轉工具組不得連動系統組");
+        assert_eq!(t.toggled(SideGroup::Tools), f, "翻轉即回原態");
+        assert_eq!(f.toggled(SideGroup::Vault), f);
     }
 
     #[test]
