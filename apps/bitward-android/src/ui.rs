@@ -134,6 +134,10 @@ pub fn login_page(hub: Arc<Hub>, phase: Signal<Phase>, status: Signal<String>) -
     let do_email = email;
     let do_password = password;
     let hub_login = hub.clone();
+    // Keystore 封存存在＝有免重派生路（第五批）。本頁每次從鎖定態重建時
+    // 重讀（封存的落地/作廢都發生在解鎖流之後，不需要渲染期訂閱）。
+    let sealed_present = hub.has_sealed();
+    let hub_bio = hub.clone();
 
     view()
         .flex_1()
@@ -191,6 +195,41 @@ pub fn login_page(hub: Arc<Hub>, phase: Signal<Phase>, status: Signal<String>) -
                                     }
                                 }
                             });
+                        },
+                    ))
+                    .child(when(
+                        move || sealed_present,
+                        move || {
+                            let hub = hub_bio.clone();
+                            ghost_button(
+                                "生物辨識直接解鎖",
+                                move || {
+                                    if phase.get() == Phase::Busy {
+                                        return;
+                                    }
+                                    phase.set(Phase::Busy);
+                                    status.set(String::new());
+                                    let hub = hub.clone();
+                                    spawn(async move {
+                                        // 彈窗路（指紋 STRONG／裝置憑證）：通過
+                                        // 即免 KDF 解鎖；拒絕／逾時誠實回表單。
+                                        match hub.unseal(true).await {
+                                            Ok(snap) => {
+                                                log::info!(
+                                                    "生物辨識解鎖完成：{} 筆鏡像",
+                                                    snap.items
+                                                );
+                                                phase.set(Phase::Vault(snap));
+                                            }
+                                            Err(msg) => {
+                                                log::warn!("生物辨識解鎖未成功：{msg}");
+                                                status.set(format!("{msg}（請輸入主密碼）"));
+                                                phase.set(Phase::SignedOut);
+                                            }
+                                        }
+                                    });
+                                },
+                            )
                         },
                     ))
                     .child(
