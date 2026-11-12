@@ -410,7 +410,7 @@ fn find_view(core: &AppCore, name: &str) -> Option<bw_proto::ItemView> {
 /// 批准佇列（gated session 造真 pending：41 佇列有筆＋時間欄斷言、42 批准後
 /// 清空＋徽章消失）→ 髒退出閘（編輯器弄髒被導航攔下走確認框，shot-43，
 /// 拒絕留 edit、確認放棄完成重投）→ 已封存視角（封存→主列表消失→視角帶時間可見→
-/// 取消回主列表，shot-52）→ favicon 實圖（GitHub 測試詳情＋列表圖示磚，shot-53）→ 產生器兩幀（編輯態產生面板展開 shot-54、獨立產生器頁 shot-55）→
+/// 取消回主列表，shot-52）→ favicon 實圖（GitHub 測試詳情＋列表圖示磚，shot-53；批次 13：facebook 站經 VW 回 MS ICO→轉碼 PNG，Ready 態斷言＋shot-59）→ 產生器兩幀（編輯態產生面板展開 shot-54、獨立產生器頁 shot-55）→
 /// 暗色皮自查三張（列表/詳情/新增器，SetTheme(Dark) 即時翻轉不重建視窗），
 /// 各步存一張 shot-N-*.png 後結束行程。時序裕量對齊
 /// spike（Background
@@ -1104,29 +1104,51 @@ fn poll_attachment_row(dir: PathBuf, core: AppCore, ms: u64) {
         at(ms + 9700, move || cg.send(Cmd::OpenGenerator));
         let dg = dir.clone();
         at(ms + 10500, move || capture(&dg, "shot-55-generator-page.png"));
+        // —— ICO→PNG 轉碼實證（批次 13）：facebook.com 經 VW 回 MS ICO，轉碼後
+        //    快取態必為 Ready 且 data URI 是 image/png（NSImage 吃得動）；拍 FB 磚。——
+        let c = core.clone();
+        at(ms + 12300, move || {
+            c.send(Cmd::OpenList);
+            if let Some(id) = find_id(&c, "Facebook") {
+                c.send(Cmd::OpenDetail(id));
+            }
+        });
+        let c = core.clone();
+        let dfb = dir.clone();
+        at(ms + 12800, move || {
+            match crate::state::icon_signal(&c, "facebook.com").get() {
+                crate::state::IconState::Ready(uri) => assert!(
+                    uri.starts_with("data:image/png;"),
+                    "facebook ICO 應已轉為 PNG data URI，實際：{}",
+                    uri.chars().take(28).collect::<String>()
+                ),
+                other => panic!("facebook.com 圖示應 Ready（轉碼成功），實際：{other:?}"),
+            }
+            capture(&dfb, "shot-59-facebook-ico.png");
+        });
         // —— 暗色皮自查三張（列表／詳情／新增器）；收尾復原 system 預設 ——
         let c11 = core.clone();
-        at(ms + 12500, move || {
+        at(ms + 13200, move || {
             c11.send(Cmd::SetTheme(Appearance::Dark));
             c11.send(Cmd::OpenList);
         });
         let d3 = dir.clone();
-        at(ms + 13100, move || capture(&d3, "shot-38-dark-list.png"));
+        at(ms + 13800, move || capture(&d3, "shot-38-dark-list.png"));
         let c12 = core.clone();
-        at(ms + 13300, move || {
+        at(ms + 14000, move || {
             if let Some(id) = find_id(&c12, "2b 筆記範例") {
                 c12.send(Cmd::OpenDetail(id));
             }
         });
         let d4 = dir.clone();
-        at(ms + 13900, move || capture(&d4, "shot-39-dark-detail.png"));
+        at(ms + 14600, move || capture(&d4, "shot-39-dark-detail.png"));
         let c13 = core.clone();
-        at(ms + 14100, move || c13.send(Cmd::OpenCreate));
+        at(ms + 14800, move || c13.send(Cmd::OpenCreate));
         let d5 = dir.clone();
-        at(ms + 14700, move || capture(&d5, "shot-40-dark-modal.png"));
+        at(ms + 15400, move || capture(&d5, "shot-40-dark-modal.png"));
         let c14 = core.clone();
-        at(ms + 15000, move || c14.send(Cmd::SetTheme(Appearance::System)));
-        at(ms + 15400, quit);
+        at(ms + 15700, move || c14.send(Cmd::SetTheme(Appearance::System)));
+        at(ms + 16100, quit);
     });
 }
 

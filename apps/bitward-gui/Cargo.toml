@@ -25,6 +25,10 @@ hmac = "0.12"
 sha1 = "0.10"
 # favicon data: URI 編碼（批次 C；版本同 workspace）。
 base64 = "0.22"
+# 批次 13：僅為 ICO→PNG 轉碼——VW icons 服務對老牌站（facebook 等）回 MS ICO，
+# nsh-platform-macos 的 Image（NSImage 系）解不動 ICO→載入重試循環＝只有 ICO 站閃。
+# 只開 ico/png/jpeg decoder，預設全解不開避免拖入整套編譯器。
+image = { version = "0.25", default-features = false, features = ["ico", "png", "jpeg"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nsh-platform-linux = { version = "0.3.0", default-features = false }

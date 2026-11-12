@@ -85,7 +85,8 @@ FILLERS=(
   "Epic Games|https://unrealengine.com|s25" "PlayStation Network|https://psn.playstation.com|s26"
   "Nintendo Account|https://accounts.nintendo.com|s27" "Gmail 應用密碼|https://mail.google.com|s28"
   "App Store|https://appleid.apple.com|s29" "Discord|https://discord.com|s30"
-  "Reddit|https://reddit.com|s31" "Shopify 後台|https://admin.shopify.com|s32"
+  # facebook.com：VW icons 端回 MS ICO（非 PNG）——批次 13 轉碼鏈活體標靶。
+  "Facebook|https://facebook.com|s31" "Shopify 後台|https://admin.shopify.com|s32"
 )
 for e in "${FILLERS[@]}"; do
   IFS='|' read -r nm uri u <<<"$e"

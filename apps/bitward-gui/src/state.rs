@@ -174,13 +174,15 @@ pub fn icon_request_due(state: Option<&IconState>, now: Instant) -> bool {
     }
 }
 
-/// magic 嗅探（純函數，單測點）：PNG(`89 50 4E 47`)／ICO(`00 00 01 00`)
-/// 回對應 MIME；其他形態回 None（呼叫端退字母磚，不硬塞未知型別）。
+/// magic 嗅探（純函數，單測點）：PNG(`89 50 4E 47`)／ICO(`00 00 01 00`)／
+/// JPEG(`FF D8 FF`) 回對應 MIME；其他形態回 None（呼叫端退字母磚，不硬塞未知型別）。
 pub fn sniff_icon(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
         Some("image/png")
     } else if bytes.starts_with(&[0x00, 0x00, 0x01, 0x00]) {
         Some("image/x-icon")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
     } else {
         None
     }
@@ -199,12 +201,30 @@ pub fn host_of(uri: &str) -> Option<String> {
     Some(host)
 }
 
-/// 位元組 → `data:` URI（magic 決定 MIME；解不了的形態回 None＝字母磚）。
+/// 位元組 → `data:` URI（批次 13：ICO 轉碼為 PNG，其餘原樣）。
+/// nsh-platform-macos 的 Image 走 NSImage 系、解不動 MS ICO——VW icons 端對
+/// 大量老牌站（facebook.com 等）回的正是 ICO（實錄 20366B／3 frames），故 ICO
+/// 必須在進渲染前轉成 NSImage 吃得下的 PNG（image crate 取最大 frame）。
+/// 轉碼失敗（破 ICO）回 None＝走負快取退避。純函數、單測點；呼叫端在
+/// GetIcon **worker 執行緒**跑（request_hosts 內），轉碼不堵主線渲染。
 pub fn icon_data_uri(bytes: &[u8]) -> Option<String> {
     use base64::Engine;
     let mime = sniff_icon(bytes)?;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-    Some(format!("data:{mime};base64,{b64}"))
+    let (out, out_mime) = if mime == "image/x-icon" {
+        let img = image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .ok()?
+            .decode()
+            .ok()?;
+        let mut buf = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .ok()?;
+        (buf, "image/png")
+    } else {
+        (bytes.to_vec(), mime)
+    };
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&out);
+    Some(format!("data:{out_mime};base64,{b64}"))
 }
 
 /// 信封形態名稱判定（純函數，單測＋實拍斷言源）：協定密文＝`<type>.<iv>|<mac>|<ct>`。
@@ -397,7 +417,9 @@ pub enum Cmd {
     /// GetIcon 回包：Ok＝原樣位元組（magic 嗅探定生死）、Err＝字母磚。
     IconLoaded {
         host: String,
-        res: Result<Vec<u8>, String>,
+        /// Ok(Some(data URI))＝可渲染；Ok(None)＝magic 不認/破 ICO（轉碼失敗）；
+        /// Err＝傳輸錯。批次 13：轉碼（ICO→PNG）已在 worker 完成，此處只落地。
+        res: Result<Option<String>, String>,
     },
     /// 側欄資料夾節點：None＝全部項目、Some("")＝未歸屬、Some(id)＝該夾。
     ChooseFolder(Option<String>),
@@ -1831,9 +1853,10 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             });
         }
         Cmd::IconLoaded { host, res } => {
+            // 轉碼已在 worker 完成（批次 13）；這裡只落地態、不碰渲染執行緒。
             let state = match res {
-                Ok(b) => icon_data_uri(&b).map_or(IconState::Failed(Instant::now()), IconState::Ready),
-                Err(_) => IconState::Failed(Instant::now()),
+                Ok(Some(uri)) => IconState::Ready(uri),
+                Ok(None) | Err(_) => IconState::Failed(Instant::now()),
             };
             icon_signal(core, &host).set(state);
         }
@@ -2689,7 +2712,10 @@ fn request_hosts(core: &AppCore, hosts: Vec<String>) {
         let tx = core.tx.clone();
         std::thread::spawn(move || {
             let cmd = match session.call(&Call::Vault(VaultCall::GetIcon { host: host.clone() })) {
-                Ok(Response::AttachmentBytes(b)) => Cmd::IconLoaded { host, res: Ok(b) },
+                // 轉碼（ICO→PNG）在 worker 執行緒做，不堵渲染（批次 13）。
+                Ok(Response::AttachmentBytes(b)) => {
+                    Cmd::IconLoaded { host, res: Ok(icon_data_uri(&b)) }
+                }
                 Ok(other) => Cmd::IconLoaded {
                     host,
                     res: Err(format!("GetIcon 回應形態不符：{other:?}")),
@@ -3357,6 +3383,35 @@ mod tests {
         assert!(t.tools && !t.system, "翻轉工具組不得連動系統組");
         assert_eq!(t.toggled(SideGroup::Tools), f, "翻轉即回原態");
         assert_eq!(f.toggled(SideGroup::Vault), f);
+    }
+
+    #[test]
+    fn icon_data_uri_transcodes_ico_to_png() {
+        // 批次 13：真·facebook.com ICO（20366B／3 frames，VW icons 端實取）。
+        const FB: &[u8] = include_bytes!("../tests/fixtures/facebook.ico");
+        assert_eq!(sniff_icon(FB), Some("image/x-icon"));
+        let uri = icon_data_uri(FB).expect("真 ICO 應轉得動");
+        assert!(uri.starts_with("data:image/png;base64,"), "ICO 必須吐 PNG data URI");
+        // base64 解回來必須是 PNG magic（NSImage 吃得了的形態）。
+        use base64::Engine;
+        let back = base64::engine::general_purpose::STANDARD
+            .decode(uri.trim_start_matches("data:image/png;base64,"))
+            .unwrap();
+        assert!(back.starts_with(&[0x89, b'P', b'N', b'G']), "轉碼結果非 PNG");
+        // 破 ICO（合法頭＋零 frame）→ 解不動 → None＝負快取退避。
+        assert!(icon_data_uri(&[0, 0, 1, 0, 0, 0, 0, 0]).is_none());
+        // PNG 原樣不動（不重編碼）。
+        let png = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3];
+        let uri2 = icon_data_uri(&png).unwrap();
+        assert!(uri2.starts_with("data:image/png;base64,"));
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(uri2.trim_start_matches("data:image/png;base64,"))
+                .unwrap(),
+            png
+        );
+        // JPEG 認得（原樣通道）。
+        assert_eq!(sniff_icon(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("image/jpeg"));
     }
 
     #[test]
