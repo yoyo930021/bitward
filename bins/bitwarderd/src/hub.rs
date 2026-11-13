@@ -12,7 +12,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use bw_keys::{
-    AccountLabel, AuthContext, BwCryptoKernel, FileKeyStore, LockReason, UnlockMachine,
+    AccountLabel, AuthContext, BwCryptoKernel, FileKeyStore, KeyStore, LockReason, UnlockMachine,
     UnlockMaterial, UnlockReceipt,
 };
 use bw_proto::{
@@ -82,6 +82,9 @@ pub struct Hub {
     /// 圖示代理單飛閘（批次 B）：同 host 併發去重——雙重檢查快取，
     /// 閘內只放一發外連（語意同 bw-server refresh_gate）
     pub icon_gate: tokio::sync::Mutex<()>,
+    /// 批次 14：封存金鑰后端（Keychain biometric 或 FileKeyStore）；
+    /// status_info 報 biometric_available、Unlock 臂判可用性。
+    pub keystore: std::sync::Arc<dyn bw_keys::KeyStore>,
     /// 本機設定快取（macOS 設定面）：真態在 meta 表，這裡是啟動讀入＋
     /// `SetSettings` 同步的記憶體鏡（政策接線見 settings.rs）。
     pub settings: std::sync::Mutex<bw_proto::Settings>,
@@ -120,15 +123,25 @@ impl Hub {
         }
         let store = Store::open(&data_dir.join("vault.db")).map_err(|e| e.to_string())?;
         let account: Option<AccountRecord> = Self::read_json(&data_dir.join("account.json"));
-        let keystore =
-            FileKeyStore::new(data_dir.join("keys")).map_err(|e| format!("keystore: {e}"))?;
+        // 批次 14b：macOS 鑰封存升級 Keychain（biometric ACL）；flag 開且生物
+        // 硬體可用才接替 FileKeyStore，否則（含非 macOS）維持檔案路徑。
+        // 遷移：選中 keychain 時清掉舊封存檔——首波解鎖走主密碼，
+        // finish_unlock 自動 re-seal 進 keychain（machine.enrollment 既有路徑）。
+        let keychain = bw_keys::KeychainKeystore::from_env();
+        let use_keychain = keychain.biometric_available();
+        let keystore: std::sync::Arc<dyn bw_keys::KeyStore> = if use_keychain {
+            let _ = std::fs::remove_dir_all(data_dir.join("keys"));
+            std::sync::Arc::new(keychain)
+        } else {
+            std::sync::Arc::new(FileKeyStore::new(data_dir.join("keys")).map_err(|e| e.to_string())?)
+        };
         // 固定 label：首次登入時 account.json 還不存在，若用 email 作 label
         // 會造成封存與載入路徑不一致（A7b 實測教訓）。多帳號（P6）再拆 per-account。
         let label = AccountLabel::new("default");
         let builder = UnlockMachine::builder()
             .label(label)
             .kernel(Arc::new(BwCryptoKernel))
-            .keystore(Arc::new(keystore));
+            .keystore(keystore.clone());
         let builder = match &account {
             Some(_) => builder.signed_out(false),
             None => builder.signed_out(true),
@@ -165,6 +178,7 @@ impl Hub {
             apns,
             tls_pin: std::sync::OnceLock::new(),
             icon_gate: tokio::sync::Mutex::new(()),
+            keystore,
             settings: std::sync::Mutex::new(initial_settings),
         });
         // 自動鎖定政策接線（settings.rs）：解鎖時的 idle deadline 由設定決定。
@@ -302,6 +316,7 @@ impl Hub {
             orgs: self.store.org_count().unwrap_or(0),
             email,
             server,
+            biometric_available: self.keystore.biometric_available(),
         }
     }
 
@@ -386,11 +401,26 @@ impl Hub {
             Call::Auth(AuthCall::Login { .. }) => Err(denied(
                 "P1: daemon-side password challenge 未実装；請由 CLI 傳入密碼",
             )),
-            Call::Auth(AuthCall::Unlock { biometric }) => {
-                if *biometric {
-                    return Err(denied("P1: biometric assertion 尚未接 KeychainKeystore"));
-                }
-                match self.machine.submit(UnlockMaterial::DeviceAssertion) {
+            Call::Auth(AuthCall::Unlock { biometric, password }) => {
+                // 批次 14：三條解鎖路徑。主密碼＝離線 PSK MAC（錯密碼統一
+                // 「主密碼錯誤」，不外洩細節）；生物辨識＝Keychain ACL 載入
+                // （系統級 Touch ID prompt）；裸裝置憑證僅自動解鎖 opt-in
+                // 模式放行——嚴格模式不再一鍵通行（使用者實錄缺陷）。
+                let material = if let Some(pw) = password.as_deref().filter(|p| !p.is_empty()) {
+                    UnlockMaterial::MasterPassword(Zeroizing::new(pw.to_owned()))
+                } else if *biometric {
+                    if !self.keystore.biometric_available() {
+                        return Err(denied("生物辨識解鎖尚不可用（請以主密碼解鎖）"));
+                    }
+                    UnlockMaterial::Biometric
+                } else {
+                    if self.current_settings().lock_on_sleep_restart {
+                        return Err(denied("需要主密碼或生物辨識解鎖"));
+                    }
+                    UnlockMaterial::DeviceAssertion
+                };
+                let by_password = password.as_deref().is_some_and(|p| !p.is_empty());
+                match self.machine.submit(material) {
                     Ok(UnlockReceipt::Unlocked { .. }) => {
                         // 解鎖完成處回填明文索引（2026-11-07 macOS demo 實測：
                         // 重啟後鎖定態 sync 把 meta_plain 蓋回信封形態，
@@ -402,9 +432,16 @@ impl Hub {
                         Ok(Response::Status(self.status_info().await))
                     }
                     Ok(UnlockReceipt::Pending { .. }) => Err(denied("unlock pending")),
-                    Err(e) => Err(WtpError::Denied {
-                        grant_gap: e.to_string(),
-                    }),
+                    Err(_) if by_password => Err(denied("主密碼錯誤")),
+                    Err(e) if *biometric => {
+                        // 未封存（NotAuthenticated）與辨識拒絕分開說（14b 驗收）。
+                        if matches!(e, bw_keys::KeyError::NotAuthenticated) {
+                            Err(denied("生物辨識憑證尚未封存：請先用主密碼解鎖一次"))
+                        } else {
+                            Err(denied(format!("生物辨識遭拒絕或失敗：{e}")))
+                        }
+                    }
+                    Err(e) => Err(denied(e.to_string())),
                 }
             }
             Call::Auth(AuthCall::SignOut) => {
@@ -1952,5 +1989,62 @@ mod tests {
             .unwrap();
         assert_eq!(listed.len(), 1, "封存＋軟刪列只在該態組合查詢現形");
         assert_eq!(listed[0].name.as_deref(), Some("ArchivedTrashed"));
+    }
+
+    /// 批次 14a/14b：解鎖安全邊界——嚴格模式裸解鎖拒絕、錯密碼統一「主密碼
+    /// 錯誤」、對密碼綠、biometric 未接 Keychain 回明確錯誤、opt-in 模式放行。
+    #[tokio::test]
+    async fn unlock_gate_password_biometric_and_bare() {
+        let (hub, _dir) = crate::passkey::tests::unlocked_hub("unlock-gate").await;
+        let sess = hub.new_session(
+            "unlock-gate".into(),
+            SessionKind::Interactive,
+            bw_agent::GrantSet::default_full(),
+            None,
+            json!({"kind": "local"}),
+        );
+        let bare = Call::Auth(AuthCall::Unlock { biometric: false, password: None });
+        let bad = Call::Auth(AuthCall::Unlock {
+            biometric: false,
+            password: Some("wrong-password-xyz".into()),
+        });
+        let good = Call::Auth(AuthCall::Unlock {
+            biometric: false,
+            password: Some("test-master-pw".into()),
+        });
+        let bio = Call::Auth(AuthCall::Unlock { biometric: true, password: None });
+        // 預設嚴格模式（lock_on_sleep_restart=true）：裸解鎖不再一鍵放行。
+        hub.machine.lock(LockReason::User);
+        let err = hub.dispatch(&sess, &bare).await.unwrap_err();
+        assert!(
+            matches!(&err, WtpError::Denied{grant_gap} if grant_gap.contains("主密碼或生物辨識")),
+            "嚴格模式裸解鎖應拒：{err:?}"
+        );
+        // 錯密碼：統一「主密碼錯誤」，不外洩細節。
+        let err = hub.dispatch(&sess, &bad).await.unwrap_err();
+        assert!(
+            matches!(&err, WtpError::Denied{grant_gap} if grant_gap == "主密碼錯誤"),
+            "錯密碼應統一訊息：{err:?}"
+        );
+        // biometric：測試環境 keychain 未啟用 → 明確「尚不可用」（別假綠）。
+        let err = hub.dispatch(&sess, &bio).await.unwrap_err();
+        assert!(
+            matches!(&err, WtpError::Denied{grant_gap} if grant_gap.contains("生物辨識")),
+            "未接 Keychain 的 biometric 應明確回錯：{err:?}"
+        );
+        // 對密碼 → 解鎖成功（離線 PSK MAC，不打網路）。
+        let resp = hub.dispatch(&sess, &good).await.unwrap();
+        assert!(
+            { let Response::Status(i) = &resp else { panic!("應回 Status"); }; matches!(i.state, bw_proto::UnlockStateView::Unlocked { .. }) },
+            "對密碼應解鎖：{resp:?}"
+        );
+        // 自動解鎖 opt-in（lock_on_sleep_restart=false）：裸解鎖照放行。
+        hub.machine.lock(LockReason::User);
+        hub.settings.lock().unwrap().lock_on_sleep_restart = false;
+        let resp = hub.dispatch(&sess, &bare).await.unwrap();
+        assert!(
+            { let Response::Status(i) = &resp else { panic!("應回 Status"); }; matches!(i.state, bw_proto::UnlockStateView::Unlocked { .. }) },
+            "opt-in 模式裸解鎖應通行：{resp:?}"
+        );
     }
 }

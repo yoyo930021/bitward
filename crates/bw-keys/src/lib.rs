@@ -152,6 +152,10 @@ impl std::fmt::Debug for KeyBundle {
 pub enum UnlockMaterial {
     MasterPassword(Zeroizing<String>),
     DeviceAssertion,
+    /// 批次 14b：生物辨識＝keystore 載入（Keychain ACL 讀取觸發系統級
+    /// Touch ID prompt）；與 DeviceAssertion 同收尾，但錯誤不吞——
+    /// 「未封存」與「辨識拒絕」要能區分給 UI。
+    Biometric,
     /// login-with-device / TDE：非同步，submit 先进 Unlocking，等
     /// `resolve_challenge`。
     AuthRequest,

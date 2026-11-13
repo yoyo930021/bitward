@@ -44,7 +44,15 @@ enum Cmd {
         #[arg(long)]
         password_stdin: bool,
     },
-    Unlock,
+    Unlock {
+        /// 以主密碼解鎖（stdin 讀一行；嚴格模式 `lock_on_sleep_restart=true`
+        /// 下裸解鎖會被拒，此旗為 CLI 的明確請求路徑，A11 密碼不進 argv）。
+        #[arg(long)]
+        password_stdin: bool,
+        /// 以 Touch ID 解鎖（需已封存 Keychain；否則 daemon 回明確提示）。
+        #[arg(long)]
+        biometric: bool,
+    },
     Lock,
     /// 改主密碼：stdin 依序讀入現有、新主密碼兩行（A11：密碼不進 argv）
     ChangePassword,
@@ -1131,7 +1139,13 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                 two_factor: None,
             })
         }
-        Cmd::Unlock => Call::Auth(AuthCall::Unlock { biometric: false }),
+        Cmd::Unlock {
+            password_stdin,
+            biometric,
+        } => Call::Auth(AuthCall::Unlock {
+            biometric: *biometric,
+            password: password_stdin.then(read_line_stdin).transpose()?,
+        }),
         Cmd::Lock => Call::Auth(AuthCall::Lock),
         Cmd::ChangePassword => {
             // 提示與警告走 stderr，stdout 留給結果行（機器可讀慣例）。

@@ -264,6 +264,11 @@ pub enum AuthCall {
     },
     Unlock {
         biometric: bool,
+        /// 批次 14a：主密碼離線驗證（PSK MAC，不打網路）。None＋!biometric＝
+        /// 裝置憑證路徑，僅在 `lock_on_sleep_restart=false`（自動解鎖 opt-in）
+        /// 時放行；向後相容 default。
+        #[serde(default)]
+        password: Option<String>,
     },
     Lock,
     /// 登出：清 token 與封存金鑰（鏡像保留）
@@ -1145,6 +1150,10 @@ pub struct StatusInfo {
     pub email: Option<String>,
     #[serde(default)]
     pub server: Option<String>,
+    /// 批次 14b：生物辨識可用性（keystore 為 Keychain 且本機 ACL 可成立）。
+    /// GUI 據此顯示「使用 Touch ID 解鎖」鈕；舊 daemon 缺欄＝false。
+    #[serde(default)]
+    pub biometric_available: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1407,6 +1416,21 @@ mod tests {
         assert_eq!(serde_json::from_slice::<ClientMsg>(&j).unwrap().rid(), 7);
     }
 
+    /// 批次 14a：Unlock 加 password 欄 must `default`——舊幀（無此欄）解析為 None。
+    #[test]
+    fn unlock_frame_tolerates_legacy_without_password() {
+        let legacy = serde_json::json!({"Unlock": {"biometric": false}});
+        let call: AuthCall = serde_json::from_value(legacy).unwrap();
+        assert!(matches!(call, AuthCall::Unlock { biometric: false, password: None }));
+        let full = AuthCall::Unlock {
+            biometric: true,
+            password: Some("pw".into()),
+        };
+        let j = serde_json::to_string(&full).unwrap();
+        let back: AuthCall = serde_json::from_str(&j).unwrap();
+        assert!(matches!(back, AuthCall::Unlock { biometric: true, password: Some(p) } if p == "pw"));
+    }
+
     /// 批次 8 紀律：StatusInfo 尾附 email/server 兩欄 must `default`——
     /// 舊 daemon 的 JSON 幀（無此欄）要能解析成 None，不得互炸。
     #[test]
@@ -1420,6 +1444,7 @@ mod tests {
         let info: StatusInfo = serde_json::from_value(legacy).unwrap();
         assert_eq!(info.email, None);
         assert_eq!(info.server, None);
+        assert!(!info.biometric_available, "舊幀缺欄＝false");
         let full = StatusInfo {
             state: UnlockStateView::SignedOut,
             epoch: 0,
@@ -1430,6 +1455,7 @@ mod tests {
             orgs: 0,
             email: Some("a@b.test".into()),
             server: Some("http://127.0.0.1:1".into()),
+            biometric_available: true,
         };
         let bytes = postcard::to_allocvec(&full).unwrap();
         let back: StatusInfo = postcard::from_bytes(&bytes).unwrap();

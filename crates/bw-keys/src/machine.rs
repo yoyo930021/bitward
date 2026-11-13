@@ -334,6 +334,15 @@ impl UnlockMachine {
             UnlockMaterial::DeviceAssertion => {
                 self.assertion_bundle().ok_or(KeyError::NotAuthenticated)?
             }
+            UnlockMaterial::Biometric => {
+                // 與 DeviceAssertion 同取鑰路徑，但 keystore 錯誤如實上拋
+                // （拒否 vs 未封存要分得開）；load 觸發系統 Touch ID prompt。
+                let ks = self.keystore.as_ref().ok_or(KeyError::NotAuthenticated)?;
+                let sealed = ks
+                    .load_wrapped(&self.label)?
+                    .ok_or(KeyError::NotAuthenticated)?;
+                self.kernel.unlock_assertion(&sealed)?
+            }
             UnlockMaterial::AuthRequest => unreachable!("handled above"),
         };
         if matches!(*st, VaultState::Unlocked { .. }) {
