@@ -58,7 +58,9 @@ echo "==> 簽章形態：${ID_NAME:-$IDENTITY}／form=$FORM"
 if [ "$EXPERIMENT_ONLY" = 0 ]; then
 
 echo "==> app icons（gen-icons.sh；xcodebuild 的 resources 階段吃生成物）"
-bash scripts/gen-icons.sh
+# 產物已入庫（AppIcon.icns＋Android res）：管線只斷言存在/形態，
+# 改主設計才需本機 resvg 重跑生成。改前此處全量生成→無 resvg 機器 FATAL。
+bash scripts/gen-icons.sh --check
 
 echo "==> cargo release (bitwarderd, bitward)"
 cargo build --release -q -p bitwarderd -p bitward
