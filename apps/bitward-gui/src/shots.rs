@@ -578,32 +578,33 @@ pub fn script(dir: PathBuf, core: AppCore) {
     let c = core.clone();
     at(17800, move || c.send(Cmd::RequestLock));
     let d = dir.clone();
-    at(19000, move || capture(&d, "shot-12-locked.png"));
+    at(18600, move || capture(&d, "shot-12-locked.png"));
     // Touch ID 鈕：demo daemon 未接 Keychain → 按下去得「尚不可用」紅字，
-    // 且不得誤入其他错误橫條（14b e2e 斷言＝未接前回明確錯誤）。
+    // 且不得誤入其他錯誤橫條（14b e2e 斷言＝未接前回明確錯誤）。
     let c = core.clone();
-    at(19200, move || c.send(Cmd::RequestUnlockBiometric));
+    at(18800, move || c.send(Cmd::RequestUnlockBiometric));
     let c = core.clone();
-    at(19600, move || {
+    at(19300, move || {
         let e = c.unlock_error.get().unwrap_or_default();
         assert!(e.contains("生物辨識"), "biometric 未接應回明確錯誤，實際：{e}");
         assert!(c.error_text.get().is_none(), "解鎖錯誤走欄下紅字，不掛頂部橫條");
     });
-    // 錯密碼 → 欄下「主密碼錯誤」、欄位內容保留不清。
+    // 錯密碼 → 欄下「主密碼錯誤」、欄位內容保留不清。預留 1.2s：
+    // 離線 PSK 派生是 600k 次 PBKDF2（數十萬次雜湊），回包非即時。
     let c = core.clone();
-    at(19900, move || {
+    at(19500, move || {
         c.unlock_pw.set("wrong-master-pw".into());
         c.send(Cmd::RequestUnlock);
     });
     let c = core.clone();
-    at(20400, move || {
+    at(20700, move || {
         let e = c.unlock_error.get().unwrap_or_default();
         assert_eq!(e, "主密碼錯誤", "錯密碼統一訊息：{e}");
         assert_eq!(c.unlock_pw.get(), "wrong-master-pw", "失敗不得清欄位內容");
     });
     let d = dir.clone();
-    at(20600, move || capture(&d, "shot-60-unlock-wrongpw.png"));
-    // 對密碼（demo 庫主密碼＝種子腳本同一字串）→ 解鎖進庫。
+    at(20800, move || capture(&d, "shot-60-unlock-wrongpw.png"));
+    // 對密碼（demo 庫主密碼＝種子腳本同一字串）→ 解鎖進庫（同預留派生時間）。
     let c = core.clone();
     at(20900, move || {
         c.unlock_pw.set(
@@ -613,7 +614,7 @@ pub fn script(dir: PathBuf, core: AppCore) {
         c.send(Cmd::RequestUnlock);
     });
     let d = dir.clone();
-    at(21900, move || capture(&d, "shot-13-unlocked.png"));
+    at(22100, move || capture(&d, "shot-13-unlocked.png"));
 
     // —— 匯出：確認框（未加密提醒）→ 逐筆 Reveal → 落盤 ——
     let c = core.clone();
@@ -935,20 +936,61 @@ pub fn script(dir: PathBuf, core: AppCore) {
     });
     let c = core.clone();
     at(62000, move || {
-        assert!(
-            find_id(&c, "E2E 驗證項目改名").is_none(),
-            "封存後主列表不應再見該項目"
-        );
         c.send(Cmd::ToggleArchived);
     });
+    // 封存可見性靠 VaultChanged 回聲 fetch，與本手 fetch 搶 list_gen：
+    // 用輪詢取代死時間，已封存視角出現該項即拍（12 秒未現即紅）。
+    poll_archived_view(dir.clone(), core.clone(), 62600);
+    // 取消封存（回到主列表）＋重新聚焦附件目標，串接附件輪詢。
+    let c = core.clone();
+    at(64500, move || {
+        if let Some(id) = find_id(&c, "E2E 驗證項目改名") {
+            c.send(Cmd::SetArchived { id, archived: false });
+        }
+    });
+    let c = core.clone();
+    at(65000, move || {
+        c.send(Cmd::ToggleArchived);
+    });
+    // 取消封存的回聲 fetch 同樣與手動 fetch 搶 list_gen → 輪詢等它回來。
+    poll_unarchived_back(core.clone(), 65800);
+    // 附件列要等背景推送收斂（drain tick 5s＋推送＋VaultChanged 重取），
+    // 用輪詢取代死時間：出現即拍，40 秒未現即斷言失敗。
+    poll_attachment_row(dir, core, 67200);
+}
+
+/// 輪詢「取消封存後主列表可見」，成功即重聚焦附件目標（2b 筆記範例）。
+fn poll_unarchived_back(core: AppCore, ms: u64) {
+    let c = core.clone();
+    at(ms, move || {
+        if find_id(&c, "E2E 驗證項目改名").is_none() {
+            if ms < 74000 {
+                poll_unarchived_back(core, ms + 700);
+            } else {
+                panic!("取消封存 12 秒內未回到主列表（回聲 fetch 競態失守）");
+            }
+            return;
+        }
+        if let Some(id) = find_id(&c, "2b 筆記範例") {
+            c.send(Cmd::OpenDetail(id));
+        }
+    });
+}
+
+/// 輪詢「已封存」視角出現目標列即截圖＋驗名稱明文（回聲 fetch 競態罩）。
+fn poll_archived_view(dir: PathBuf, core: AppCore, ms: u64) {
     let c = core.clone();
     let d = dir.clone();
-    at(62900, move || {
+    at(ms, move || {
         let row = find_view(&c, "E2E 驗證項目改名");
-        assert!(
-            row.as_ref().is_some_and(|v| v.meta.archived_at.is_some()),
-            "已封存視角應含該項目且帶封存時間"
-        );
+        if !row.as_ref().is_some_and(|v| v.meta.archived_at.is_some()) {
+            if ms < 74000 {
+                poll_archived_view(dir, core, ms + 700);
+            } else {
+                panic!("已封存視角 12 秒內未見該項目（回聲 fetch 競態失守）");
+            }
+            return;
+        }
         // 投影紀律（同批次 12 daemon 修復）：封存視角每一列名稱都得是
         // 回填明文（或鎖定態 null），不得是信封字串。
         for r in c.items.get().iter() {
@@ -959,27 +1001,7 @@ pub fn script(dir: PathBuf, core: AppCore) {
             );
         }
         capture(&d, "shot-52-archived-view.png");
-        if let Some(id) = row.map(|v| v.meta.id) {
-            c.send(Cmd::SetArchived { id, archived: false });
-        }
     });
-    let c = core.clone();
-    at(63800, move || {
-        c.send(Cmd::ToggleArchived);
-    });
-    let c = core.clone();
-    at(64500, move || {
-        assert!(
-            find_id(&c, "E2E 驗證項目改名").is_some(),
-            "取消封存應回到主列表"
-        );
-        if let Some(id) = find_id(&c, "2b 筆記範例") {
-            c.send(Cmd::OpenDetail(id));
-        }
-    });
-    // 附件列要等背景推送收斂（drain tick 5s＋推送＋VaultChanged 重取），
-    // 用輪詢取代死時間：出現即拍，40 秒未現即斷言失敗。
-    poll_attachment_row(dir, core, 66600);
 }
 
 /// 輪詢詳情附件列收斂；出現後串接下載→刪除確認→收尾。

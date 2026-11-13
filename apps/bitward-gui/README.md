@@ -47,12 +47,13 @@ cd apps/bitward-gui
 BITWARD_GUI_SOCK=<repo>/dev/e2e/demo/s NSH_GUI_SHOTS=$PWD nsh run --target macos
 ```
 
-依指令序列跑完整驗收流並寫 `shot-1..23、26..43、50..59-*.png`（24/25 徽章流、44..47 登入流、48/49 2FA 流見下）後退出：列表全量（三欄骨架、
+依指令序列跑完整驗收流並寫 `shot-1..23、26..43、50..60-*.png`（24/25 徽章流、44..47 登入流、48/49 2FA 流見下）後退出：列表全量（三欄骨架、
 型別磚、未同步膠囊，右欄空態為「選取一個項目」佔位）→ 搜尋 "GitHub" →
 詳情遮罩 → 詳情 revealed → 新增編輯器（右欄 inline）→ 真送新增（Create+AddTag）
 → TOTP 缺席路徑（無 seed → 自動取碼靜默收合，驗證碼節不渲染，shot-6-totp-absent）→ 排序下拉 → 標籤 chips 選取 →
 編輯改名（Patch）→ 刪除確認框 → 取消不刪斷言 → 刪除後空列表 →
-鎖態頁（已鎖定+解鎖鈕）→ 解鎖 → 匯出確認框（未加密提醒）→ 匯出完成提示列 →
+鎖態頁（主密碼欄＋解鎖鈕；Touch ID 鈕僅 daemon 已封存 Keychain 時現）→ 錯密碼紅字
+（欄下顯示、不清欄）→ 對密碼解鎖 → 匯出確認框（未加密提醒）→ 匯出完成提示列 →
 選取態（清搜尋、開詳情；選中列淡藍底＋左 3px 藍條）→
 垃圾桶（軟刪條目＋刪除時間）→ 垃圾桶詳情（還原／永久刪除動作）→ 還原後回列表 →
 產生器面板展開（真送 Use:GeneratePassword 取草稿）→
@@ -98,6 +99,30 @@ cd apps/bitward-gui
 BITWARD_GUI_SOCK="$HOME/Library/Group Containers/group.8V5224A99M.io.bitward.dev/daemon.sock" \
   NSH_GUI_SHOTS=$PWD NSH_GUI_SHOTS_CANDID=1 nsh run --target macos
 ```
+
+### 解鎖安全邊界（批次 14）
+
+三條解鎖路徑，全在 daemon 裁決（GUI 只收攏輸入）：
+
+- **主密碼**：離線 PSK MAC 驗證（`UnlockMaterial::MasterPassword`，不打網路）。
+  錯密碼統一回「主密碼錯誤」，不外洩伺服器細節。
+- **Touch ID**（14b，僅 macOS）：daemon 以 `KeychainKeystore`（generic password +
+  `biometryCurrentSet|userPresence` ACL，service `dev.bitward.userkey`）封存 user key。
+  按「使用 Touch ID 解鎖」→ Keychain 讀取觸發**系統級**生物辨識 prompt（常駐 LaunchAgent
+  在 Aqua session 可彈）。**遷移**：首次以主密碼解鎖成功即自動 re-seal 進 Keychain
+  （`finish_unlock` enrollment 路徑），舊 `keys/*.key` 檔在啟用 keychain 時啟動清除。
+- **裸裝置憑證**（`Unlock{biometric:false,password:None}`）：僅
+  `lock_on_sleep_restart=false`（自動解鎖 opt-in）放行；嚴格模式（官方預設 true）拒絕——
+  這是本次修復核心（使用者實錄「每次解鎖都不需要密碼跟 Touch ID」）。
+
+**手動驗收清單**（Touch ID 需真機，無法 e2e 自動化；e2e 只斷言「未接 Keychain 前
+`Unlock{biometric:true}` 回明確錯誤」防假綠）：
+
+1. `export BW_KEYS_ENABLE_KEYCHAIN=1` 起 daemon（裝機版已寫進 LaunchAgent plist）。
+2. 鎖庫 → 解鎖卡**無** Touch ID 鈕（尚未封存）→ 輸入主密碼解鎖一次。
+3. 再鎖庫 → 解鎖卡現「使用 Touch ID 解鎖」→ 點之 → 系統 Touch ID 彈窗 → 按指進庫。
+4. 拒絕/超時 → 欄下紅字「生物辨識遭拒絕或失敗」，不清主密碼欄。
+5. 一句話安全說明：現在關掉 App 逾時後會真的要密碼/Touch ID，不再一鍵放行。
 
 ### 徽章無感收斂證據（`NSH_GUI_SHOTS_DRAIN`）
 
