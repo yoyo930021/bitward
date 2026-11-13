@@ -1295,6 +1295,11 @@ pub enum WtpError {
     ServerDrift { detail: String },
     #[error("{ms}ms 後重試")]
     RetryAfter { ms: u64 },
+    /// 批次 14：身分驗證失敗（錯主密碼／生物辨識拒絕／未封存）——語意上不同
+    /// 於「授權不足」（Denied 是權限缺口，這是憑證不對），顯示不帶誤導前綴。
+    /// 置尾紀律：postcard 變體索引追加，不動既有錯誤形態。
+    #[error("{reason}")]
+    AuthFailed { reason: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

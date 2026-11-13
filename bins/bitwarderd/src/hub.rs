@@ -98,6 +98,13 @@ pub(crate) fn denied(detail: impl std::fmt::Display) -> WtpError {
     }
 }
 
+/// 批次 14：驗證失敗錯誤（無「授權不足」前綴；顯示即原因）。
+pub(crate) fn auth_failed(reason: impl Into<String>) -> WtpError {
+    WtpError::AuthFailed {
+        reason: reason.into(),
+    }
+}
+
 pub(crate) fn drift(detail: impl std::fmt::Display) -> WtpError {
     WtpError::ServerDrift {
         detail: detail.to_string(),
@@ -410,12 +417,12 @@ impl Hub {
                     UnlockMaterial::MasterPassword(Zeroizing::new(pw.to_owned()))
                 } else if *biometric {
                     if !self.keystore.biometric_available() {
-                        return Err(denied("生物辨識解鎖尚不可用（請以主密碼解鎖）"));
+                        return Err(auth_failed("生物辨識解鎖尚不可用（請以主密碼解鎖）"));
                     }
                     UnlockMaterial::Biometric
                 } else {
                     if self.current_settings().lock_on_sleep_restart {
-                        return Err(denied("需要主密碼或生物辨識解鎖"));
+                        return Err(auth_failed("需要主密碼或生物辨識解鎖"));
                     }
                     UnlockMaterial::DeviceAssertion
                 };
@@ -432,13 +439,13 @@ impl Hub {
                         Ok(Response::Status(self.status_info().await))
                     }
                     Ok(UnlockReceipt::Pending { .. }) => Err(denied("unlock pending")),
-                    Err(_) if by_password => Err(denied("主密碼錯誤")),
+                    Err(_) if by_password => Err(auth_failed("主密碼錯誤")),
                     Err(e) if *biometric => {
                         // 未封存（NotAuthenticated）與辨識拒絕分開說（14b 驗收）。
                         if matches!(e, bw_keys::KeyError::NotAuthenticated) {
-                            Err(denied("生物辨識憑證尚未封存：請先用主密碼解鎖一次"))
+                            Err(auth_failed("生物辨識憑證尚未封存：請先用主密碼解鎖一次"))
                         } else {
-                            Err(denied(format!("生物辨識遭拒絕或失敗：{e}")))
+                            Err(auth_failed(format!("生物辨識遭拒絕或失敗：{e}")))
                         }
                     }
                     Err(e) => Err(denied(e.to_string())),
@@ -2017,19 +2024,19 @@ mod tests {
         hub.machine.lock(LockReason::User);
         let err = hub.dispatch(&sess, &bare).await.unwrap_err();
         assert!(
-            matches!(&err, WtpError::Denied{grant_gap} if grant_gap.contains("主密碼或生物辨識")),
+            matches!(&err, WtpError::AuthFailed{reason} if reason.contains("主密碼或生物辨識")),
             "嚴格模式裸解鎖應拒：{err:?}"
         );
         // 錯密碼：統一「主密碼錯誤」，不外洩細節。
         let err = hub.dispatch(&sess, &bad).await.unwrap_err();
         assert!(
-            matches!(&err, WtpError::Denied{grant_gap} if grant_gap == "主密碼錯誤"),
+            matches!(&err, WtpError::AuthFailed{reason} if reason == "主密碼錯誤"),
             "錯密碼應統一訊息：{err:?}"
         );
         // biometric：測試環境 keychain 未啟用 → 明確「尚不可用」（別假綠）。
         let err = hub.dispatch(&sess, &bio).await.unwrap_err();
         assert!(
-            matches!(&err, WtpError::Denied{grant_gap} if grant_gap.contains("生物辨識")),
+            matches!(&err, WtpError::AuthFailed{reason} if reason.contains("生物辨識")),
             "未接 Keychain 的 biometric 應明確回錯：{err:?}"
         );
         // 對密碼 → 解鎖成功（離線 PSK MAC，不打網路）。
