@@ -20,6 +20,10 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 command -v docker >/dev/null || fail "需要 docker"
 command -v jq >/dev/null || fail "需要 jq"
 cargo build -q -p bitwarderd -p bitward
+# 批次 14：GUI e2e 解鎖走離線 600k PBKDF2——debug daemon 單次派生 ~4s，
+# 固定時間軸罩不住；e2e daemon 改 release 二進位（派生 ~300ms，且與使用者
+# 實裝的 release daemon 同形，測得的解鎖延遲更具代表性）。CLI 仍 debug。
+cargo build -q --release -p bitwarderd
 
 # 1. VW 容器：在就重啟（VOLATILE＝舊帳號必死，重建帳號是常態路徑）、不在就建。
 if docker ps -a --format '{{.Names}}' | grep -qx "$VW"; then
@@ -37,7 +41,7 @@ pkill -f "bitwarderd --data-dir $PWD/$DA" 2>/dev/null || true
 sleep 0.3
 rm -rf "$DA"
 mkdir -p "$DA"
-nohup ./target/debug/bitwarderd --data-dir "$PWD/$DA" --sock "$DA/s" >"$DA/log" 2>&1 &
+nohup ./target/release/bitwarderd --data-dir "$PWD/$DA" --sock "$DA/s" >"$DA/log" 2>&1 &
 sleep 1
 [[ -S "$DA/s" ]] || fail "daemon 未起（$DA/s）"
 

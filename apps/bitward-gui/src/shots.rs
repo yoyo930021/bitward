@@ -584,29 +584,29 @@ pub fn script(dir: PathBuf, core: AppCore) {
     let c = core.clone();
     at(18800, move || c.send(Cmd::RequestUnlockBiometric));
     let c = core.clone();
-    at(19300, move || {
+    at(19200, move || {
         let e = c.unlock_error.get().unwrap_or_default();
         assert!(e.contains("生物辨識"), "biometric 未接應回明確錯誤，實際：{e}");
         assert!(c.error_text.get().is_none(), "解鎖錯誤走欄下紅字，不掛頂部橫條");
     });
-    // 錯密碼 → 欄下「主密碼錯誤」、欄位內容保留不清。預留 1.2s：
-    // 離線 PSK 派生是 600k 次 PBKDF2（數十萬次雜湊），回包非即時。
+    // 錯密碼 → 欄下「主密碼錯誤」、欄位內容保留不清。窗口 1.7s：
+    // 離線 PSK 派生是 600k 次 PBKDF2（release daemon 約 0.3–0.5s）。
     let c = core.clone();
-    at(19500, move || {
+    at(19400, move || {
         c.unlock_pw.set("wrong-master-pw".into());
         c.send(Cmd::RequestUnlock);
     });
     let c = core.clone();
-    at(20700, move || {
+    at(21100, move || {
         let e = c.unlock_error.get().unwrap_or_default();
         assert_eq!(e, "主密碼錯誤", "錯密碼統一訊息：{e}");
         assert_eq!(c.unlock_pw.get(), "wrong-master-pw", "失敗不得清欄位內容");
     });
     let d = dir.clone();
-    at(20800, move || capture(&d, "shot-60-unlock-wrongpw.png"));
-    // 對密碼（demo 庫主密碼＝種子腳本同一字串）→ 解鎖進庫（同預留派生時間）。
+    at(21200, move || capture(&d, "shot-60-unlock-wrongpw.png"));
+    // 對密碼（demo 庫主密碼＝種子腳本同一字串）→ 解鎖進庫。
     let c = core.clone();
-    at(20900, move || {
+    at(21300, move || {
         c.unlock_pw.set(
             std::env::var("BW_TEST_PASSWORD")
                 .unwrap_or_else(|_| "DemoMaster-9kQ!z".to_owned()),
@@ -614,7 +614,7 @@ pub fn script(dir: PathBuf, core: AppCore) {
         c.send(Cmd::RequestUnlock);
     });
     let d = dir.clone();
-    at(22100, move || capture(&d, "shot-13-unlocked.png"));
+    at(22000, move || capture(&d, "shot-13-unlocked.png"));
 
     // —— 匯出：確認框（未加密提醒）→ 逐筆 Reveal → 落盤 ——
     let c = core.clone();
