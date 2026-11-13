@@ -353,6 +353,10 @@ pub enum Cmd {
     /// 產生器回包：Some=明文草稿（只活到套用或離開表單）；None=失敗（錯誤已入橫條）。
     Generated(Option<String>),
     RequestUnlock,
+    /// Touch ID 解鎖（批次 14b；鑰由 daemon Keychain 取，系統級 prompt）。
+    RequestUnlockBiometric,
+    /// 解鎖失敗（主密碼錯/辨識拒絕/未封存）：解鎖卡欄下紅字。
+    UnlockFailed(String),
     /// 側欄「立即同步」：Sync:Trigger{force} 拉伺服器＋催背景推送。
     TriggerSync,
     /// 僅 dev/驗證用：Auth:Lock（正式 UI 未列需求，解鎖鈕才是契約項目）。
@@ -545,6 +549,8 @@ pub enum Cmd {
     StateUpdated {
         state: UnlockStateView,
         refetch: bool,
+        /// 批次 14b：StatusInfo.biometric_available 透傳（None＝本路徑無情報，不動現值）。
+        biometric: Option<bool>,
         /// 帳號顯示欄（批次 8）：None＝本路徑無情報（如 Welcome），不動現值。
         reauth: bool,
         email: Option<String>,
@@ -997,6 +1003,11 @@ pub struct AppCore {
     pub acct_server: Signal<Option<String>>,
     /// 主畫面強制切登入卡（needs_reauth 點擊進路；登入成功即清）。
     pub show_login: Signal<bool>,
+    /// 解鎖卡（批次 14a）：主密碼欄＋錯誤行（失敗不清欄內容）；
+    /// biometric_ok＝daemon 回報 Keychain 可用性（14b 控制 Touch ID 鈕顯隱）。
+    pub unlock_pw: Signal<String>,
+    pub unlock_error: Signal<Option<String>>,
+    pub biometric_ok: Signal<bool>,
     /// 登入卡三欄＋錯誤＋送出旗（批次 8：SignedOut 主畫面）。
     pub login: LoginFields,
     pub confirm: Signal<Option<Arc<Confirm>>>,
@@ -1075,6 +1086,9 @@ impl AppCore {
             acct_email: signal(None),
             acct_server: signal(None),
             show_login: signal(false),
+            unlock_pw: signal(String::new()),
+            unlock_error: signal(None),
+            biometric_ok: signal(false),
             login: LoginFields {
                 server: signal(String::new()),
                 email: signal(String::new()),
@@ -1291,6 +1305,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                     reauth: info.needs_reauth,
                     email: info.email,
                     server: info.server,
+                    biometric: Some(info.biometric_available),
                 },
                 _ => Cmd::Nop,
             });
@@ -1554,21 +1569,48 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.form.gen_draft.set(pw);
         }
         Cmd::RequestUnlock => {
-            core.ipc(
-                |s| match s.call(&Call::Auth(AuthCall::Unlock { biometric: false })) {
+            // 批次 14a：欄内有密碼→Some（離線驗證）；空欄→None（裸憑證，
+            // 嚴格模式由 daemon 拒）。
+            let pw = unlock_password_field(&core.unlock_pw.get());
+            core.unlock_error.set(None);
+            core.ipc(move |s| match s.call(&Call::Auth(AuthCall::Unlock { biometric: false, password: pw })) {
                     Ok(Response::Status(info)) => Cmd::StateUpdated {
                         state: info.state,
                         refetch: true,
                         reauth: info.needs_reauth,
                         email: info.email,
                         server: info.server,
+                        biometric: Some(info.biometric_available),
                     },
-                    Ok(other) => Cmd::Failed {
-                        err: format!("Unlock 回應形態不符：{other:?}"),
-                    },
-                    Err(e) => Cmd::Failed { err: e.display() },
+                    Ok(other) => Cmd::UnlockFailed(format!(
+                        "Unlock 回應形態不符：{other:?}"
+                    )),
+                    Err(e) => Cmd::UnlockFailed(e.display()),
                 },
             );
+        }
+        // 批次 14b：Touch ID 解鎖（鑰匙由 daemon 的 Keychain 載入，系統級 prompt）。
+        Cmd::RequestUnlockBiometric => {
+            core.unlock_error.set(None);
+            core.ipc(|s| match s.call(&Call::Auth(AuthCall::Unlock { biometric: true, password: None })) {
+                Ok(Response::Status(info)) => Cmd::StateUpdated {
+                    state: info.state,
+                    refetch: true,
+                    reauth: info.needs_reauth,
+                    email: info.email,
+                    server: info.server,
+                    biometric: Some(info.biometric_available),
+                },
+                Ok(other) => {
+                    Cmd::UnlockFailed(format!("Unlock 回應形態不符：{other:?}"))
+                }
+                Err(e) => Cmd::UnlockFailed(e.display()),
+            });
+        }
+        // 解鎖失敗：紅字顯示在欄位下方，**不清欄位內容**（使用者不用重打）。
+        Cmd::UnlockFailed(msg) => {
+            core.settle();
+            core.unlock_error.set(Some(msg));
         }
         Cmd::TriggerSync => {
             core.ipc(|s| match s.call(&Call::Sync(SyncCall::Trigger { force: true })) {
@@ -1614,12 +1656,13 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                         reauth: false,
                         email: None,
                         server: None,
+                        biometric: None,
                     },
                     Err(e) => Cmd::Failed { err: e.display() },
                 }
             });
         }
-        Cmd::StateUpdated { state, refetch, reauth, email, server } => {
+        Cmd::StateUpdated { state, refetch, reauth, email, server, biometric } => {
             core.settle();
             let unlocked = matches!(state, UnlockStateView::Unlocked { .. });
             // 鎖定轉換（解鎖→非解鎖）＝清除最近搜尋：官方 web vault 同位語意，
@@ -1635,6 +1678,9 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.vault.set(Some(state));
             core.error_text.set(None);
             core.needs_reauth.set(reauth);
+            if let Some(b) = biometric {
+                core.biometric_ok.set(b);
+            }
             if email.is_some() {
                 core.acct_email.set(email);
             }
@@ -1645,6 +1691,8 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             if unlocked {
                 core.show_login.set(false);
                 core.login.reset();
+                core.unlock_pw.set(String::new());
+                core.unlock_error.set(None);
                 core.send(Cmd::FetchFolders);
             }
             if refetch {
@@ -1687,6 +1735,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                                 reauth: info.needs_reauth,
                                 email: info.email,
                                 server: info.server,
+                                biometric: Some(info.biometric_available),
                             },
                             // 伺服器要第二因子：原地進第二步。
                             Ok(Response::TwoFactorRequest { providers }) => {
@@ -1756,6 +1805,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                                 reauth: info.needs_reauth,
                                 email: info.email,
                                 server: info.server,
+                                biometric: Some(info.biometric_available),
                             },
                             // 再挑戰＝碼沒送對位；留第二步讓人重取碼。
                             Ok(Response::TwoFactorRequest { providers }) => {
@@ -2407,6 +2457,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                     reauth: info.needs_reauth,
                     email: info.email,
                     server: info.server,
+                    biometric: Some(info.biometric_available),
                 },
                 _ => Cmd::Nop,
             });
@@ -3315,6 +3366,13 @@ pub fn can_change_password(st: &Option<UnlockStateView>) -> bool {
     is_unlocked(st)
 }
 
+/// 解鎖卡欄位 → Unlock.password 承載（批次 14a，純函數單測點）：
+/// 空/全空白＝None（裸裝置憑證請求），否則原樣送出（trim 由 daemon 端
+/// MAC 比對語意決定，這裡不 trim 掉使用者可能有意義的空格）。
+pub fn unlock_password_field(raw: &str) -> Option<String> {
+    (!raw.is_empty() && !raw.bytes().all(|b| b.is_ascii_whitespace())).then(|| raw.to_owned())
+}
+
 /// 解鎖態判定（頂部列搜尋/新增鈕的顯示閘：鎖定態官方不給庫操作入口）。
 pub fn is_unlocked(st: &Option<UnlockStateView>) -> bool {
     matches!(st, Some(UnlockStateView::Unlocked { .. }))
@@ -3450,6 +3508,16 @@ mod tests {
         assert_eq!(host_of("localhost:3000").as_deref(), Some("localhost"));
         assert_eq!(host_of("no-host"), None);
         assert_eq!(host_of("https:///path"), None);
+    }
+
+    #[test]
+    fn unlock_password_field_maps_blank_to_bare() {
+        // 空/全空白＝None（裸裝置憑證請求）；有字元（含首尾空格）原樣送。
+        assert_eq!(unlock_password_field(""), None);
+        assert_eq!(unlock_password_field("   "), None);
+        assert_eq!(unlock_password_field("\t \n"), None);
+        assert_eq!(unlock_password_field("pw").as_deref(), Some("pw"));
+        assert_eq!(unlock_password_field(" pw ").as_deref(), Some(" pw "));
     }
 
     #[test]

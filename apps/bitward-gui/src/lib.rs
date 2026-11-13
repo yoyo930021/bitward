@@ -32,6 +32,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use nsh_base::input;
 use nsh_core::prelude::*;
 
 use bw_proto::UnlockStateView;
@@ -895,12 +896,65 @@ fn lock_page(core: AppCore) -> View {
                     move || state::can_unlock(&unlock_cond.vault.get()),
                     move || {
                         let c = unlock_build.clone();
-                        view().w_full().pt_1().child(
-                            ui::button("解鎖", ui::Btn::PrimaryWide, move || {
-                                c.send(Cmd::RequestUnlock)
-                            })
-                            .w_full(),
-                        )
+                        let unlock_build = unlock_build.clone();
+                        let pw_sig = c.unlock_pw;
+                        let bio_c = c.clone();
+                        let err_c = c.clone();
+                        view()
+                            .w_full()
+                            .flex_col()
+                            .gap_2()
+                            .pt_1()
+                            // 批次 14a：主密碼欄（Enter 提交；失敗紅字不清欄）。
+                            .child(
+                                input()
+                                    .value(move || pw_sig.get())
+                                    .placeholder("主密碼".to_owned())
+                                    .placeholder_color(move || color(theme::TEXT_MUTED))
+                                    .masked(true)
+                                    .on_change(move |t: &str| pw_sig.set(t.to_owned()))
+                                    .on_submit(move |_: &str| c.send(Cmd::RequestUnlock))
+                                    .h(px(theme::INPUT_H))
+                                    .w_full()
+                                    .px_3()
+                                    .rounded(px(theme::RADIUS_CONTROL))
+                                    .border(px(1.0))
+                                    .border_color(theme::HAIRLINE)
+                                    .bg(theme::BASE)
+                                    .text_color(theme::TEXT_PRIMARY)
+                                    .focus(|s| s.border_color(theme::ACCENT)),
+                            )
+                            .child(
+                                text(move || {
+                                    err_c.unlock_error.get().unwrap_or_default()
+                                })
+                                .text_size(px(12.5))
+                                .line_height(px(18.0))
+                                .text_color(theme::DESTRUCTIVE),
+                            )
+                            .child(ui::button(
+                                "解鎖",
+                                ui::Btn::PrimaryWide,
+                                move || {
+                                    let cc = unlock_build.clone();
+                                    cc.send(Cmd::RequestUnlock)
+                                },
+                            ).w_full())
+                            // 批次 14b：僅當 daemon 回報 Keychain 生物可用才顯鈕。
+                            .child(when(
+                                move || bio_c.biometric_ok.get(),
+                                move || {
+                                    let b = bio_c.clone();
+                                    view().w_full().child(
+                                        ui::button(
+                                            "使用 Touch ID 解鎖",
+                                            ui::Btn::Ghost,
+                                            move || b.send(Cmd::RequestUnlockBiometric),
+                                        )
+                                        .w_full(),
+                                    )
+                                },
+                            ))
                     },
                 )),
         )

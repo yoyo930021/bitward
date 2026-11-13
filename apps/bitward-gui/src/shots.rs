@@ -574,13 +574,44 @@ pub fn script(dir: PathBuf, core: AppCore) {
     let d = dir.clone();
     at(17600, move || capture(&d, "shot-11-after-delete.png"));
 
-    // —— 鎖態指示 + 解鎖鈕（Auth:Lock → 按鈕 → Auth:Unlock）——
+    // —— 鎖態 + 解鎖（批次 14a：主密碼欄；14b：biometric 明確錯誤）——
     let c = core.clone();
     at(17800, move || c.send(Cmd::RequestLock));
     let d = dir.clone();
-    at(19600, move || capture(&d, "shot-12-locked.png"));
+    at(19000, move || capture(&d, "shot-12-locked.png"));
+    // Touch ID 鈕：demo daemon 未接 Keychain → 按下去得「尚不可用」紅字，
+    // 且不得誤入其他错误橫條（14b e2e 斷言＝未接前回明確錯誤）。
     let c = core.clone();
-    at(20100, move || c.send(Cmd::RequestUnlock));
+    at(19200, move || c.send(Cmd::RequestUnlockBiometric));
+    let c = core.clone();
+    at(19600, move || {
+        let e = c.unlock_error.get().unwrap_or_default();
+        assert!(e.contains("生物辨識"), "biometric 未接應回明確錯誤，實際：{e}");
+        assert!(c.error_text.get().is_none(), "解鎖錯誤走欄下紅字，不掛頂部橫條");
+    });
+    // 錯密碼 → 欄下「主密碼錯誤」、欄位內容保留不清。
+    let c = core.clone();
+    at(19900, move || {
+        c.unlock_pw.set("wrong-master-pw".into());
+        c.send(Cmd::RequestUnlock);
+    });
+    let c = core.clone();
+    at(20400, move || {
+        let e = c.unlock_error.get().unwrap_or_default();
+        assert_eq!(e, "主密碼錯誤", "錯密碼統一訊息：{e}");
+        assert_eq!(c.unlock_pw.get(), "wrong-master-pw", "失敗不得清欄位內容");
+    });
+    let d = dir.clone();
+    at(20600, move || capture(&d, "shot-60-unlock-wrongpw.png"));
+    // 對密碼（demo 庫主密碼＝種子腳本同一字串）→ 解鎖進庫。
+    let c = core.clone();
+    at(20900, move || {
+        c.unlock_pw.set(
+            std::env::var("BW_TEST_PASSWORD")
+                .unwrap_or_else(|_| "DemoMaster-9kQ!z".to_owned()),
+        );
+        c.send(Cmd::RequestUnlock);
+    });
     let d = dir.clone();
     at(21900, move || capture(&d, "shot-13-unlocked.png"));
 
