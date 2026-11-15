@@ -336,10 +336,12 @@ impl UnlockMachine {
             }
             UnlockMaterial::Biometric => {
                 // 與 DeviceAssertion 同取鑰路徑，但 keystore 錯誤如實上拋
-                // （拒否 vs 未封存要分得開）；load 觸發系統 Touch ID prompt。
+                // （拒否 vs 未封存要分得開）。14.10：走 `load_wrapped_biometric`
+                // ——先經系統 LAContext 問指紋、通過的 context 綁進 SecItem
+                // 查詢；裸 load_wrapped 對建立者 partition 免提示＝假保護。
                 let ks = self.keystore.as_ref().ok_or(KeyError::NotAuthenticated)?;
                 let sealed = ks
-                    .load_wrapped(&self.label)?
+                    .load_wrapped_biometric(&self.label)?
                     .ok_or(KeyError::NotAuthenticated)?;
                 self.kernel.unlock_assertion(&sealed)?
             }

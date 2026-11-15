@@ -107,9 +107,14 @@ BITWARD_GUI_SOCK="$HOME/Library/Group Containers/group.8V5224A99M.io.bitward.dev
 - **主密碼**：離線 PSK MAC 驗證（`UnlockMaterial::MasterPassword`，不打網路）。
   錯密碼統一回「主密碼錯誤」，不外洩伺服器細節。
 - **Touch ID**（14b，僅 macOS）：daemon 以 `KeychainKeystore`（generic password +
-  `biometryCurrentSet|userPresence` ACL，service `dev.bitward.userkey`）封存 user key。
-  按「使用 Touch ID 解鎖」→ Keychain 讀取觸發**系統級**生物辨識 prompt（常駐 LaunchAgent
-  在 Aqua session 可彈）。**遷移**：首次以主密碼解鎖成功即自動 re-seal 進 Keychain
+  `BiometryCurrentSet` ACL（14.8 修正：不混 UserPresence）,service `dev.bitward.userkey`）封存 user key。
+  按「使用 Touch ID 解鎖」→ daemon 先 `LAContext.evaluatePolicy`（系統級指紋
+  彈窗,常駐 LaunchAgent 在 Aqua session 可彈）,通過的 context 以
+  `kSecUseAuthenticationContext` 綁進 SecItem 查詢才取鑰。**教訓（14.10
+  使用者實錄）**：檔案型 login keychain 經典 ACL 對**建立者 partition 免提示
+  放行**——裸 `SecItemCopyMatching` 讀自己寫的 item 不會問指紋（「點了直接
+  進庫」＝假保護）；ACL 仍擋外部進程（`security find-generic-password -w`
+  掛互動實錄）。**遷移**：首次以主密碼解鎖成功即自動 re-seal 進 Keychain
   （`finish_unlock` enrollment 路徑），舊 `keys/*.key` 檔在啟用 keychain 時啟動清除。
 - **裸裝置憑證**（`Unlock{biometric:false,password:None}`）：僅
   `lock_on_sleep_restart=false`（自動解鎖 opt-in）放行；嚴格模式（官方預設 true）拒絕——
@@ -120,8 +125,11 @@ BITWARD_GUI_SOCK="$HOME/Library/Group Containers/group.8V5224A99M.io.bitward.dev
 
 1. `export BW_KEYS_ENABLE_KEYCHAIN=1` 起 daemon（裝機版已寫進 LaunchAgent plist）。
 2. 鎖庫 → 解鎖卡**無** Touch ID 鈕（尚未封存）→ 輸入主密碼解鎖一次。
-3. 再鎖庫 → 解鎖卡現「使用 Touch ID 解鎖」→ 點之 → 系統 Touch ID 彈窗 → 按指進庫。
-4. 拒絕/超時 → 欄下紅字「生物辨識遭拒絕或失敗」，不清主密碼欄。
+3. 再鎖庫 → 解鎖卡現「使用 Touch ID 解鎖」→ 點之 → **必須看到系統指紋提示
+   視窗** → 按指紋才進庫；**直接進庫＝FAIL**（14.10 驗收標準升級：斷言不止步
+   在「能解」,要罩「系統有沒有真的問人」）。
+4. 拒絕/超時/錯手指 → 欄下紅字「生物辨識遭拒絕或失敗」，不清主密碼欄；
+   **錯手指不得進庫**。
 5. 一句話安全說明：現在關掉 App 逾時後會真的要密碼/Touch ID，不再一鍵放行。
 
 **封存邊界（14.9 定稿）**：生物 ACL 項改走**檔案型 login keychain**

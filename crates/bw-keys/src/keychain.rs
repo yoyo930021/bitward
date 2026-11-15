@@ -16,7 +16,7 @@ use security_framework_sys::access_control::{
 use security_framework_sys::base::errSecItemNotFound;
 use security_framework_sys::item::{
     kSecAttrAccessControl, kSecAttrAccount, kSecAttrService, kSecClass, kSecClassGenericPassword,
-    kSecMatchLimit, kSecReturnData, kSecValueData,
+    kSecMatchLimit, kSecReturnData, kSecUseAuthenticationContext, kSecValueData,
 };
 use security_framework_sys::keychain_item::{SecItemAdd, SecItemCopyMatching, SecItemDelete};
 
@@ -48,6 +48,66 @@ fn create_biometric_acl() -> Result<SecAccessControl, String> {
         BIOMETRIC_ACL_FLAGS,
     )
     .map_err(|e| e.to_string())
+}
+
+/// 系統級生物辨識提示（批次 14.10 治「假保護」）：同步等 LAContext
+/// evaluatePolicy 結果,回傳**已通過**的 context 給 SecItem 綁定。
+/// 自動化旗 `BW_KEYS_LA_MOCK`：`pass`＝跳過真 prompt 用未評估 context
+/// （檔案型鑰匙圈建立者 partition 免提示,查詢路徑照走）;`deny`＝模擬
+/// 用戶拒絕（測錯誤鏈路,不碰真 prompt）。
+fn evaluate_biometric_prompt() -> Result<CFType, KeyError> {
+    use objc2::rc::Retained;
+    use objc2::runtime::Bool;
+    use objc2::AnyThread;
+    use objc2_foundation::{NSError, NSString};
+    use objc2_local_authentication::{LAContext, LAPolicy};
+
+    let ctx: Retained<LAContext> =
+        unsafe { LAContext::init(LAContext::alloc()) };
+    tracing::info!("keychain biometric: LAContext evaluate 開跑（prompt 應彈窗）");
+    match std::env::var("BW_KEYS_LA_MOCK").as_deref() {
+        Ok("pass") => {}
+        Ok("deny") => {
+            return Err(KeyError::KeyStore("生物辨識遭拒絕或失敗：deny(mock)".into()))
+        }
+        _ => {
+            let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+            let reason = NSString::from_str("使用 Touch ID 解鎖密碼庫");
+            let block: block2::RcBlock<dyn Fn(Bool, *mut NSError)> = block2::RcBlock::new(move |ok: Bool, err: *mut NSError| {
+                let msg = if ok.is_true() {
+                    Ok(())
+                } else if err.is_null() {
+                    Err("unknown".to_string())
+                } else {
+                    let e = unsafe { &*err };
+                    Err(format!("{}({})", e.localizedDescription(), e.code()))
+                };
+                let _ = tx.send(msg);
+            });
+            unsafe {
+                ctx.evaluatePolicy_localizedReason_reply(
+                    LAPolicy::DeviceOwnerAuthenticationWithBiometrics,
+                    &reason,
+                    &block,
+                )
+            };
+            match rx.recv_timeout(std::time::Duration::from_secs(120)) {
+                Ok(Ok(())) => {}
+                Ok(Err(d)) => {
+                    tracing::warn!("keychain biometric: LAContext evaluate 拒否:{d}");
+                    return Err(KeyError::KeyStore(format!("生物辨識遭拒絕或失敗:{d}")));
+                }
+                Err(_) => return Err(KeyError::KeyStore("生物辨識逾時".into())),
+            }
+        }
+    }
+    // LAContext 是 NSObject(CFType 同指針域);wrap_under_get_rule +1 持有,
+    // 查詢存活期內有效。
+    Ok(unsafe {
+        CFType::wrap_under_get_rule(
+            Retained::as_ptr(&ctx) as core_foundation::base::CFTypeRef,
+        )
+    })
 }
 
 /// 金鑰記錄的 keychain service 名稱（dev.bitward.* 反域名，避免與官方
@@ -136,6 +196,58 @@ impl KeychainKeystore {
             Err(Error::from_code(status))
         }
     }
+
+    /// copy 查詢 dict（純組裝,單測點）：`auth_ctx`=Some 時必含
+    /// `kSecUseAuthenticationContext` 鍵——生物流遺忘綁定＝假保護回歸哨。
+    fn biometric_query_pairs(
+        &self,
+        account: &str,
+        auth_ctx: Option<CFType>,
+    ) -> Vec<(CFString, CFType)> {
+        let mut pairs = self.base_query(account);
+        pairs.push((
+            unsafe { CFString::wrap_under_get_rule(kSecReturnData) },
+            CFBoolean::true_value().into_CFType(),
+        ));
+        pairs.push((
+            unsafe { CFString::wrap_under_get_rule(kSecMatchLimit) },
+            unsafe { CFString::wrap_under_get_rule(kSecMatchLimitOne) }.into_CFType(),
+        ));
+        if let Some(ctx) = auth_ctx {
+            pairs.push((
+                unsafe { CFString::wrap_under_get_rule(kSecUseAuthenticationContext) },
+                ctx,
+            ));
+        }
+        pairs
+    }
+
+    fn copy_sealed(
+        &self,
+        account: &str,
+        auth_ctx: Option<CFType>,
+    ) -> Result<Option<SealedKey>, KeyError> {
+        let dict = CFDictionary::from_CFType_pairs(&self.biometric_query_pairs(account, auth_ctx));
+        let mut out: core_foundation::base::CFTypeRef = std::ptr::null();
+        let status = unsafe { SecItemCopyMatching(dict.as_concrete_TypeRef(), &mut out) };
+        if status == errSecItemNotFound {
+            return Ok(None);
+        }
+        if status != 0 {
+            return Err(KeyError::KeyStore(Error::from_code(status).to_string()));
+        }
+        let data = unsafe { CFData::wrap_under_get_rule(out as _) };
+        let v: serde_json::Value = serde_json::from_slice(data.bytes())
+            .map_err(|e| KeyError::KeyStore(format!("corrupt keychain record: {e}")))?;
+        let raw = base64_parse(v["user_key"].as_str().unwrap_or_default())?;
+        Ok(Some(SealedKey {
+            user_key: zeroize::Zeroizing::new(raw),
+            keys_fingerprint: v["keys_fingerprint"].as_str().map(str::to_owned),
+            enc_private_key: v["enc_private_key"]
+                .as_str()
+                .map(|s| zeroize::Zeroizing::new(s.to_owned())),
+        }))
+    }
 }
 
 impl KeyStore for KeychainKeystore {
@@ -169,36 +281,21 @@ impl KeyStore for KeychainKeystore {
 
     fn load_wrapped(&self, label: &AccountLabel) -> Result<Option<SealedKey>, KeyError> {
         self.guard()?;
-        let account = Self::account(label);
-        let mut pairs = self.base_query(&account);
-        pairs.push((
-            unsafe { CFString::wrap_under_get_rule(kSecReturnData) },
-            CFBoolean::true_value().into_CFType(),
-        ));
-        pairs.push((
-            unsafe { CFString::wrap_under_get_rule(kSecMatchLimit) },
-            unsafe { CFString::wrap_under_get_rule(kSecMatchLimitOne) }.into_CFType(),
-        ));
-        let dict = CFDictionary::from_CFType_pairs(&pairs);
-        let mut out: core_foundation::base::CFTypeRef = std::ptr::null();
-        let status = unsafe { SecItemCopyMatching(dict.as_concrete_TypeRef(), &mut out) };
-        if status == errSecItemNotFound {
-            return Ok(None);
-        }
-        if status != 0 {
-            return Err(KeyError::KeyStore(Error::from_code(status).to_string()));
-        }
-        let data = unsafe { CFData::wrap_under_get_rule(out as _) };
-        let v: serde_json::Value = serde_json::from_slice(data.bytes())
-            .map_err(|e| KeyError::KeyStore(format!("corrupt keychain record: {e}")))?;
-        let raw = base64_parse(v["user_key"].as_str().unwrap_or_default())?;
-        Ok(Some(SealedKey {
-            user_key: zeroize::Zeroizing::new(raw),
-            keys_fingerprint: v["keys_fingerprint"].as_str().map(str::to_owned),
-            enc_private_key: v["enc_private_key"]
-                .as_str()
-                .map(|s| zeroize::Zeroizing::new(s.to_owned())),
-        }))
+        self.copy_sealed(&Self::account(label), None)
+    }
+
+    /// 14.10 核心：生物解鎖流**必經**系統級 LAContext.evaluate_policy——
+    /// 檔案型鑰匙圈 ACL 對建立者 partition 免提示,不先 evaluate 的話
+    /// daemon 自己讀自己寫的 item 根本不會問指紋（假保護,使用者實錄）。
+    /// evaluate 通過的 context 以 `kSecUseAuthenticationContext` 綁進查詢,
+    /// 讓 SecItem 層沿用同一份辨識結果（拒否/錯指→不上拋鑰）。
+    fn load_wrapped_biometric(
+        &self,
+        label: &AccountLabel,
+    ) -> Result<Option<SealedKey>, KeyError> {
+        self.guard()?;
+        let ctx = evaluate_biometric_prompt()?;
+        self.copy_sealed(&Self::account(label), Some(ctx))
     }
 
     fn clear(&self, label: &AccountLabel) -> Result<(), KeyError> {
@@ -260,6 +357,61 @@ mod tests {
         assert!(!ks.biometric_available());
     }
 
+    /// BW_KEYS_LA_MOCK 是進程級 env：用靜態鎖把碰它的測串行化,
+    /// 防「deny 測正跑、pass 測手滑 remove_var → 真 prompt 在 CI 彈窗」。
+    static MOCK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn with_la_mock<T>(mode: &str, f: impl FnOnce() -> T) -> T {
+        let _g = MOCK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("BW_KEYS_LA_MOCK", mode) };
+        let out = f();
+        unsafe { std::env::remove_var("BW_KEYS_LA_MOCK") };
+        out
+    }
+
+    fn query_key_names(pairs: &[(CFString, CFType)]) -> Vec<String> {
+        pairs.iter().map(|(k, _)| k.to_string()).collect()
+    }
+
+    /// 14.10 假保護回歸哨：生物流查詢必含 `kSecUseAuthenticationContext`、
+    /// 普通讀取必不含（錯了指紋卻直讀＝這鍵漏了）。
+    #[test]
+    fn biometric_query_binds_auth_context_only_when_given() {
+        let ks = KeychainKeystore::with_service("dev.bitward.test", true);
+        let ctx = CFString::from("sentinel-context").into_CFType();
+        let with = ks.biometric_query_pairs("a@b", Some(ctx));
+        let without = ks.biometric_query_pairs("a@b", None);
+        let want = unsafe { CFString::wrap_under_get_rule(kSecUseAuthenticationContext) };
+        assert!(
+            query_key_names(&with).contains(&want.to_string()),
+            "生物流查詢遺失 LAContext 綁定鍵"
+        );
+        assert!(
+            !query_key_names(&without).contains(&want.to_string()),
+            "普通讀取不應掛 auth-context（自動解鎖不該彈窗）"
+        );
+    }
+
+    /// deny 旗：evaluate 拒否路徑（不碰真 prompt）→ 明確錯誤上拋,
+    /// hub 據此回「生物辨識遭拒絕或失敗」而非直入庫。
+    #[test]
+    fn biometric_load_denied_mock_returns_error() {
+        let ks = KeychainKeystore::with_service("dev.bitward.test", true);
+        let label = AccountLabel::new("mock-deny@bitward.test");
+        let r = with_la_mock("deny", || ks.load_wrapped_biometric(&label));
+        let e = r.expect_err("deny 旗必上拋").to_string();
+        assert!(e.contains("拒絕"), "錯誤訊息應帶拒否語意：{e}");
+    }
+
+    /// pass 旗：跳過真 prompt 但**照走綁定 context 的 SecItem 查詢**
+    /// （未評估的 LAContext 對本進程建立的 item 不阻斷）；查無 → Ok(None)。
+    #[test]
+    fn biometric_load_pass_mock_queries_with_context() {
+        let ks = KeychainKeystore::with_service("dev.bitward.test", true);
+        let label = AccountLabel::new("mock-pass-不存在的帳號@bitward.test");
+        let r = with_la_mock("pass", || ks.load_wrapped_biometric(&label));
+        assert!(matches!(r, Ok(None)), "綁定查詢應正常回 None：{r:?}");
+    }
+
     #[test]
     fn biometric_acl_flags_are_current_set_only() {
         // 批次 14.8：常數值對照 Apple 標頭 kSecAccessControlBiometryCurrentSet=(1<<3)。
@@ -300,6 +452,13 @@ mod tests {
             Ok(Some(sealed)) => {
                 assert_eq!(&*sealed.user_key, &*key.user_key, "取回必同位元組");
                 assert_eq!(sealed.keys_fingerprint.as_deref(), Some("rt-fp"));
+                // 14.10：綁定 auth-context 的生物流查詢照樣取回同位元組
+                // （pass 旗跳過真 prompt,但 SecItem 綁定路徑全程是真的）。
+                let bio = with_la_mock("pass", || ks.load_wrapped_biometric(&label));
+                match bio.expect("綁定查詢必成") {
+                    Some(s2) => assert_eq!(&*s2.user_key, &*key.user_key, "生物流必同鑰"),
+                    None => panic!("綁定查詢竟回 None"),
+                }
             }
             Ok(None) => panic!("store 後 read 竟回 None"),
             Err(e) => {

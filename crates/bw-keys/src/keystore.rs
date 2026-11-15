@@ -51,6 +51,18 @@ pub enum WrapStrength {
 pub trait KeyStore: Send + Sync {
     fn store_wrapped(&self, label: &AccountLabel, key: &SealedKey) -> Result<(), KeyError>;
     fn load_wrapped(&self, label: &AccountLabel) -> Result<Option<SealedKey>, KeyError>;
+    /// 生物解鎖流專用讀取（批次 14.10）：實作者**必須**先經系統級生物
+    /// 辨識（LAContext.evaluate_policy）通過才回鑰——檔案型 login keychain
+    /// 的經典 ACL 對建立者 partition 免提示放行,裸 SecItemCopyMatching
+    /// 等於假保護（使用者實錄：按 Touch ID 鈕直接進庫、指紋沒發生）。
+    /// 不支援生物的封存后端直接委派 `load_wrapped`（其可用性由呼叫端
+    /// `biometric_available` 把關）。
+    fn load_wrapped_biometric(
+        &self,
+        label: &AccountLabel,
+    ) -> Result<Option<SealedKey>, KeyError> {
+        self.load_wrapped(label)
+    }
     fn clear(&self, label: &AccountLabel) -> Result<(), KeyError>;
     fn biometric_available(&self) -> bool {
         false
