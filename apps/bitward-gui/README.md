@@ -124,6 +124,12 @@ BITWARD_GUI_SOCK="$HOME/Library/Group Containers/group.8V5224A99M.io.bitward.dev
 4. 拒絕/超時 → 欄下紅字「生物辨識遭拒絕或失敗」，不清主密碼欄。
 5. 一句話安全說明：現在關掉 App 逾時後會真的要密碼/Touch ID，不再一鍵放行。
 
+**註冊真相源**：`~/Library/LaunchAgents/io.bitward.dev.daemon.plist` 由
+`bins/bitwarderd/src/service.rs::render_plist` 渲染（`service install` 寫入）；
+daemon 每次啟動比對現存註冊與模板,不同即**自癒合**覆寫＋脫離進程重載
+（根治「裝了新 binary、註冊停在舊模板」）。bundle 內 staged 的 plist 是
+SMAppService 時代殭屍拷貝,非真相源。
+
 ### 徽章無感收斂證據（`NSH_GUI_SHOTS_DRAIN`）
 
 另跑一條獨立時間軸，證明 `OutboxDrained` 事件讓「未同步」徽章在 VW
