@@ -79,7 +79,12 @@ clap = { version = "4", features = ["derive"] }
 dirs = "5"
 libc = "0.2"
 rcgen = "0.13"
-rustls = { version = "0.23", features = ["ring"] }
+# 批次 14.6：必關 default-features——rustls 0.23 default 含 aws-lc-rs,與 ring
+# 並存 → reqwest/hyper-rustls 的 ClientConfig::builder() auto-detect 見雙
+# provider panic(真機 daemon.log 12 次 crypto/mod.rs:249 實錄,進程僥倖存活但
+# 該次 https 永失回覆→GUI 間歇「沒 daemon」)。顯式補 std/tls12/logging
+# (default 內含項),只留 ring 單一 provider。
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"] }
 tokio-rustls = "0.26"
 rustls-pki-types = "1"
 
