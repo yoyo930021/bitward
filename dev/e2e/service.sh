@@ -24,7 +24,7 @@ echo "ok: install 落檔含 KEYCHAIN=1"
 #    （臨時 data-dir/sock）→ 啟動即覆寫回模板值。
 perl -0pi -e 's/<string>1<\/string>/<string>0<\/string>/' "$P"
 grep -q '<string>0</string>' "$P" || fail "改版未生效（前置條件）"
-HOME="$H" BW_SERVICE_ALLOW_DEV_HEAL=1 nohup "$BIN" --data-dir "$H/dd" --sock "$H/s" --push-app-group group.test \
+HOME="$H" BW_SERVICE_ALLOW_DEV_HEAL=1 BW_SERVICE_NO_RELOAD=1 nohup "$BIN" --data-dir "$H/dd" --sock "$H/s" --push-app-group group.test \
   >"$H/daemon.log" 2>&1 &
 DPID=$!
 trap 'kill $DPID 2>/dev/null || true; rm -rf "$H"' EXIT
@@ -37,7 +37,7 @@ echo "ok: 啟動自癒合覆寫舊註冊"
 # 3. 冪等：再啟動一次，不應重複觸發（同文跳過）。
 kill $DPID 2>/dev/null || true; wait $DPID 2>/dev/null || true
 : >"$H/daemon2.log"
-HOME="$H" BW_SERVICE_ALLOW_DEV_HEAL=1 nohup "$BIN" --data-dir "$H/dd" --sock "$H/s" --push-app-group group.test \
+HOME="$H" BW_SERVICE_ALLOW_DEV_HEAL=1 BW_SERVICE_NO_RELOAD=1 nohup "$BIN" --data-dir "$H/dd" --sock "$H/s" --push-app-group group.test \
   >"$H/daemon2.log" 2>&1 &
 DPID2=$!
 trap 'kill $DPID2 2>/dev/null || true; rm -rf "$H"' EXIT

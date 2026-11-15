@@ -190,9 +190,15 @@ pub fn self_heal(group: Option<&str>, sock: Option<&str>) -> Option<String> {
     }
     std::fs::write(&plist, &rendered).ok()?;
     let sentinel = crate::default_data_dir().join("self-heal.result");
-    spawn_reload(&plist, &sentinel);
+    let reloaded = if std::env::var("BW_SERVICE_NO_RELOAD").is_err() {
+        spawn_reload(&plist, &sentinel);
+        "已覆寫並派生重載"
+    } else {
+        let _ = std::fs::write(&sentinel, "written-no-reload");
+        "已覆寫（NO_RELOAD:不派重載子）"
+    };
     Some(format!(
-        "self-heal: {}.plist 與模板不符，已覆寫並派生重載（結果哨兵：{}）",
+        "self-heal: {}.plist 與模板不符，{reloaded}（結果哨兵：{}）",
         service_label(),
         sentinel.display()
     ))
