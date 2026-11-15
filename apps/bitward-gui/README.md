@@ -126,9 +126,18 @@ BITWARD_GUI_SOCK="$HOME/Library/Group Containers/group.8V5224A99M.io.bitward.dev
 
 **註冊真相源**：`~/Library/LaunchAgents/io.bitward.dev.daemon.plist` 由
 `bins/bitwarderd/src/service.rs::render_plist` 渲染（`service install` 寫入）；
-daemon 每次啟動比對現存註冊與模板,不同即**自癒合**覆寫＋脫離進程重載
-（根治「裝了新 binary、註冊停在舊模板」）。bundle 內 staged 的 plist 是
+daemon 每次啟動比對現存註冊與模板,不同即**自癒合**覆寫＋派生重載子進程
+（`process_group(0)` 脫組免父死連坐、bootstrap 失敗重試 3×2s、終態寫
+`<data_dir>/self-heal.result` 哨兵；dev/target 二進位預設不自癒,
+`BW_SERVICE_ALLOW_DEV_HEAL=1` 白名單放行給 e2e）。bundle 內 staged 的 plist 是
 SMAppService 時代殭屍拷貝,非真相源。
+
+**真域操作紀律**（14.7 污染事故：驗證用 debug 進程把常駐註冊的
+ProgramArguments 換成 repo 路徑,使用者 GUI 連上舊殭屍報「無法連線 daemon」）：
+凡在真 launchd 域做驗證,前後必跑
+`plutil -p ~/Library/LaunchAgents/io.bitward.dev.daemon.plist | grep -A1 ProgramArguments`
+確認指回 `/Applications`;自動化 e2e 一律用 `BW_SERVICE_LABEL` 獨立 label
+（service.sh 第四段範式）,別讓 debug 進程碰常駐域。
 
 ### 徽章無感收斂證據（`NSH_GUI_SHOTS_DRAIN`）
 

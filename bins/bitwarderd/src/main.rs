@@ -268,6 +268,7 @@ async fn main() -> Result<(), String> {
             action,
             std::env::current_exe().map_err(|e| e.to_string())?,
             args.push_app_group.as_deref(),
+            args.sock.as_ref().and_then(|p| p.to_str()),
         )?;
         println!("{msg}");
         return Ok(());
@@ -277,7 +278,10 @@ async fn main() -> Result<(), String> {
     }
     // 批次 14.5：啟動自癒合——現存 LaunchAgent 註冊與模板不符即覆寫＋排程重載
     // （根治「裝了新 binary、註冊停在舊模板」；只在 plist 指向本檔時觸發）。
-    if let Some(msg) = service::self_heal(args.push_app_group.as_deref()) {
+    if let Some(msg) = service::self_heal(
+        args.push_app_group.as_deref(),
+        args.sock.as_ref().and_then(|p| p.to_str()),
+    ) {
         tracing::warn!("{msg}");
     }
     let data_dir = args.data_dir.unwrap_or_else(default_data_dir);
