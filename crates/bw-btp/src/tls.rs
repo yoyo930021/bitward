@@ -192,6 +192,18 @@ impl ServerCertVerifier for PinVerifier {
     }
 }
 
+/// 批次 14.6:裝 ring 為 process-level 預設 CryptoProvider(冪.Once)。
+/// reqwest/hyper-rustls 走 `ClientConfig::builder()` 的 auto-detect,當 rustls
+/// 被統一出 ring＋aws-lc-rs 雙 provider 時會 panic(真機 12 次實錄);顯式
+/// install_default 後 auto-detect 不再發生,物理上根除該 panic。各二進位
+/// main() 頂端呼叫一次即涵蓋進程內全部 rustls 使用者。
+pub fn init_crypto_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 pub fn client_config(pin: &str) -> Arc<rustls::ClientConfig> {
     let verifier = Arc::new(PinVerifier {
         pin: pin.to_string(),
@@ -315,5 +327,28 @@ mod tests {
         assert!(bad.is_err());
         let _ = srv2.await;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod provider_tests {
+    /// 批次 14.6 復現/回歸罩:reqwest/hyper-rustls 走 `ClientConfig::builder()`
+    /// 的 process-default auto-detect。rustls 被統一出 ring＋aws-lc-rs 雙
+    /// provider 時該行 panic(真機 daemon.log 12 次 crypto/mod.rs:249 實錄)。
+    /// `init_crypto_provider()` 顯式裝 ring 為預設後,auto-detect 不再發生。
+    /// 修前(未 init)直接 builder() 會 panic=復現;修後 init 再 builder 必綠=回歸。
+    #[test]
+    fn auto_detect_resolves_after_provider_init() {
+        bw_btp_init();
+        let r = std::panic::catch_unwind(|| {
+            let _ = rustls::ClientConfig::builder();
+        });
+        assert!(r.is_ok(), "init_crypto_provider 後 auto-detect 仍 panic(雙 provider 未根除)");
+        // 預設 provider 確已落定位於可用。
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+    }
+
+    fn bw_btp_init() {
+        super::init_crypto_provider();
     }
 }

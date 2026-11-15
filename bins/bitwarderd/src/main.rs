@@ -256,6 +256,9 @@ pub(crate) fn bind_sock(
 
 #[tokio::main]
 async fn main() -> Result<(), String> {
+    // 批次 14.6:最先裝 ring 為 CryptoProvider 預設,根除 reqwest/hyper-rustls
+    // auto-detect 雙 provider panic(詳見 bw_btp::tls::init_crypto_provider)。
+    bw_btp::tls::init_crypto_provider();
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();

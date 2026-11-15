@@ -629,6 +629,8 @@ fn default_data_dir() -> PathBuf {
 
 #[tokio::main]
 async fn main() {
+    // 批次 14.6:同 bitwarderd,先裝 ring provider 根除 auto-detect panic。
+    bw_btp::tls::init_crypto_provider();
     if let Err(e) = run().await {
         eprintln!("error: {e}");
         std::process::exit(1);
