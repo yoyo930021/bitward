@@ -23,6 +23,13 @@
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<!-- 批次 14.5：與沙盒版字面一致（註冊真相源實為 service.rs 模板；
+		     本檔僅 SMAppService 送件形態參考，非真相源）。 -->
+		<key>BW_KEYS_ENABLE_KEYCHAIN</key>
+		<string>1</string>
+	</dict>
 	<key>KeepAlive</key>
 	<true/>
 	<key>ThrottleInterval</key>

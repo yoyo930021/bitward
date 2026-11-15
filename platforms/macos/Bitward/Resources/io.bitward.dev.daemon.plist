@@ -5,7 +5,11 @@
 	<!-- SMAppService.agent(plistName:) 正確形態：歸因給 App（__CFBundleIdentifier）
 	     + BundleProgram（bundle 相對路徑）。ProgramArguments[0] 為 argv[0] 佔位，
 	     實際執行檔由 BundleProgram 決定。歸因後 launchd 以 App 的 group 成員
-	     身分跑 daemon → 可 bind group container socket。 -->
+	     身分跑 daemon → 可 bind group container socket。
+	     批次 14.5 註記：本檔（bundle 內 staged 拷貝）非註冊真相源——實際落地
+	     ~/Library/LaunchAgents 的內容由 bins/bitwarderd/src/service.rs::render_plist
+	     渲染（`service install` 寫入、daemon 啟動自癒合對齊）；改模板請改
+	     service.rs，本檔僅留 SMAppService 送件形態參考。 -->
 	<key>Label</key>
 	<string>io.bitward.dev.daemon</string>
 	<key>__CFBundleIdentifier</key>
