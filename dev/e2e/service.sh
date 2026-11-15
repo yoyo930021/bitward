@@ -53,7 +53,14 @@ echo "ok: 同文跳過（冪等）"
 TLABEL="io.bitward.dev.daemontest$$"
 TSOCK="$H/test.sock"
 TP="$HOME/Library/LaunchAgents/$TLABEL.plist"
-cleanup4() { launchctl bootout "gui/$(id -u)/$TLABEL" 2>/dev/null || true; rm -f "$TP"; }
+cleanup4() {
+    launchctl bootout "gui/$(id -u)/$TLABEL" 2>/dev/null || true
+    # 重載子的 bootstrap 重試（3×2s）可能在首次 bootout 後又把 job 復活
+    # （14.7 實錄:幽靈 test daemon 頂掉真 label 註冊)→ 延後複逐一次。
+    sleep 3
+    launchctl bootout "gui/$(id -u)/$TLABEL" 2>/dev/null || true
+    rm -f "$TP"
+}
 trap 'cleanup4; kill $DPID2 2>/dev/null || true; rm -rf "$H"' EXIT
 BW_SERVICE_LABEL="$TLABEL" BW_SERVICE_ALLOW_DEV_HEAL=1 \
 BITWARD_DATA_DIR="$H/dd" \
