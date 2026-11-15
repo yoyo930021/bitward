@@ -11,7 +11,7 @@ use security_framework::access_control::SecAccessControl;
 use security_framework::base::Error;
 use security_framework::passwords::{delete_generic_password, get_generic_password};
 use security_framework_sys::access_control::{
-    kSecAccessControlBiometryCurrentSet, kSecAccessControlUserPresence,
+    kSecAccessControlBiometryCurrentSet,
 };
 use security_framework_sys::base::errSecItemNotFound;
 use security_framework_sys::item::{
@@ -25,9 +25,23 @@ use crate::{KeyError, KeyStore};
 
 /// ACL 常數來源：
 /// https://developer.apple.com/documentation/security/ksecaccesscontrolbiometrycurrentset
-/// https://developer.apple.com/documentation/security/ksecaccesscontroluserpresence
-pub const BIOMETRIC_ACL_FLAGS: usize =
-    kSecAccessControlBiometryCurrentSet | kSecAccessControlUserPresence;
+/// 批次 14.8：必**只用** BiometryCurrentSet——`| UserPresence` 是非法組合
+/// （Apple 標頭明言 UserPresence 只能配 ApplicationPassword/PrivateKeyUsage），
+/// `SecAccessControlCreateWithFlags` 回 **OSStatus -50** → biometric_available
+/// 恆 false → hub 永遠退回 FileKeyStore → Touch ID 鈕不出來（Main 最小 C
+/// probe 一秒復現實錄）。BiometryCurrentSet 本身即「當前指紋集」語意,更嚴。
+pub const BIOMETRIC_ACL_FLAGS: usize = kSecAccessControlBiometryCurrentSet;
+
+/// 建 ACL 必配 `WhenPasscodeSetThisDeviceOnly` 保護階（14.8 probe 實錄：
+/// security-framework 的 `create_with_flags` 傳 protection=None 落 API 預設
+/// 階,與 BiometryCurrentSet 不相容同報 -50;C probe 顯式帶此階才 OK）。
+fn create_biometric_acl() -> Result<SecAccessControl, String> {
+    SecAccessControl::create_with_protection(
+        Some(security_framework::access_control::ProtectionMode::AccessibleWhenPasscodeSetThisDeviceOnly),
+        BIOMETRIC_ACL_FLAGS,
+    )
+    .map_err(|e| e.to_string())
+}
 
 /// 金鑰記錄的 keychain service 名稱（dev.bitward.* 反域名，避免與官方
 /// `Bitwarden CLI` 項目相撞）。來源：§1 金鑰落盤形態；命名為本專案自訂。
@@ -88,8 +102,7 @@ impl KeyStore for KeychainKeystore {
         });
         // 先刪後加：SecItemAdd 不具 upsert 語意。
         let _ = delete_generic_password(&self.service, &Self::account(label));
-        let acl = SecAccessControl::create_with_flags(BIOMETRIC_ACL_FLAGS)
-            .map_err(|e| KeyError::KeyStore(format!("SecAccessControl: {e}")))?;
+        let acl = create_biometric_acl().map_err(KeyError::KeyStore)?;
         let pairs: Vec<(CFString, CFType)> = vec![
             (
                 unsafe { CFString::wrap_under_get_rule(kSecClass) },
@@ -150,7 +163,20 @@ impl KeyStore for KeychainKeystore {
 
     fn biometric_available(&self) -> bool {
         // 建立成功即代表生物辨識政策可成立（無硬體/未錄入時 create 回錯）。
-        self.enabled && SecAccessControl::create_with_flags(BIOMETRIC_ACL_FLAGS).is_ok()
+        if !self.enabled {
+            tracing::debug!("keychain biometric: runtime flag 未開,退回檔案封存");
+            return false;
+        }
+        match create_biometric_acl() {
+            Ok(_) => {
+                tracing::info!("keychain biometric: available（ACL 建立成功）");
+                true
+            }
+            Err(e) => {
+                tracing::warn!("keychain biometric: unavailable, ACL 建立失敗：{e}");
+                false
+            }
+        }
     }
 
     fn wrap_strength(&self) -> WrapStrength {
@@ -189,8 +215,58 @@ mod tests {
     }
 
     #[test]
-    fn biometric_acl_flags_are_current_set_and_presence() {
-        // 常數值對照 Apple 標頭：(1<<3) | (1<<0)
-        assert_eq!(BIOMETRIC_ACL_FLAGS, (1 << 3) | (1 << 0));
+    fn biometric_acl_flags_are_current_set_only() {
+        // 批次 14.8：常數值對照 Apple 標頭 kSecAccessControlBiometryCurrentSet=(1<<3)。
+        // UserPresence 不得混入（只能配 ApplicationPassword/PrivateKeyUsage,
+        // 混入 CreateWithFlags 回 -50）——本測在錯組合下直接鎖死回歸。
+        assert_eq!(BIOMETRIC_ACL_FLAGS, 1 << 3);
+    }
+
+    /// 真鑰端到端（治「斷言止步」）：隨機 32B 假 user key 走 KeychainKeystore
+    /// wrap→存→取回同位元組→刪。獨立 service 名避撞真鑰；無生物硬體
+    /// （biometric_available false）整組跳過（既有 fallback 語意）。
+    /// 同進程 read 若遭 macOS 擋互動（-25308,無人值守场景）視為環境跳過,
+    /// prompt 行為由真機人驗（README 14b 清單）。
+    #[test]
+    fn keychain_wrap_store_load_roundtrip() {
+        let ks = KeychainKeystore::with_service("dev.bitward.test", true);
+        if !ks.biometric_available() {
+            eprintln!("skip: 本機無生物硬體/未錄入,跳過真鑰測");
+            return;
+        }
+        let label = AccountLabel::new("roundtrip@bitward.test");
+        let key = SealedKey {
+            user_key: zeroize::Zeroizing::new(vec![0xA5; 32]),
+            keys_fingerprint: Some("rt-fp".into()),
+            enc_private_key: None,
+        };
+        // 環境跳過：未簽章 dev 進程無 keychain entitlement（-50/34011 類）,
+        // 真機 re-seal 由已簽 daemon 在 14b 人驗鏈路證（README 清單）。
+        if let Err(e) = ks.store_wrapped(&label, &key) {
+            let s = e.to_string();
+            assert!(!s.contains("-50"), "ACL 非法組合回潮：{s}");
+            eprintln!("note: keychain store 需簽章 entitlement（{s}）,dev 環境跳過");
+            return;
+        }
+        let got = ks.load_wrapped(&label);
+        // 存檔路徑已證（store 成功=ACL 合法）；read 需生物互動時環境跳過。
+        match got {
+            Ok(Some(sealed)) => {
+                assert_eq!(&*sealed.user_key, &*key.user_key, "取回必同位元組");
+                assert_eq!(sealed.keys_fingerprint.as_deref(), Some("rt-fp"));
+            }
+            Ok(None) => panic!("store 後 read 竟回 None"),
+            Err(e) => {
+                let s = e.to_string();
+                assert!(
+                    s.contains("-25308") || s.contains("interaction") || s.contains("auth"),
+                    "read 意外失敗：{s}"
+                );
+                eprintln!("note: read 需生物互動（{s}）,prompt 由真機人驗");
+            }
+        }
+        ks.clear(&label).expect("清理測試項必成");
+        assert!(matches!(ks.load_wrapped(&label), Ok(None)));
     }
 }
+

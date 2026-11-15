@@ -373,7 +373,11 @@ impl UnlockMachine {
         // enrollment：成功解鎖後把金鑰封存給離線解鎖用（若有 keystore）。
         if let (Some(ks), VaultState::Unlocked { keys, .. }) = (&self.keystore, &*st) {
             let sealed = crate::keystore::SealedKey::from_bundle(keys);
-            let _ = ks.store_wrapped(&self.label, &sealed);
+            // 14.8：封存失敗不再靜默——未簽章 dev 進程撞 keychain entitlement
+            // 壁時,log 直接可見（真機 re-seal 成敗以此行為準）。
+            if let Err(e) = ks.store_wrapped(&self.label, &sealed) {
+                tracing::warn!("keystore re-seal 失敗（下次生物解鎖不可用）：{e}");
+            }
         }
         let epoch = self.next_epoch();
         self.needs_reauth.store(false, Ordering::SeqCst);

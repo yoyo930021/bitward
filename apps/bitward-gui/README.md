@@ -124,6 +124,13 @@ BITWARD_GUI_SOCK="$HOME/Library/Group Containers/group.8V5224A99M.io.bitward.dev
 4. 拒絕/超時 → 欄下紅字「生物辨識遭拒絕或失敗」，不清主密碼欄。
 5. 一句話安全說明：現在關掉 App 逾時後會真的要密碼/Touch ID，不再一鍵放行。
 
+**封存邊界（14.8 實錄）**：ACL 項寫入需簽章 entitlement——未簽章 dev／ad-hoc
+二進位 `SecItemAdd` 回 "A required entitlement is not present"（re-seal 失敗
+現在會 warn 進 log，不再靜默）；只有**裝機版 Developer ID daemon** 走得通
+第 2 步。ACL flag 亦已修正：`BiometryCurrentSet` 單用＋
+`WhenPasscodeSetThisDeviceOnly` 保護階（混 UserPresence 或默認階皆 -50，
+C/Rust 雙 probe 實錄）。
+
 **註冊真相源**：`~/Library/LaunchAgents/io.bitward.dev.daemon.plist` 由
 `bins/bitwarderd/src/service.rs::render_plist` 渲染（`service install` 寫入）；
 daemon 每次啟動比對現存註冊與模板,不同即**自癒合**覆寫＋派生重載子進程
