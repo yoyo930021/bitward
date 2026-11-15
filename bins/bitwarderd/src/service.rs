@@ -154,22 +154,28 @@ fn desired_plist(exe: &Path, group: &str, sock: Option<&str>) -> String {
     )
 }
 
-/// 自癒合守門（純函數，單測點）——三條全過才觸發：
+/// 自癒合守門（純函數，單測點）——四條全過才觸發：
 /// 1. 現存 plist 存在且與模板字串不符（heal_needed）；
 /// 2. 現存 plist 已指向本執行檔（不越權覆寫別人的註冊）；
 /// 3. 本執行檔**不在 repo 構建目錄**（`/target/` 路徑＝開發二進位）——
 ///    批次 14.7 紀律：dev 實例絕不碰常駐註冊域（23:15 污染事故根因；
 ///    e2e 要測自癒合請用 BW_SERVICE_LABEL 獨立 label + 白名單旗）。
+/// 4. 本進程由 launchd 直屬（PPID==1）或持 dev 白名單旗——批次 14.9 實錄：
+///    從 terminal 手跑 `/Applications` 版帶自訂 `--sock /tmp/149e.sock`，
+///    前兩條全過、把一次性探測參數當成真相源覆寫了註冊模板（幽靈參數
+///    頂掉常駐 13 分鐘）。只有「被 launchd 扶正的那個我」才有資格改註冊。
 pub fn should_self_heal(
     existing: Option<&str>,
     rendered: &str,
     exe: &str,
     allow_dev_binary: bool,
+    launched_by_launchd: bool,
 ) -> bool {
     let Some(e) = existing else { return false };
     heal_needed(Some(e), rendered)
         && e.contains(exe)
         && (allow_dev_binary || !exe.contains("/target/"))
+        && (allow_dev_binary || launched_by_launchd)
 }
 
 /// daemon 啟動自癒合（非 `service install` 路徑）：現存 plist 若與模板不符，
@@ -179,12 +185,14 @@ pub fn self_heal(group: Option<&str>, sock: Option<&str>) -> Option<String> {
     let existing = std::fs::read_to_string(&plist).ok()?; // 未安裝 → 跳過
     let exe = std::env::current_exe().ok()?;
     let allow_dev = std::env::var("BW_SERVICE_ALLOW_DEV_HEAL").is_ok();
+    let under_launchd = unsafe { libc::getppid() } == 1;
     let rendered = desired_plist(&exe, group.unwrap_or("group.8V5224A99M.io.bitward.dev"), sock);
     if !should_self_heal(
         Some(&existing),
         &rendered,
         &exe.display().to_string(),
         allow_dev,
+        under_launchd,
     ) {
         return None;
     }
@@ -349,23 +357,30 @@ mod tests {
     fn self_heal_guard_blocks_dev_binaries_and_foreign_exes() {
         let rendered = render_plist(EXE, GROUP, LOG, SOCK, None);
         let stale = rendered.replace("<string>1</string>", "<string>0</string>");
-        // 正式二進位 + 指向本檔 + 內容過舊 → 觸發。
-        assert!(should_self_heal(Some(&stale), &rendered, EXE, false));
+        // 正式二進位 + 指向本檔 + 內容過舊 + launchd 直屬 → 觸發。
+        assert!(should_self_heal(Some(&stale), &rendered, EXE, false, true));
         // 同文 → 跳過（冪等）。
-        assert!(!should_self_heal(Some(&rendered), &rendered, EXE, false));
+        assert!(!should_self_heal(Some(&rendered), &rendered, EXE, false, true));
         // plist 指向別家（/Applications vs 本檔是 temp）→ 跳過，不越權。
-        assert!(!should_self_heal(Some(&stale), &rendered, "/somewhere/else/bitwarderd", false));
+        assert!(!should_self_heal(
+            Some(&stale), &rendered, "/somewhere/else/bitwarderd", false, true
+        ));
+        // 14.9 四閘：正式二進位但**非 launchd 直屬**（terminal 手跑探測帶自訂
+        // --sock,把一次性參數當真相源覆寫註冊、幽靈頂掉常駐 13 分鐘的實錄）
+        // → 跳過；dev 白名單旗仍可放行（e2e 於 temp HOME 內驗判定軸）。
+        assert!(!should_self_heal(Some(&stale), &rendered, EXE, false, false));
+        assert!(should_self_heal(Some(&stale), &rendered, EXE, true, false));
         // repo 構建目錄二進位（/target/debug|release）→ 預設跳過（14.7 紀律：
         // dev 實例絕不碰常駐註冊域）；e2e 白名單旗可放行。
         let dev = render_plist("/repo/target/debug/bitwarderd", GROUP, LOG, SOCK, None);
         let dev_stale = dev.replace("<string>1</string>", "<string>0</string>");
         assert!(!should_self_heal(
-            Some(&dev_stale), &dev, "/repo/target/debug/bitwarderd", false
+            Some(&dev_stale), &dev, "/repo/target/debug/bitwarderd", false, true
         ));
         assert!(should_self_heal(
-            Some(&dev_stale), &dev, "/repo/target/debug/bitwarderd", true
+            Some(&dev_stale), &dev, "/repo/target/debug/bitwarderd", true, false
         ));
         // 未安裝 → 跳過。
-        assert!(!should_self_heal(None, &rendered, EXE, false));
+        assert!(!should_self_heal(None, &rendered, EXE, false, true));
     }
 }
