@@ -4,21 +4,28 @@
 //! 啟用，未啟用時所有操作回 `KeyError::KeyStore("...disabled...")`。
 
 use core_foundation::base::{CFType, TCFType};
+use core_foundation::boolean::CFBoolean;
 use core_foundation::data::CFData;
 use core_foundation::dictionary::CFDictionary;
 use core_foundation::string::CFString;
 use security_framework::access_control::SecAccessControl;
 use security_framework::base::Error;
-use security_framework::passwords::{delete_generic_password, get_generic_password};
 use security_framework_sys::access_control::{
     kSecAccessControlBiometryCurrentSet,
 };
 use security_framework_sys::base::errSecItemNotFound;
 use security_framework_sys::item::{
     kSecAttrAccessControl, kSecAttrAccount, kSecAttrService, kSecClass, kSecClassGenericPassword,
-    kSecValueData,
+    kSecMatchLimit, kSecReturnData, kSecValueData,
 };
-use security_framework_sys::keychain_item::SecItemAdd;
+use security_framework_sys::keychain_item::{SecItemAdd, SecItemCopyMatching, SecItemDelete};
+
+// security-framework-sys 2.17：`One` 未外洩、`kSecUseDataProtectionKeychain` 藏在
+// OSX_10_15 feature 後面——皆依 SecItem.h 同符號自宣告，免動 feature 矩陣。
+unsafe extern "C" {
+    static kSecMatchLimitOne: core_foundation::string::CFStringRef;
+    static kSecUseDataProtectionKeychain: core_foundation::string::CFStringRef;
+}
 
 use crate::keystore::{AccountLabel, SealedKey, WrapStrength};
 use crate::{KeyError, KeyStore};
@@ -91,19 +98,16 @@ impl KeychainKeystore {
     }
 }
 
-impl KeyStore for KeychainKeystore {
-    fn store_wrapped(&self, label: &AccountLabel, key: &SealedKey) -> Result<(), KeyError> {
-        self.guard()?;
-        let json = serde_json::json!({
-            "v": 1,
-            "user_key": base64_of(&key.user_key),
-            "keys_fingerprint": key.keys_fingerprint,
-            "enc_private_key": key.enc_private_key.as_deref(),
-        });
-        // 先刪後加：SecItemAdd 不具 upsert 語意。
-        let _ = delete_generic_password(&self.service, &Self::account(label));
-        let acl = create_biometric_acl().map_err(KeyError::KeyStore)?;
-        let pairs: Vec<(CFString, CFType)> = vec![
+impl KeychainKeystore {
+    /// 14.9 核心修正：掛生物 ACL 的 item 一律指定**檔案型 login keychain**
+    /// （`kSecUseDataProtectionKeychain=false`）。data-protection keychain
+    /// 對 SecItemAdd 強查 `keychain-access-groups` entitlement——實錄連
+    /// 「amfid 已放行、能正常啟動」的嵌套 bundle 主執行體都照樣 -34019
+    /// （entitlement 在 exec 層通過不等於 SecItem 層被認帳）；檔案型鑰匙圈
+    /// 走經典 ACL 語意（1Password/舊 Bitwarden 桌面版同款），不需任何
+    /// entitlement，Touch ID 照常守門。
+    fn base_query(&self, account: &str) -> Vec<(CFString, CFType)> {
+        vec![
             (
                 unsafe { CFString::wrap_under_get_rule(kSecClass) },
                 unsafe { CFString::wrap_under_get_rule(kSecClassGenericPassword) }.into_CFType(),
@@ -114,17 +118,47 @@ impl KeyStore for KeychainKeystore {
             ),
             (
                 unsafe { CFString::wrap_under_get_rule(kSecAttrAccount) },
-                CFString::from(Self::account(label).as_str()).into_CFType(),
+                CFString::from(account).into_CFType(),
             ),
             (
-                unsafe { CFString::wrap_under_get_rule(kSecValueData) },
-                CFData::from_buffer(json.to_string().as_bytes()).into_CFType(),
+                unsafe { CFString::wrap_under_get_rule(kSecUseDataProtectionKeychain) },
+                CFBoolean::from(false).into_CFType(),
             ),
-            (
-                unsafe { CFString::wrap_under_get_rule(kSecAttrAccessControl) },
-                acl.into_CFType(),
-            ),
-        ];
+        ]
+    }
+
+    fn delete_item(&self, account: &str) -> Result<(), security_framework::base::Error> {
+        let dict = CFDictionary::from_CFType_pairs(&self.base_query(account));
+        let status = unsafe { SecItemDelete(dict.as_concrete_TypeRef()) };
+        if status == 0 || status == errSecItemNotFound {
+            Ok(())
+        } else {
+            Err(Error::from_code(status))
+        }
+    }
+}
+
+impl KeyStore for KeychainKeystore {
+    fn store_wrapped(&self, label: &AccountLabel, key: &SealedKey) -> Result<(), KeyError> {
+        self.guard()?;
+        let json = serde_json::json!({
+            "v": 1,
+            "user_key": base64_of(&key.user_key),
+            "keys_fingerprint": key.keys_fingerprint,
+            "enc_private_key": key.enc_private_key.as_deref(),
+        });
+        // 先刪後加：SecItemAdd 不具 upsert 語意。
+        let _ = self.delete_item(&Self::account(label));
+        let acl = create_biometric_acl().map_err(KeyError::KeyStore)?;
+        let mut pairs = self.base_query(&Self::account(label));
+        pairs.push((
+            unsafe { CFString::wrap_under_get_rule(kSecValueData) },
+            CFData::from_buffer(json.to_string().as_bytes()).into_CFType(),
+        ));
+        pairs.push((
+            unsafe { CFString::wrap_under_get_rule(kSecAttrAccessControl) },
+            acl.into_CFType(),
+        ));
         let dict = CFDictionary::from_CFType_pairs(&pairs);
         let status = unsafe { SecItemAdd(dict.as_concrete_TypeRef(), std::ptr::null_mut()) };
         if status != 0 {
@@ -135,12 +169,27 @@ impl KeyStore for KeychainKeystore {
 
     fn load_wrapped(&self, label: &AccountLabel) -> Result<Option<SealedKey>, KeyError> {
         self.guard()?;
-        let bytes = match get_generic_password(&self.service, &Self::account(label)) {
-            Ok(b) => b,
-            Err(e) if e.code() == errSecItemNotFound => return Ok(None),
-            Err(e) => return Err(KeyError::KeyStore(e.to_string())),
-        };
-        let v: serde_json::Value = serde_json::from_slice(&bytes)
+        let account = Self::account(label);
+        let mut pairs = self.base_query(&account);
+        pairs.push((
+            unsafe { CFString::wrap_under_get_rule(kSecReturnData) },
+            CFBoolean::true_value().into_CFType(),
+        ));
+        pairs.push((
+            unsafe { CFString::wrap_under_get_rule(kSecMatchLimit) },
+            unsafe { CFString::wrap_under_get_rule(kSecMatchLimitOne) }.into_CFType(),
+        ));
+        let dict = CFDictionary::from_CFType_pairs(&pairs);
+        let mut out: core_foundation::base::CFTypeRef = std::ptr::null();
+        let status = unsafe { SecItemCopyMatching(dict.as_concrete_TypeRef(), &mut out) };
+        if status == errSecItemNotFound {
+            return Ok(None);
+        }
+        if status != 0 {
+            return Err(KeyError::KeyStore(Error::from_code(status).to_string()));
+        }
+        let data = unsafe { CFData::wrap_under_get_rule(out as _) };
+        let v: serde_json::Value = serde_json::from_slice(data.bytes())
             .map_err(|e| KeyError::KeyStore(format!("corrupt keychain record: {e}")))?;
         let raw = base64_parse(v["user_key"].as_str().unwrap_or_default())?;
         Ok(Some(SealedKey {
@@ -154,11 +203,8 @@ impl KeyStore for KeychainKeystore {
 
     fn clear(&self, label: &AccountLabel) -> Result<(), KeyError> {
         self.guard()?;
-        match delete_generic_password(&self.service, &Self::account(label)) {
-            Ok(()) => Ok(()),
-            Err(e) if e.code() == errSecItemNotFound => Ok(()),
-            Err(e) => Err(KeyError::KeyStore(e.to_string())),
-        }
+        self.delete_item(&Self::account(label))
+            .map_err(|e| KeyError::KeyStore(e.to_string()))
     }
 
     fn biometric_available(&self) -> bool {
