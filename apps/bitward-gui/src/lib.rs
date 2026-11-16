@@ -28,6 +28,19 @@ mod twofa;
 mod ui;
 #[cfg(target_os = "macos")]
 mod webauthn;
+/// Linux/Windows 無 objc2/AuthenticationServices 島（PR6-E2 閘：linux-gui CI 編譯實錄）：
+/// 存根給可懂失敗，登入路徑既有 error 列承接，不假裝可用。
+#[cfg(not(target_os = "macos"))]
+mod webauthn {
+    pub fn request_assertion(
+        _challenge: String,
+        _credential_ids: Vec<String>,
+        _rp_id: Option<String>,
+        on_done: impl FnOnce(Result<String, String>) + 'static,
+    ) {
+        on_done(Err("WebAuthn 安全金鑰島目前僅 macOS 可用".into()));
+    }
+}
 
 use std::cell::RefCell;
 use std::path::PathBuf;
