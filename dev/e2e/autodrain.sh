@@ -124,7 +124,15 @@ OLD_REFRESH=$(jq -r .refresh_token "$DATA/account.json")
 BITWARD_DATA_DIR=$PWD/$DATA ./target/debug/bitwarderd --data-dir "$DATA" --sock "$DATA/s" >>"$DATA/daemon.log" 2>&1 &
 PID=$!
 rm -f "$DATA/cli_session"
-for _ in $(seq 1 20); do [[ -S "$DATA/s" ]] && break; sleep 0.2; done
+# 就緒判定＝「連得通」而非「sock 檔在場」：前一個實例被 kill 後殭屍 sock 檔留盤，
+# `-S` 會假通過，ubuntu 冷啟綁定慢時 unlock 搶跑 connect refused（run 43873970229 實錄）。
+RDY=0
+for _ in $(seq 1 60); do
+  D status >/dev/null 2>&1 && { RDY=1; break; }
+  kill -0 "$PID" 2>/dev/null || { echo "--- daemon.log:"; tail -5 "$DATA/daemon.log"; break; }
+  sleep 0.25
+done
+[[ "$RDY" == 1 ]] || fail "重啟 daemon 未就緒（連不通 $DATA/s）"
 echo "$WP" | D unlock --password-stdin >/dev/null || fail "重啟後 unlock 失敗（14a 嚴格模式需主密碼）"
 D sync >/dev/null || fail "過期 token 重啟後 sync 未自癒（401 收口失效？）"
 NEW_ACCESS=$(jq -r .access_token "$DATA/account.json")

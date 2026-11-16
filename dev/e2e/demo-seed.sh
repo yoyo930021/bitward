@@ -42,8 +42,9 @@ sleep 0.3
 rm -rf "$DA"
 mkdir -p "$DA"
 nohup ./target/release/bitwarderd --data-dir "$PWD/$DA" --sock "$DA/s" >"$DA/log" 2>&1 &
-sleep 1
-[[ -S "$DA/s" ]] || fail "daemon 未起（$DA/s）"
+# 首啟無殭屍檔問題（目錄剛重建），但固定 sleep 1 在慢機仍會假失敗——輪詢到檔出現。
+for _ in $(seq 1 40); do [[ -S "$DA/s" ]] && break; sleep 0.25; done
+[[ -S "$DA/s" ]] || fail "daemon 未起（$DA/s；見 $DA/log）"
 
 # 3. 帳號：註冊＋登入（login 內含 sync，解鎖由 device assertion 接手）。
 echo "$WP" | B --json dev-register --server "$SRV" --email "$EMAIL" --password-stdin >/dev/null

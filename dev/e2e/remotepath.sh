@@ -95,7 +95,14 @@ pass "HubOffline 快速失敗（含 last_seen）"
 # 重啟 hub（模擬 wake 後的 app 醒來）→ 再試成功 + wake endpoint 已 POST 過（ntfy 有紀錄）
 BITWARD_DATA_DIR=$PWD/$DH ./target/debug/bitwarderd --data-dir $DH --sock $DH/s \
   --listen 127.0.0.1:$TLSPORT --ntfy "http://127.0.0.1:$NTPORT/$TOPIC" >>$DH/log 2>&1 & HUBPID=$!
-sleep 1
+# 同 autodrain/orgpath 慣例：kill 後殭屍 sock 檔讓固定 sleep 假就緒，以連通輪詢為準。
+RDY=0
+for _ in $(seq 1 60); do
+  B status >/dev/null 2>&1 && { RDY=1; break; }
+  kill -0 "$HUBPID" 2>/dev/null || { echo "--- hub log:"; tail -5 $DH/log; break; }
+  sleep 0.25
+done
+[[ "$RDY" == 1 ]] || fail "hub 重啟未就緒（連不通 $DH/s）"
 echo "$WP" | B unlock --password-stdin >/dev/null || fail "重啟後 unlock 失敗"
 T default ls --json | jq -e 'length >= 1' >/dev/null || fail "重啟後 remote 未恢復"
 pass "hub 重啟後 remote 收斂"
