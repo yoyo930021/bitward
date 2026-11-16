@@ -23,7 +23,6 @@
 //! | ciphers | `GET/POST {api}/ciphers`、`GET/PUT/DELETE {api}/ciphers/{id}` | 軟刪 `PUT .../delete`、還原 `POST|PUT .../restore` |
 //! | 附件 v2 | `POST {api}/ciphers/{id}/attachment/v2`、`GET/DELETE .../attachment/{aid}` | 只取 URL，上傳 PUT 由呼叫方做 |
 //! | 探測 | `GET {api}/config`、`GET {api}/version`、`GET {identity}/.well-known/openid-configuration` | |
-//! | 2FA 管理面 | `GET {api}/two-factor`、`POST/PUT/DELETE {api}/two-factor/*` | 見 `two_factor` 模組表 |
 //! | notifications | `WS {notifications}/hub?access_token=…` | 官方 json hub protocol；VW messagepack |
 
 pub mod auth;
@@ -32,7 +31,6 @@ pub mod json;
 pub mod notify;
 pub mod profile;
 pub mod sends;
-pub mod two_factor;
 pub mod vault;
 
 pub use auth::{
