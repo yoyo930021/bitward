@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Bitward Send 收件</title>
+<style>
+:root {
+  --bg:#f4f5f7; --card:#ffffff; --ink:#1c1e21; --muted:#6b7280;
+  --line:#e5e7eb; --accent:#1a73e8; --danger:#d93025; --ok:#188038;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#17181c; --card:#22242a; --ink:#e8eaed; --muted:#9aa0a6;
+          --line:#35373d; --accent:#8ab4f8; --danger:#f28b82; --ok:#81c995; }
+}
+* { box-sizing: border-box; }
+body { margin:0; min-height:100vh; display:flex; align-items:flex-start; justify-content:center;
+       background:var(--bg); color:var(--ink);
+       font:15px/1.6 -apple-system,"PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif; }
+main { width:min(620px,94vw); margin:8vh auto 40px; background:var(--card);
+       border:1px solid var(--line); border-radius:14px; padding:28px 30px; }
+h1 { font-size:18px; margin:0 0 4px; }
+.sub { color:var(--muted); font-size:13px; margin:0 0 18px; }
+.note { color:var(--muted); font-size:13.5px; }
+.err { color:var(--danger); font-size:14px; margin:10px 0; }
+.okline { color:var(--ok); font-size:14px; margin:10px 0; }
+input[type=password], textarea { width:100%; padding:9px 11px; border:1px solid var(--line);
+       border-radius:8px; background:transparent; color:var(--ink); font:inherit; }
+button { border:0; border-radius:8px; padding:9px 16px; font:inherit; cursor:pointer;
+       background:var(--accent); color:#fff; }
+button.ghost { background:transparent; color:var(--accent); border:1px solid var(--accent); }
+.row { display:flex; gap:10px; align-items:center; margin:14px 0; flex-wrap:wrap; }
+pre.content { white-space:pre-wrap; word-break:break-word; background:var(--bg);
+       border:1px solid var(--line); border-radius:8px; padding:14px; margin:8px 0; }
+.hidden-text { filter:blur(5px); cursor:pointer; }
+.meta { color:var(--muted); font-size:13px; }
+.foot { color:var(--muted); font-size:12px; margin-top:22px; border-top:1px solid var(--line);
+        padding-top:12px; }
+a.dl { color:var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title">Bitward Send 收件</h1>
+  <p class="sub">內容在你的瀏覽器以連結片段裡的金鑰解密；伺服器與本頁代理都只見過密文。</p>
+  <div id="body"><p class="note">讀取中…</p></div>
+  <p class="foot">金鑰片段（# 之後）不經伺服器上傳。此頁由本機 bitwarderd 提供。</p>
+</main>
+<script>
+/*JS-START*/
+"use strict";
+const BW = {
+  nonce: "__BW_NONCE__",
+
+  // 分享片段 `#/send/{accessId}/{b64url(seed)}`；缺段回 null（呼叫端出文案）。
+  parseHash(hash) {
+    const m = /^#\/send\/([^/?]+)\/([^/?]+)$/.exec(hash || "");
+    if (!m) return null;
+    const seed = BW.b64urlDecode(m[2]);
+    if (!seed || seed.length !== 16) return null;
+    return { aid: m[1], seed: seed };
+  },
+
+  b64urlDecode(s) {
+    const b64 = s.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (s.length % 4)) % 4);
+    try {
+      const bin = atob(b64);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    } catch (e) { return null; }
+  },
+
+  // seed → 64 bytes 內容鑰（enc‖mac）。官方拉伸＝HKDF-SHA256 Expand-only
+  // （PRK=HMAC(key="bitwarden-send", msg=seed)、info="send"）；WebCrypto 的
+  // HKDF 必做 Extract：salt 放 "bitwarden-send"、ikm 放 seed，正好等於同一 PRK。
+  async deriveSendKey(seed) {
+    const enc = new TextEncoder();
+    const ikm = await crypto.subtle.importKey("raw", seed, { name: "HKDF" }, false, ["deriveBits"]);
+    const bits = await crypto.subtle.deriveBits(
+      { name: "HKDF", hash: "SHA-256", salt: enc.encode("bitwarden-send"), info: enc.encode("send") },
+      ikm, 512);
+    const k = new Uint8Array(bits);
+    return { encKey: k.slice(0, 32), macKey: k.slice(32, 64) };
+  },
+
+  // 取用密碼線格式：b64(PBKDF2-HMAC-SHA256(pw, salt=seed, 100_000, 32))（標準字母含填充）。
+  async passwordHash(pw, seed) {
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(pw),
+      { name: "PBKDF2" }, false, ["deriveBits"]);
+    const bits = await crypto.subtle.deriveBits(
+      { name: "PBKDF2", salt: seed, iterations: 100000, hash: "SHA-256" }, key, 256);
+    return BW.b64Standard(new Uint8Array(bits));
+  },
+
+  b64Standard(bytes) {
+    let bin = "";
+    for (const b of bytes) bin += String.fromCharCode(b);
+    return btoa(bin);
+  },
+
+  // type 2 信封 `2.b64(iv)|b64(ct)|b64(mac)`：MAC 先驗（Encrypt-then-MAC），
+  // 再 AES-256-CBC（WebCrypto 預設 PKCS#7）。不符即丟（不吐部分明文）。
+  async decryptEnvelope(env, encKey, macKey) {
+    const dot = env.indexOf(".");
+    if (dot < 0 || env.slice(0, dot) !== "2") throw new Error("不支援的密文型別");
+    const parts = env.slice(dot + 1).split("|");
+    if (parts.length !== 3) throw new Error("信封形態錯誤");
+    const iv = BW.b64DecodeStd(parts[0]);
+    const ct = BW.b64DecodeStd(parts[1]);
+    const mac = BW.b64DecodeStd(parts[2]);
+    const mk = await crypto.subtle.importKey("raw", macKey,
+      { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+    const buf = new Uint8Array(iv.length + ct.length);
+    buf.set(iv, 0); buf.set(ct, iv.length);
+    if (!(await crypto.subtle.verify("HMAC", mk, mac, buf))) throw new Error("MAC 不符");
+    const ek = await crypto.subtle.importKey("raw", encKey, { name: "AES-CBC" }, false, ["decrypt"]);
+    return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-CBC", iv: iv }, ek, ct));
+  },
+
+  b64DecodeStd(s) {
+    const bin = atob(s);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  },
+
+  // —— 代理呼叫（同 origin；自訂標頭觸發 preflight，外人頁讀不回也打不進）——
+  async post(path, obj) {
+    const resp = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-bw-nonce": BW.nonce },
+      body: JSON.stringify(obj || {}),
+    });
+    return resp;
+  },
+};
+/*JS-END*/
+
+if (typeof document !== "undefined") {
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+  const setBody = (html) => { $("body").innerHTML = html; };
+  const showErr = (msg) => setBody('<p class="err">' + esc(msg) + "</p>");
+
+  const parsed = BW.parseHash(location.hash);
+  if (!parsed) {
+    showErr("連結缺少金鑰片段（應為 #/send/{id}/{金鑰} 形態）。請複製完整連結——# 之後的部分不會上傳給伺服器。");
+  } else {
+    access(null);
+  }
+
+  async function access(pwHash) {
+    setBody('<p class="note">讀取中…</p>');
+    let resp;
+    try {
+      resp = await BW.post("/access/" + encodeURIComponent(parsed.aid),
+        { password: pwHash });
+    } catch (e) {
+      showErr("網路錯誤：連不上本機 daemon（" + e + "）");
+      return;
+    }
+    if (resp.status === 200) { render(await resp.json()); return; }
+    if (resp.status === 401) { askPassword(null); return; }
+    if (resp.status === 400) { askPassword("取用密碼不正確"); return; }
+    if (resp.status === 404) { showErr("Send 不可用：已過期、存取次數耗盡或已被刪除。"); return; }
+    let detail = "";
+    try { detail = (await resp.json()).detail || ""; } catch (e) {}
+    if (resp.status === 503) { showErr("本機 daemon 尚未登入帳號，無法代理存取。"); return; }
+    showErr("連不上伺服器" + (detail ? "：" + detail : "") + "。請確認本機 daemon 與網路狀態。");
+  }
+
+  function askPassword(errMsg) {
+    setBody(
+      '<p class="note">此 Send 設了取用密碼。</p>' +
+      (errMsg ? '<p class="err">' + esc(errMsg) + "</p>" : "") +
+      '<div class="row"><input type="password" id="pw" placeholder="取用密碼" autocomplete="current-password"></div>' +
+      '<div class="row"><button id="go">解開</button><span class="err" id="pwerr"></span></div>');
+    const go = async () => {
+      const pw = $("pw").value;
+      if (!pw) { $("pwerr").textContent = "請輸入密碼"; return; }
+      $("go").disabled = true;
+      const hash = await BW.passwordHash(pw, parsed.seed);
+      window.__bwPwHash = hash;
+      access(hash);
+    };
+    $("go").addEventListener("click", go);
+    $("pw").addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+    $("pw").focus();
+  }
+
+  async function render(send) {
+    const ck = await BW.deriveSendKey(parsed.seed);
+    const dec = async (env) => new TextDecoder().decode(await BW.decryptEnvelope(env, ck.encKey, ck.macKey));
+    let name = "";
+    try { name = await dec(send.name); } catch (e) { return showErr("解密失敗：金鑰片段與此 Send 不符。"); }
+    $("title").textContent = name || "Bitward Send 收件";
+    if (send.type === 1) return renderFile(send, ck);
+    let text = "";
+    try { text = await dec(send.text.text); } catch (e) { return showErr("解密失敗：金鑰片段與此 Send 不符。"); }
+    const hidden = send.text && send.text.hidden;
+    setBody(
+      '<pre class="content' + (hidden ? " hidden-text" : "") + '" id="txt">' + esc(text) + "</pre>" +
+      (hidden ? '<p class="note">內容預設隱藏，點文字區顯現。</p>' : "") +
+      '<div class="row"><button class="ghost" id="cp">複製文字</button></div>');
+    if (hidden) $("txt").addEventListener("click", () => $("txt").classList.remove("hidden-text"));
+    $("cp").addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(text); } catch (e) {}
+    });
+  }
+
+  function renderFile(send, ck) {
+    const size = send.file && send.file.size ? Math.round(send.file.size / 1024) + " KB" : "";
+    setBody(
+      '<p class="meta">檔案 Send' + (size ? "（" + size + "）" : "") + "</p>" +
+      '<div class="row"><button id="dl">下載並解密</button><span class="okline" id="done"></span></div>');
+    $("dl").addEventListener("click", async () => {
+      $("dl").disabled = true;
+      $("dl").textContent = "下載中…";
+      try {
+        const resp = await BW.post("/file/" + send.id + "/" + send.file.id,
+          { password: window.__bwPwHash || null });
+        if (resp.status !== 200) {
+          let m = "檔身取用失敗";
+          try { m = (await resp.json()).error || m; } catch (e) {}
+          throw new Error(m);
+        }
+        const envBytes = new Uint8Array(await resp.arrayBuffer());
+        const env = new TextDecoder("utf-8", { fatal: true }).decode(envBytes);
+        const plain = await BW.decryptEnvelope(env, ck.encKey, ck.macKey);
+        let fileName = send.file.fileName ? await dec2(send.file.fileName, ck) : "send-file";
+        const url = URL.createObjectURL(new Blob([plain], { type: "application/octet-stream" }));
+        const a = document.createElement("a");
+        a.href = url; a.download = fileName;
+        document.body.appendChild(a); a.click(); a.remove();
+        $("dl").textContent = "再下載一次"; $("dl").disabled = false;
+        $("done").textContent = "已解密 " + (plain.length) + " bytes → " + fileName;
+      } catch (e) {
+        $("dl").disabled = false; $("dl").textContent = "下載並解密";
+        showErr("下載失敗：" + e.message);
+      }
+    });
+  }
+  async function dec2(env, ck) {
+    try { return new TextDecoder().decode(await BW.decryptEnvelope(env, ck.encKey, ck.macKey)); }
+    catch (e) { return "send-file"; }
+  }
+}
+</script>
+</body>
+</html>

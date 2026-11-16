@@ -484,8 +484,9 @@ pub enum SendOp {
     /// `deletion_hours`：到期刪除（官方選單 1/7/30 天＝24/168/720；
     /// 伺服器硬上限 31 天，VW `create_send` 實錄 400）。
     /// `max_access`：存取上限（None＝不限；0 拒收）。
-    /// 成功回 `Response::Json`（{"id","url","name","deletionDate"}——
-    /// `url` 帶 seed 片段，屬 Secret 級出口）。
+    /// 成功回 `Response::Json`（{"id","url","webUrl","name","deletionDate"}——
+    /// `url` 帶 seed 片段，屬 Secret 級出口；`webUrl`＝本機接收頁同形變體，
+    /// daemon webui 未起時為 null）。
     Create {
         name: Option<String>,
         content: SendContent,
@@ -496,15 +497,17 @@ pub enum SendOp {
     },
     /// 鏡像清單（`/sync` 的 `sends[]` 與線上 `GET /sends` 刷新落庫；
     /// 離線照回鏡像）。回應 `Response::Json`（{"items":[{"id","type",
-    /// "name","url","deletionDate","expirationDate","maxAccessCount","accessCount",
-    /// "viewed","hideEmail","hasPassword"}]}，deletionDate 升序；
+    /// "name","url","webUrl","deletionDate","expirationDate","maxAccessCount","accessCount",
+    /// "viewed","hideEmail","hasPassword"}]}，deletionDate 升序；`webUrl`＝
+    /// 本機接收頁變體（webui 未起或鎖態為 null）；
     /// `name`/`url` 需解鎖態（seed 鏡像端為 user key 信封），鎖態為 null——
     /// 資料夾清單同語意；`viewed`＝accessCount>0（伺服器無 viewed 欄，實錄））。
     List,
     /// 分享 URL：`{帳號 server 值}/#/send/{accessId}/{b64url(seed)}`
     /// （官方 web vault 同形：`getSendUrl()+accessId+"/"+urlB64Key`）。
     /// 需解鎖態（seed 從鏡像 `key` 信封解出）；回應 `Response::Json`
-    /// （{"id","url"}）。審計只記動作與 id，**不落片段**（A11 延伸）。
+    /// （{"id","url","webUrl"}，webUrl＝本機接收頁變體）。審計只記動作與 id，
+    /// **不落片段**（A11 延伸）。
     Get {
         id: ItemId,
     },

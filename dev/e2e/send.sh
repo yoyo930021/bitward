@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 # 路線 5 Send（加密分享）e2e：自起 VW＋data-dir。
 # 斷言鏈：建文字 Send（含密碼＋max 2）→ List 元資料對 → URL 形態（含 access 片段）
-# → 公開端收發 round-trip：接收方以 URL 片段 seed 做官方拉伸鏈（HMAC "bitwarden-send"
-#   → HKDF-Expand "send"）派生內容鑰與 PBKDF2 密碼哈希，本地解密還原原文
-#   （跨端語意閉環：我們的 send key 對官方接收方正確）→ 401/400/404 三態實錄
-#   （缺密／錯密／max 耗盡）→ 檔案 Send 上傳/下載 sha256 閉環 → 鎖態紀律 →
-#   離線建立回 Denied 可懂錯誤（無 outbox 誠實標註）→ Remove 收斂 → 審計不落片段。
+# → 接收端四態（CLI `send access`：需密／錯密／成功印原文／max 耗盡可懂文案）
+# → python 對照一輪（獨立實作拉伸鏈 HMAC "bitwarden-send"→HKDF-Expand "send"
+#   ＋PBKDF2 密碼哈希，跨端語意閉環：我們的 send key 對官方接收方正確）
+# → 檔案 Send：CLI 接收端下載 sha256 閉環（-o 落檔與 -o 管 stdout 兩式）＋
+#   python 對照 → webui 接收頁（loopback 隨機 port）：頁面发放 nonce、代理四態
+#   （缺 nonce 403／錯密 400／正確 200 send-access／取檔回信封密文）、
+#   webUrl 欄與鎖態缺席紀律 → 隱私：seed 片段不進 daemon log／審計、
+#   監聽僅 127.0.0.1 → 鎖態紀律 → 離線建立回 Denied 可懂錯誤（無 outbox
+#   誠實標註）→ Remove 收斂。
 # 線格式查證全表見 crates/bw-server/NOTES.md（路由 /api/sends*，非 accounts/public）。
+# CORS 表態（2026-11-16 實測）：VW 對任意 Origin 不給 access-control-allow-origin，
+# 故接收頁必經 daemon 代理（見 webui.rs 模組頭），頁直打 VW 的路線已否決。
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -54,7 +60,7 @@ L=$(B send ls --json)
 [[ "$(echo "$L" | jq -r '.items[0].type')" == "0" ]] || fail "type 投影錯"
 pass "List 元資料對（含清單 URL 直供複製）"
 
-# —— 公開端收發 round-trip（接收方路徑：無 bearer；官方拉伸鏈獨立實作）——
+# —— 公開端收發 round-trip（python 對照一輪：獨立實作官方拉伸鏈，跨端閉環）——
 python3 - "$SRV" "$AID" "$SEEDB64" "$TXT" 'sendpw-1' <<'PY' || fail "公開端 round-trip 敗"
 import sys, base64, hmac, hashlib, json, subprocess, urllib.request, urllib.error
 base, aid, seedb64, want, pw = sys.argv[1:6]
@@ -97,15 +103,24 @@ assert dec(acc['name']) == want, '名稱解密不等原（預設名＝首行文�
 PY
 pass "公開端收發閉環（401/400 實錄＋片段鑰本地解密還原原文）"
 
-# —— max 耗盡實錄：第 2 次存取 200、第 3 次 404；清單計數與 viewed 收斂 ——
+# —— Rust 接收端 `send access` 四態（缺密文案→錯密文案→成功印原文→耗盡文案）——
+OUT=$(B send access "$URLTXT" 2>&1 || true)
+[[ "$OUT" == *"取用密碼"* ]] || fail "缺密碼態應回需密文案，got $OUT"
+OUT=$(echo 'wrong-pw' | B send access "$URLTXT" --password-stdin 2>&1 || true)
+[[ "$OUT" == *"不正確"* ]] || fail "錯密碼態應回不正確文案，got $OUT"
+OUT=$(echo 'sendpw-1' | B send access "$URLTXT" --password-stdin)
+[[ "$OUT" == "$TXT" ]] || fail "CLI 接收端應印出原文，got $OUT"
+pass "CLI 接收端四態（需密／錯密可懂文案＋本地解密還原原文）"
+
+# —— max 耗盡實錄：第 3 次存取 404；清單計數與 viewed 收斂 ——
 PH=$(python3 -c "import base64,hashlib; seed=base64.urlsafe_b64decode('$SEEDB64' + '=' * (-len('$SEEDB64') % 4)); print(base64.b64encode(hashlib.pbkdf2_hmac('sha256', b'sendpw-1', seed, 100000, 32)).decode())")
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d "{\"password\":\"$PH\"}" "$SRV/api/sends/access/$AID")
-[[ "$CODE" == "200" ]] || fail "第 2 次存取應 200，got $CODE"
-CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d "{\"password\":\"$PH\"}" "$SRV/api/sends/access/$AID")
 [[ "$CODE" == "404" ]] || fail "max 耗盡後應 404（SEND_INACCESSIBLE 實錄），got $CODE"
+OUT=$(echo 'sendpw-1' | B send access "$URLTXT" --password-stdin 2>&1 || true)
+[[ "$OUT" == *"不可用"* ]] || fail "耗盡態 CLI 應回不可用文案，got $OUT"
 [[ "$(B send ls --json | jq -r '.items[0].accessCount')" == "2" ]] || fail "清單 accessCount 应收斂 2"
 [[ "$(B send ls --json | jq -r '.items[0].viewed')" == "true" ]] || fail "存取後 viewed 應轉 true"
-pass "max 耗盡 404 實錄＋清單存取計數/viewed 收斂"
+pass "max 耗盡 404 實錄（curl＋CLI 兩式）＋清單存取計數/viewed 收斂"
 
 # —— 檔案 Send：上傳/下載 round-trip sha256（v2 兩段＋接收方簽名 URL）——
 head -c 20000 /dev/urandom | base64 > "$DA/blob.bin"
@@ -153,7 +168,72 @@ q = subprocess.run(['openssl', 'enc', '-aes-256-cbc', '-d', '-K', enc_k.hex(),
                     '-iv', iv.hex()], input=body, capture_output=True, check=True)
 assert q.stdout.decode() == 'blob.bin', f"預設名應為檔名，got {q.stdout.decode()}"
 PY
-pass "檔案 Send 上傳/下載 round-trip sha256 閉環"
+pass "檔案 Send python 對照 round-trip sha256 閉環"
+
+# —— CLI 接收端取檔：-o 落檔與 -o - 走管線兩式，sha256 等於原檔 ——
+echo 'filepw-9' | B send access "$URLF" --password-stdin -o "$DA/cli-dl.bin" >/dev/null
+CLI_SH=$(shasum -a 256 "$DA/cli-dl.bin" | cut -d' ' -f1)
+[[ "$CLI_SH" == "$SH" ]] || fail "CLI 落檔 sha256 不等原：$CLI_SH vs $SH"
+PIPE_SH=$(echo 'filepw-9' | B send access "$URLF" --password-stdin -o - | shasum -a 256 | cut -d' ' -f1)
+[[ "$PIPE_SH" == "$SH" ]] || fail "CLI stdout 式 sha256 不等原：$PIPE_SH vs $SH"
+pass "CLI 接收端檔案下載 sha256 閉環（落檔＋管線兩式）"
+
+# —— webui 接收頁（loopback）：隨機 port、nonce 閘、代理四態、信封原樣穿透 ——
+WEBURL=$(B send ls --json | jq -r --arg u "$URLTXT" '.items[] | select(.url==$u) | .webUrl')
+[[ "$WEBURL" =~ ^http://127\.0\.0\.1:([0-9]+)/\#/send/ ]] \
+  || fail "清單 webUrl 形態錯：$WEBURL"
+PORT="${BASH_REMATCH[1]}"
+grep -q "webui listening (127.0.0.1)" "$DA/log" || fail "daemon log 缺 webui 監聽列"
+SIDF=$(B send ls --json | jq -r --arg u "$URLF" '.items[] | select(.url==$u) | .id')
+PAGE=$(curl -fsS "http://127.0.0.1:$PORT/")
+echo "$PAGE" | grep -q "Bitward Send 收件" || fail "接收頁未吐頁面"
+NONCE=$(echo "$PAGE" | sed -n 's/.*nonce: "\([^"]*\)".*/\1/p')
+[[ -n "$NONCE" && "$NONCE" != "__BW_NONCE__" ]] || fail "nonce 未換發"
+# 缺 nonce／錯 nonce → 403（外人頁打不進代理）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/access/$AIDF" \
+  -H 'Content-Type: application/json' -d '{}')
+[[ "$CODE" == "403" ]] || fail "缺 nonce 應 403，got $CODE"
+# 錯密 → 400 password-invalid（不耗存取次數，實錄同 VW 直接存取語意）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/access/$AIDF" \
+  -H "x-bw-nonce: $NONCE" -H 'Content-Type: application/json' -d '{"password":"bogus"}')
+[[ "$CODE" == "400" ]] || fail "代理錯密應 400，got $CODE"
+# 正確哈希 → 200 send-access 物件
+PHF=$(python3 -c "import base64,hashlib; seed=base64.urlsafe_b64decode('$SEEDF' + '=' * (-len('$SEEDF') % 4)); print(base64.b64encode(hashlib.pbkdf2_hmac('sha256', b'filepw-9', seed, 100000, 32)).decode())")
+ACC=$(curl -fsS -X POST "http://127.0.0.1:$PORT/access/$AIDF" \
+  -H "x-bw-nonce: $NONCE" -H 'Content-Type: application/json' -d "{\"password\":\"$PHF\"}")
+[[ "$(echo "$ACC" | jq -r .object)" == "send-access" ]] || fail "代理 access 形態錯：$ACC"
+FID=$(echo "$ACC" | jq -r .file.id)
+# 取檔代理：回信封密文原樣（解密屬頁內 WebCrypto，金標見 dev/tests/sendweb.mjs）
+curl -fsS -X POST "http://127.0.0.1:$PORT/file/$SIDF/$FID" \
+  -H "x-bw-nonce: $NONCE" -H 'Content-Type: application/json' -d "{\"password\":\"$PHF\"}" \
+  -o "$DA/proxy-dl.bin"
+[[ "$(head -c 2 "$DA/proxy-dl.bin")" == "2." ]] || fail "取檔代理應穿透 type-2 信封"
+python3 - "$SEEDF" "$SH" "$DA/proxy-dl.bin" <<'PY' || fail "代理密文解密閉環敗"
+import sys, base64, hmac, hashlib, subprocess
+seedb64, sha_want, path = sys.argv[1:4]
+seed = base64.urlsafe_b64decode(seedb64 + '=' * (-len(seedb64) % 4))
+prk = hmac.new(b'bitwarden-send', seed, hashlib.sha256).digest()
+out, t, i = b'', b'', 1
+while len(out) < 64:
+    t = hmac.new(prk, t + b'send' + bytes([i]), hashlib.sha256).digest(); out += t; i += 1
+enc_k, mac_k = out[:32], out[32:64]
+env = open(path, 'rb').read().decode()
+ty, rest = env.split('.', 1)
+assert ty == '2', env[:40]
+iv, body, mac = (base64.b64decode(x) for x in rest.split('|'))
+assert hmac.new(mac_k, iv + body, hashlib.sha256).digest() == mac, 'MAC 不符'
+p = subprocess.run(['openssl', 'enc', '-aes-256-cbc', '-d', '-K', enc_k.hex(),
+                    '-iv', iv.hex()], input=body, capture_output=True, check=True)
+assert hashlib.sha256(p.stdout).hexdigest() == sha_want, '代理密文解出 sha 不等原檔'
+PY
+# 邊界：僅 127.0.0.1 監聽（Lane 8 軸的 e2e 常駐版）
+if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR>1 && $9 !~ /^127\.0\.0\.1:/ {found=1} END {exit !found}'; then
+  fail "webui 出現非 loopback 監聽"
+fi
+# 隱私：seed 片段與取用密碼明文都不進 daemon log（webui 列只記 method/path/status）
+if grep -q "$SEEDB64" "$DA/log" || grep -q "$SEEDF" "$DA/log"; then fail "log 潑出 seed 片段"; fi
+if grep -q "filepw-9\|sendpw-1" "$DA/log"; then fail "log 潑出取用密碼"; fi
+pass "webui 接收頁閉環（nonce 閘＋代理四態＋信封穿透＋邊界與隱私斷言）"
 
 # —— 鎖態紀律：清單照回但 name/URL 為 null；建/取 URL 需金鑰 ——
 B lock >/dev/null
@@ -161,12 +241,14 @@ LS=$(B send ls --json)
 [[ "$(echo "$LS" | jq -r '[.items[] | select(.name == null)] | length')" == "$(echo "$LS" | jq -r '.items | length')" ]] \
   || fail "鎖態清單名稱應全 null"
 [[ "$(echo "$LS" | jq -r '[.items[] | select(.url != null)] | length')" == "0" ]] || fail "鎖態清單 URL 應全 null"
+[[ "$(echo "$LS" | jq -r '[.items[] | select(.webUrl != null)] | length')" == "0" ]] || fail "鎖態清單 webUrl 應全 null"
 OUT=$(B send text "鎖態不給建" 2>&1 || true)
 [[ "$OUT" == *"未解鎖"* || "$OUT" == *"Locked"* ]] || fail "鎖態建立應回未解鎖，got $OUT"
 SID=$(echo "$LS" | jq -r '.items[0].id')
 OUT=$(B send url "$SID" 2>&1 || true)
 [[ "$OUT" == *"未解鎖"* || "$OUT" == *"Locked"* ]] || fail "鎖態取 URL 應回未解鎖，got $OUT"
-B unlock >/dev/null
+# 批次 14 嚴格模式：裸 unlock 不再一鍵通行，鎖態回庫需主密碼（本腳本同步適配）
+echo "$WP" | B unlock --password-stdin >/dev/null
 pass "鎖態紀律（鏡像照回、金鑰操作拒做、解鎖可回）"
 
 # —— 離線建立：無 outbox 誠實標註（VW 停擺 → Denied 可懂錯誤）——

@@ -92,6 +92,8 @@ pub struct Hub {
     /// 本機設定快取（macOS 設定面）：真態在 meta 表，這裡是啟動讀入＋
     /// `SetSettings` 同步的記憶體鏡（政策接線見 settings.rs）。
     pub settings: std::sync::Mutex<bw_proto::Settings>,
+    /// Send 接收頁 loopback 監聽的實際 port（0＝未起；webUrl 與探測以在場與否為準）。
+    pub webui_port: std::sync::atomic::AtomicU16,
 }
 
 pub type DispatchResult = Result<Response, WtpError>;
@@ -202,6 +204,7 @@ impl Hub {
             icon_gate: tokio::sync::Mutex::new(()),
             keystore,
             settings: std::sync::Mutex::new(initial_settings),
+            webui_port: std::sync::atomic::AtomicU16::new(0),
         });
         // 自動鎖定政策接線（settings.rs）：解鎖時的 idle deadline 由設定決定。
         hub.apply_timeout_policy();

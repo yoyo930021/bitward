@@ -12,6 +12,7 @@ mod passkey;
 mod send;
 mod settings;
 mod sync;
+mod webui;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -346,6 +347,16 @@ async fn main() -> Result<(), String> {
     let _sock_guard = held._lock;
     clear_bind_error(&data_dir);
     tracing::info!(sock = %sock.display(), "bitwarderd listening");
+
+    // Send 接收頁（PR2）：僅 127.0.0.1 隨機 port 的靜態頁＋代理；綁定失敗
+    // 只降級（webUrl 欄缺席、GUI 鈕不出來），不擋 daemon 主流程。
+    match webui::bind(hub.clone()).await {
+        Ok((port, tcp)) => {
+            tracing::info!(port, "bitwarderd webui listening (127.0.0.1)");
+            tokio::spawn(webui::serve(hub.clone(), tcp));
+        }
+        Err(e) => tracing::warn!(err = %e, "webui bind 失敗（Send 接收頁不可用）"),
+    }
 
     // 跨機 TLS listener（§1.2）：身分持久化 ⇒ pin 穩定
     if let Some(addr) = args.listen.clone() {
@@ -813,10 +824,11 @@ mod sock_tests {
         .await
         .expect("舊聽者仍佔位可連")
         .expect("connect ok");
-        let (accepted, _) = tokio::time::timeout(std::time::Duration::from_millis(500), foreign.accept())
-            .await
-            .expect("accept 逾時")
-            .expect("連線落在舊聽者而非被搶走");
+        let (accepted, _) =
+            tokio::time::timeout(std::time::Duration::from_millis(500), foreign.accept())
+                .await
+                .expect("accept 逾時")
+                .expect("連線落在舊聽者而非被搶走");
         drop((c, accepted, foreign));
         std::fs::remove_dir_all(&d).ok();
     }

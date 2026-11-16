@@ -52,9 +52,7 @@ impl Hub {
             SendOp::List => self.send_list().await,
             SendOp::Get { id } => self.send_url(*id).await,
             SendOp::Remove { id } => self.send_remove(*id).await,
-            SendOp::Password { id, password } => {
-                self.send_password(*id, password.as_deref()).await
-            }
+            SendOp::Password { id, password } => self.send_password(*id, password.as_deref()).await,
         }
     }
 
@@ -86,7 +84,12 @@ impl Hub {
                 }
                 (
                     true,
-                    text.lines().next().unwrap_or("文字分享").chars().take(32).collect::<String>(),
+                    text.lines()
+                        .next()
+                        .unwrap_or("文字分享")
+                        .chars()
+                        .take(32)
+                        .collect::<String>(),
                 )
             }
             SendContent::File { file_name, bytes } => {
@@ -119,8 +122,7 @@ impl Hub {
                 let key = SendKey::generate();
                 let ck = key.stretch();
                 let ck = ck.as_slice();
-                let name_env =
-                    bw_crypto::encrypt_bytes_key(ck, display_name.as_bytes()).ok()?;
+                let name_env = bw_crypto::encrypt_bytes_key(ck, display_name.as_bytes()).ok()?;
                 let key_env = key.wrap_with_user_key(kb.user_key()).ok()?;
                 let mut body = json!({
                     "type": if is_text { 0 } else { 1 },
@@ -137,7 +139,9 @@ impl Hub {
                 let mut ct = None;
                 let mut fname_env = String::new();
                 if is_text {
-                    let SendContent::Text { text } = content else { unreachable!() };
+                    let SendContent::Text { text } = content else {
+                        unreachable!()
+                    };
                     body["text"] = json!({
                         "text": bw_crypto::encrypt_bytes_key(ck, text.as_bytes()).ok()?,
                         "hidden": false,
@@ -162,7 +166,10 @@ impl Hub {
         let resp = if is_text {
             client.send_create(&body).await.map_err(map_server_err)?
         } else {
-            let up = client.send_create_file(&body).await.map_err(map_server_err)?;
+            let up = client
+                .send_create_file(&body)
+                .await
+                .map_err(map_server_err)?;
             let ct = ct.expect("檔案分支必帶密文檔身");
             if let Err(e) = client.send_upload_data(&up.url, &file_name_env, &ct).await {
                 // 元資料已落庫、檔身上傳失敗：send 处于 disabled 前態（VW 對
@@ -175,9 +182,13 @@ impl Hub {
         };
         self.store.send_put(&resp).map_err(denied)?;
         let url = self.compose_send_url(&resp, &seed_b64).await?;
+        let web_url = self
+            .webui_base()
+            .and_then(|b| compose_send_url_from(&resp, &b, &seed_b64));
         Ok(Response::Json(json!({
             "id": resp.get("id").cloned().unwrap_or(Value::Null),
             "url": url,
+            "webUrl": web_url,
             "name": display_name,
             "deletionDate": resp.get("deletionDate").cloned().unwrap_or(json!(deletion_date)),
         })))
@@ -201,16 +212,17 @@ impl Hub {
         let items: Vec<Value> = rows
             .iter()
             .map(|s| {
-                let (name, url) = if unlocked {
+                let (name, url, web_url) = if unlocked {
                     self.send_open_projection(s, &base)
                 } else {
-                    (None, None)
+                    (None, None, None)
                 };
                 json!({
                     "id": s.get("id"),
                     "type": s.get("type"),
                     "name": name,
                     "url": url,
+                    "webUrl": web_url,
                     "deletionDate": s.get("deletionDate"),
                     "expirationDate": s.get("expirationDate"),
                     "maxAccessCount": s.get("maxAccessCount"),
@@ -229,7 +241,11 @@ impl Hub {
     /// （連結早存在，重取 URL 是本地操作）。
     async fn send_url(&self, id: ItemId) -> DispatchResult {
         self.require_unlocked()?;
-        let s = self.store.send(id).map_err(denied)?.ok_or(WtpError::NotFound)?;
+        let s = self
+            .store
+            .send(id)
+            .map_err(denied)?
+            .ok_or(WtpError::NotFound)?;
         let key_env = s
             .get("key")
             .and_then(Value::as_str)
@@ -244,15 +260,23 @@ impl Hub {
             .map_err(|_| WtpError::Locked)?
             .ok_or_else(|| denied("Send seed 解不開（信封漂移）"))?;
         let url = self.compose_send_url(&s, &seed_b64).await?;
-        Ok(Response::Json(json!({ "id": id.to_string(), "url": url })))
+        let web_url = self
+            .webui_base()
+            .and_then(|b| compose_send_url_from(&s, &b, &seed_b64));
+        Ok(Response::Json(json!({
+            "id": id.to_string(),
+            "url": url,
+            "webUrl": web_url,
+        })))
     }
 
     /// 刪除：需連網；伺服器 404＝已不存在（過期自清是常態），
     /// 照收斂摘鏡像列回 Ok（冪等語意同 attachment delete）。
     async fn send_remove(&self, id: ItemId) -> DispatchResult {
-        let client = self.client().await.map_err(|_| {
-            denied("Send 刪除需要連網（Send 無 outbox 佇列；離線時鏡像照留）")
-        })?;
+        let client = self
+            .client()
+            .await
+            .map_err(|_| denied("Send 刪除需要連網（Send 無 outbox 佇列；離線時鏡像照留）"))?;
         match client.send_delete(id).await {
             Ok(()) | Err(ServerError::Http { status: 404, .. }) => {
                 self.store.send_remove(id).map_err(denied)?;
@@ -277,10 +301,15 @@ impl Hub {
     /// 解密金鑰不受影響，只有取用門檻變。
     async fn send_password(&self, id: ItemId, password: Option<&str>) -> DispatchResult {
         self.require_unlocked()?;
-        let client = self.client().await.map_err(|_| {
-            denied("Send 改取用密碼需要連網（Send 無 outbox 佇列）")
-        })?;
-        let s = self.store.send(id).map_err(denied)?.ok_or(WtpError::NotFound)?;
+        let client = self
+            .client()
+            .await
+            .map_err(|_| denied("Send 改取用密碼需要連網（Send 無 outbox 佇列）"))?;
+        let s = self
+            .store
+            .send(id)
+            .map_err(denied)?
+            .ok_or(WtpError::NotFound)?;
         if password.is_none() {
             let updated = client
                 .send_remove_password(id)
@@ -336,6 +365,17 @@ impl Hub {
         })))
     }
 
+    /// 本機接收頁前綴（PR2）：webui 監聽在場才給；分享 URL 的 loopback 同形
+    /// 變體（seed 片段照留瀏覽器側，頁經本進程代理讀密文）。
+    pub(crate) fn webui_base(&self) -> Option<String> {
+        let port = self.webui_port.load(std::sync::atomic::Ordering::Relaxed);
+        if port == 0 {
+            None
+        } else {
+            Some(format!("http://127.0.0.1:{port}"))
+        }
+    }
+
     /// 同 [`compose_send_url_from`]，但 base 取帳號 server 值；未登入回可懂錯誤。
     async fn compose_send_url(&self, send: &Value, seed_b64: &str) -> Result<String, WtpError> {
         let base = self
@@ -345,29 +385,37 @@ impl Hub {
         compose_send_url_from(send, &base, seed_b64).ok_or_else(|| drift("Send 回包缺 id"))
     }
 
-    /// 鏡像列的解鎖投影：(解密名稱, 分享 URL)。seed 解不開時兩者都回
-    /// None（比誤潑信封字串準，同資料夾清單語意）；base 缺席（未登入）
-    /// 時名稱照回、URL 為 None。
-    fn send_open_projection(&self, send: &Value, base: &str) -> (Option<String>, Option<String>) {
+    /// 鏡像列的解鎖投影：(解密名稱, 分享 URL, 本機接收頁 URL)。seed 解不開時
+    /// 三者都回 None（比誤潑信封字串準，同資料夾清單語意）；base 缺席（未登入）
+    /// 時名稱照回、URL 為 None；webui 未起時 webUrl 為 None。
+    fn send_open_projection(
+        &self,
+        send: &Value,
+        base: &str,
+    ) -> (Option<String>, Option<String>, Option<String>) {
         let (Some(key_env), Some(name_env)) = (
             send.get("key").and_then(Value::as_str),
             send.get("name").and_then(Value::as_str),
         ) else {
-            return (None, None);
+            return (None, None, None);
         };
         self.machine
-            .with_keys(|kb| -> Option<(String, Option<String>)> {
+            .with_keys(|kb| -> Option<(String, Option<String>, Option<String>)> {
                 let seed = unwrap_seed(kb.user_key(), key_env).ok()?;
                 let ck = seed.stretch();
                 let raw = bw_crypto::decrypt_bytes_with_key(ck.as_slice(), name_env).ok()?;
                 let name = String::from_utf8(raw).ok()?;
-                let url = compose_send_url_from(send, base, &b64url(seed.as_bytes()));
-                Some((name, url))
+                let seed_b64 = b64url(seed.as_bytes());
+                let url = compose_send_url_from(send, base, &seed_b64);
+                let web_url = self
+                    .webui_base()
+                    .and_then(|b| compose_send_url_from(send, &b, &seed_b64));
+                Some((name, url, web_url))
             })
             .ok()
             .flatten()
-            .map(|(n, u)| (Some(n), u))
-            .unwrap_or((None, None))
+            .map(|(n, u, w)| (Some(n), u, w))
+            .unwrap_or((None, None, None))
     }
 }
 
@@ -424,7 +472,11 @@ pub(crate) fn op_summary(sub: &SendOp) -> String {
         SendOp::Remove { id } => format!("send 刪除 {id}"),
         SendOp::Password { id, password } => format!(
             "send 取用密碼 {id}（{}）",
-            if password.is_some() { "設/換" } else { "清除" }
+            if password.is_some() {
+                "設/換"
+            } else {
+                "清除"
+            }
         ),
     }
 }
@@ -440,7 +492,9 @@ mod tests {
     fn op_tag_is_stable_per_sub() {
         assert_eq!(op_tag(&SendOp::List), "Vault.Send.List");
         assert_eq!(
-            op_tag(&SendOp::Get { id: ItemId::new_v4() }),
+            op_tag(&SendOp::Get {
+                id: ItemId::new_v4()
+            }),
             "Vault.Send.Get"
         );
     }
@@ -468,8 +522,7 @@ mod tests {
         let uk = UserKey::from_bytes(vec![7u8; 64]).unwrap();
         let seed = SendKey::from_bytes((0..16u8).collect()).unwrap();
         let ck = seed.stretch();
-        let name_env =
-            bw_crypto::encrypt_bytes_key(ck.as_slice(), "帳單分享".as_bytes()).unwrap();
+        let name_env = bw_crypto::encrypt_bytes_key(ck.as_slice(), "帳單分享".as_bytes()).unwrap();
         let mut v = json!({
             "id": id.to_string(),
             "type": 0,
@@ -508,6 +561,8 @@ mod tests {
             items[0]["url"],
             "http://127.0.0.1:9/#/send/ACC-IDA/AAECAwQFBgcICQoLDA0ODw"
         );
+        // webui 未綁（測試 hub 無 loopback 監聽）→ webUrl 缺席，GUI 鈕不出來
+        assert_eq!(items[0]["webUrl"], Value::Null);
         // URL：帳號 server 值 + accessId（伺服器給的為準）
         let Response::Json(u) = hub.send_op(&SendOp::Get { id }).await.unwrap() else {
             panic!("expect Json");
@@ -522,7 +577,10 @@ mod tests {
         let Response::Json(u2) = hub.send_op(&SendOp::Get { id: id2 }).await.unwrap() else {
             panic!("expect Json");
         };
-        let expect = format!("http://127.0.0.1:9/#/send/{}/AAECAwQFBgcICQoLDA0ODw", b64url(id2.as_bytes()));
+        let expect = format!(
+            "http://127.0.0.1:9/#/send/{}/AAECAwQFBgcICQoLDA0ODw",
+            b64url(id2.as_bytes())
+        );
         assert_eq!(u2["url"].as_str().unwrap(), expect);
         // 鎖態：URL 取用需 seed（金鑰材料）→ Locked；清單照回但 name=null
         hub.machine.lock(bw_keys::LockReason::User);
