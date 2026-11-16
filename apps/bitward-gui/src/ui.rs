@@ -555,6 +555,9 @@ pub fn section_title(label: &'static str) -> Text {
 /// 剪貼簿清除（macOS 設定面）：`settings.clipboard_clear_secs`＞0 時派
 /// 引擎計時任務——N 秒後**讀回比對**，內容仍是本次複製值才清空
 /// （使用者中途另複製過就讓位，官方 clearClipboard 同語意）。
+///
+/// item 6：機密複製走 `set_secret_clipboard`（macOS 同筆交易標記
+/// `org.nspasteboard.ConcealedType`，讓貼上管理員不持久化）。
 pub fn copy_button(
     value: Rc<dyn Fn() -> String>,
     token: &'static str,
@@ -576,7 +579,7 @@ pub fn copy_button(
         .on_press(move || {
             let v = press();
             if !v.is_empty() && v != "—" {
-                set_clipboard(&v);
+                set_secret_clipboard(&v);
                 let secs = settings.get().clipboard_clear_secs;
                 if secs > 0 {
                     spawn(async move {
@@ -613,6 +616,31 @@ pub fn copy_button(
                 }
             }),
         )
+}
+
+/// 機密寫入剪貼簿（item 6）。macOS 直接走 NSPasteboard：同筆 `clearContents`
+/// 交易內寫字串＋`org.nspasteboard.ConcealedType` 標記（存在即語意），避免經
+/// nsh 的非同步 `set_clipboard` 命令被後續 `clearContents` 抹掉標記。其他平台
+/// （或拿不到 main thread marker）退回 nsh `set_clipboard`。
+fn set_secret_clipboard(text: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        use nsh_platform_macos::objc2::MainThreadMarker;
+        use nsh_platform_macos::objc2_app_kit::NSPasteboard;
+        use nsh_platform_macos::objc2_foundation::{NSData, NSString};
+        if MainThreadMarker::new().is_some() {
+            let pb = NSPasteboard::generalPasteboard();
+            pb.clearContents();
+            let plain = NSString::from_str("public.utf8-plain-text");
+            pb.setString_forType(&NSString::from_str(text), &plain);
+            let concealed = NSString::from_str("org.nspasteboard.ConcealedType");
+            pb.setData_forType(Some(&NSData::data()), &concealed);
+            return;
+        }
+        set_clipboard(text);
+    }
+    #[cfg(not(target_os = "macos"))]
+    set_clipboard(text);
 }
 
 /// 「顯示/隱藏」文字鈕（密碼列內聯，取代舊實色按鈕）。

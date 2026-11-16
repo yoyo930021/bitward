@@ -2423,7 +2423,10 @@ fn mini_copy(
             if let Some(v) = press()
                 && !v.is_empty()
             {
-                set_clipboard(v);
+                // item 6：機密走 Kotlin 橋標記 EXTRA_IS_SENSITIVE；橋未綁定才退回 nsh 剪貼簿。
+                if !crate::island::copy_sensitive(&v) {
+                    set_clipboard(v);
+                }
             }
             copied.set(Some(mark.clone()));
             let t = mark.clone();

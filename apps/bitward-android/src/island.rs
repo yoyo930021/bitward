@@ -125,6 +125,31 @@ mod android {
         let Ok(mut env) = vm.attach_current_thread() else { return };
         let _ = catch_unwind(AssertUnwindSafe(|| call_void(&mut env, obj.as_ref(), "ensureHubService")));
     }
+
+    /// item 6：把機密寫入系統剪貼簿並標記 `EXTRA_IS_SENSITIVE`（Kotlin
+    /// `KeyStoreBridge.copySensitive`）。回 true＝Kotlin 側已落地；false＝橋未綁定
+    /// 或 context 缺席，呼叫端退回 nsh `set_clipboard`。同步、不佔生物辨識閂。
+    pub(crate) fn copy_sensitive(text: &str) -> bool {
+        let Some((vm, obj)) = BRIDGE.get() else { return false };
+        let Ok(mut env) = vm.attach_current_thread() else { return false };
+        let Ok(js) = env.new_string(text) else { return false };
+        let jarg: JObject = js.into();
+        catch_unwind(AssertUnwindSafe(|| {
+            match env.call_method(
+                obj.as_ref(),
+                "copySensitive",
+                "(Ljava/lang/String;)Z",
+                &[JValue::Object(&jarg)],
+            ) {
+                Ok(JValueGen::Bool(b)) => b != 0,
+                _ => {
+                    let _ = env.exception_clear();
+                    false
+                }
+            }
+        }))
+        .unwrap_or(false)
+    }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -139,10 +164,15 @@ mod desktop {
         Err("本平台沒有 Keystore 孤島".to_owned())
     }
     pub(crate) fn ensure_hub_service() {}
+
+    /// 非 Android 無 `EXTRA_IS_SENSITIVE` 面：回 false 讓呼叫端退回 nsh 剪貼簿。
+    pub(crate) fn copy_sensitive(_text: &str) -> bool {
+        false
+    }
 }
 
 #[cfg(target_os = "android")]
-pub(crate) use android::{RUNTIME, bind, ensure_hub_service, seal, unseal};
+pub(crate) use android::{RUNTIME, bind, copy_sensitive, ensure_hub_service, seal, unseal};
 
 #[cfg(not(target_os = "android"))]
-pub(crate) use desktop::{ensure_hub_service, seal, unseal};
+pub(crate) use desktop::{copy_sensitive, ensure_hub_service, seal, unseal};

@@ -78,6 +78,24 @@ object KeyStoreBridge {
         HubService.scheduleJob(ctx)
     }
 
+    /** item 6：把機密寫入系統剪貼簿並標記 `ClipDescription.EXTRA_IS_SENSITIVE`
+     *  （Android 13+ 據此遮罩剪貼簿預覽、貼上管理員可選擇不持久化）。Rust 反調
+     *  入口（`src/island.rs` `copy_sensitive`），刻意不加 `@JvmStatic`（同 sealUserKey
+     *  紀律）。回 true＝已落地；false＝無 context（呼叫端退回 nsh 剪貼簿）。 */
+    fun copySensitive(text: String): Boolean {
+        val ctx = appContext ?: return false
+        val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
+            as? android.content.ClipboardManager ?: return false
+        val clip = android.content.ClipData.newPlainText("bitward", text)
+        if (Build.VERSION.SDK_INT >= 33) {
+            clip.description.extras = android.os.PersistableBundle().apply {
+                putBoolean(android.content.ClipDescription.EXTRA_IS_SENSITIVE, true)
+            }
+        }
+        cm.setPrimaryClip(clip)
+        return true
+    }
+
     // —— 內部 ——
 
     /** 靜默包裹嘗試：視窗外（init 或 doFinal 擋）回 null，不彈窗不報錯。
