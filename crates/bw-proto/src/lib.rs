@@ -245,6 +245,8 @@ pub enum Call {
     Passkey(PasskeyCall),
     /// 置尾（同上紀律）：APNs 推播 token 管理（§1.2 推播路徑）
     Push(PushCall),
+    /// 置尾（同上紀律）：服務端 2FA 因子管理面（`/two-factor/*` 代理，PR3）。
+    TwoFactor(TwoFactorCall),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -655,6 +657,59 @@ pub enum PushCall {
     UnregisterPush { token: String },
     /// 註冊清單（Admin 級出口；token 去敏後回傳，見 daemon 分派）。
     ListPush,
+}
+
+/// 服務端 2FA 因子管理面（PR3 子批 b）：daemon 代理 upstream `/two-factor/*` 端點。
+/// `master_password` 是主密碼明文，紀律同 `AuthCall::Login`：None＝呼叫端未帶
+/// （daemon 拒，本倉無 pinentry 通道），Some 只允許經本機線送（A11 不得進 argv）。
+/// daemon 以 prelogin KDF 換成伺服器的 `masterPasswordHash`（派生在 bw-crypto，
+/// 不在本 crate、也不在 bw-server），因此改因子不需要 vault 解鎖態。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TwoFactorCall {
+    /// 已啟用因子清單（`GET /two-factor`）
+    List,
+    /// 取 TOTP 設定（`POST /two-factor/get-authenticator`）→ [`Response::TwoFactorTotp`]
+    GetAuthenticator { master_password: Option<String> },
+    /// 啟用 TOTP（`POST /two-factor/authenticator`；`token`＝驗證器現碼、
+    /// `key`＝GetAuthenticator 回的 secret）
+    EnableAuthenticator {
+        master_password: Option<String>,
+        token: String,
+        key: String,
+    },
+    /// 停用因子（`POST /two-factor/disable`；`provider`＝upstream 編號）
+    Disable {
+        master_password: Option<String>,
+        provider: i32,
+    },
+    /// 取備用救援碼（`POST /two-factor/get-recover`）→ [`Response::TwoFactorRecoveryCode`]
+    GetRecoveryCode { master_password: Option<String> },
+    /// 寄 Email 因子驗證碼（`POST /two-factor/send-email`；伺服器落一個
+    /// EmailVerificationChallenge，需再以 EmailVerify 收碼確認）
+    EmailSendCode {
+        master_password: Option<String>,
+        email: String,
+    },
+    /// 確認 Email 因子（`PUT /two-factor/email`；`token`＝信中收到的碼）
+    EmailVerify {
+        master_password: Option<String>,
+        email: String,
+        token: String,
+    },
+    /// 啟用 YubiKey（`POST /two-factor/yubikey`；`otp`＝tap 出的 44 字元，
+    /// 伺服器以首 12 字元為金鑰 id 落庫，需 server 端 Yubico 憑證）
+    EnableYubikey {
+        master_password: Option<String>,
+        otp: String,
+    },
+}
+
+/// 一個因子在伺服器的啟用狀態（管理面清單條目）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TwoFactorProviderState {
+    /// upstream `TwoFactorProviderType` 編號（見 [`TwoFactorProviderInfo::label`]）
+    pub provider: i32,
+    pub enabled: bool,
 }
 
 /// passkey 條目的 Metadata 級視圖：b64url 識別材料 + 公鑰，無密鑰。
@@ -1082,6 +1137,19 @@ pub enum Response {
     },
     /// `Admin:GetSettings` 回包（本機設定；置尾紀律同上）。
     Settings(Settings),
+    /// `TwoFactor:List` 回包（已啟用因子清單；置尾紀律同 Passkey）。
+    TwoFactorStates(Vec<TwoFactorProviderState>),
+    /// `TwoFactor:GetAuthenticator` 回包：TOTP secret（base32，伺服器 `key` 欄）
+    /// 與 client 側組好的 `otpauth://` URI（伺服器只給 key，不給 URI）。
+    /// `secret` 是可入鏡像的秘密——只在本機線與設定頁出現，
+    /// 語意同 `Use:TotpCode` 的回碼紀律。
+    TwoFactorTotp {
+        secret: String,
+        key_uri: Option<String>,
+    },
+    /// `TwoFactor:GetRecoveryCode` 回包：None＝伺服器尚未發碼
+    /// （启用任一因子後才有）。
+    TwoFactorRecoveryCode(Option<String>),
 }
 
 /// 伺服器宣告的可用第二因子（daemon 由 `bw-server` 挑戰映射而來的輕量形態）。
@@ -1089,18 +1157,103 @@ pub enum Response {
 /// 1=Email、2=Duo、3=YubiKey、4=U2f、5=Remember、6=OrgDuo、7=WebAuthn、
 /// 8=RecoveryCode）；`hint` 為顯示提示（Email 給伺服器回的水漬地址、
 /// Authenticator 為 None），不含秘密值。
+/// `details`（PR3 置尾欄）是該因子交涉所需的伺服器材料，daemon 已在邊界解析成
+/// 型別形態（[`TwoFactorDetails`]）——不在線上帶 `serde_json::Value`：postcard 解
+/// `Value` 是 `WontImplement`（既有 `Response::Json` 債即此，PR5 處理）。
+/// 舊幀缺欄＝None（語意＝呼叫端只能走純欄位因子）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TwoFactorProviderInfo {
     pub provider: i32,
     pub hint: Option<String>,
+    /// 因子交涉所需的伺服器材料（見結構體文件；置尾＋default）。
+    #[serde(default)]
+    pub details: Option<TwoFactorDetails>,
+}
+
+/// 因子交涉材料（`TwoFactorProviders2` 中本產品用得著的欄位；其餘原樣丟棄）。
+/// 內容非機密：challenge／水漬／Duo 簽章請求都是給**該次登入者**的公開挑戰值。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TwoFactorDetails {
+    /// Duo 傳統 iframe 態：Duo API 主機＋簽章請求（`sig_request`）。
+    /// 客戶面以 webview 承 Duo 頁，回捕 `AUTH…:APP…` 雙段 token。
+    DuoIframe { host: String, signature: String },
+    /// Duo redirect（OIDC/frameless）態：完整的 Duo 授權 URL。
+    DuoRedirect { auth_url: String },
+    /// WebAuthn：challenge（b64url）、可接受憑證 id 清單（b64url）、rpId。
+    /// 客戶面的原生安全金鑰島據此出 assertion JSON token。
+    Webauthn {
+        challenge: String,
+        credential_ids: Vec<String>,
+        rp_id: Option<String>,
+    },
+    /// YubiKey：伺服器說這把鑰可能是 NFC 形態（GUI 提示「觸碰金鑰」用）。
+    Yubikey { nfc: bool },
+}
+
+/// 因子要什麼樣的輸入（一表全收：校驗、提示、以及谁能產出它）。
+/// 決定 daemon 是否受理該因子的 `twoFactorToken`，也決定客戶面要用哪套控件：
+/// 純欄位（Otp／YubikeyOtp／Recovery）任何面都能收；
+/// DuoHandoff／WebauthnAssertion 需要承載网页或原生憑證島的客戶面。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FactorMode {
+    /// 6 位數字（TOTP 與 Email 代碼同形）
+    Otp,
+    /// 44 字元 YubiKey OTP（tap 出，modhex 字元集）
+    YubikeyOtp,
+    /// 備用救援碼（Vaultwarden 32 字元 base32、官方雲 30；比對前小寫化）
+    Recovery,
+    /// Duo 交接結果 `AUTH|…:APP|…`（webview 捕 iframe、或瀏覽器回捕）
+    DuoHandoff,
+    /// WebAuthn assertion JSON（原生安全金鑰島產出）
+    WebauthnAssertion,
+}
+
+impl FactorMode {
+    /// 是否需要純欄位以外的客戶面能力（webview／原生憑證島）。
+    pub fn needs_island(self) -> bool {
+        matches!(self, Self::DuoHandoff | Self::WebauthnAssertion)
+    }
+
+    /// 收碼欄佔位提示（CLI/GUI 共用）。
+    pub fn placeholder(self) -> &'static str {
+        match self {
+            Self::Otp => "6 位數字",
+            Self::YubikeyOtp => "觸碰金鑰後貼上 44 字元 OTP",
+            Self::Recovery => "28–32 字元救援碼（用後 2FA 全清）",
+            Self::DuoHandoff => "由 Duo 頁面取得（AUTH…:APP…）",
+            Self::WebauthnAssertion => "由安全金鑰取得簽章",
+        }
+    }
 }
 
 impl TwoFactorProviderInfo {
-    /// 本批支援的因子（收 6 位碼直接重送即可通路）：Authenticator、Email。
-    /// 其餘因子需要額外交涉（Duo 網頁流、YubiKey/U2f 硬體簽章），
-    /// 選中時 daemon 給「此因子尚未支援」的可懂錯誤。
+    /// 因子輸入形態（查表）；None＝本產品不受理（4=U2f 已淘汰、
+    /// 5=Remember 由伺服器自動處理、6=OrgDuo Vaultwarden 登入鏈未實裝、
+    /// 其餘未知編號）。
+    pub fn factor_mode(provider: i32) -> Option<FactorMode> {
+        match provider {
+            0 | 1 => Some(FactorMode::Otp),
+            2 => Some(FactorMode::DuoHandoff),
+            3 => Some(FactorMode::YubikeyOtp),
+            7 => Some(FactorMode::WebauthnAssertion),
+            8 => Some(FactorMode::Recovery),
+            _ => None,
+        }
+    }
+
+    /// daemon 受理的因子（能校驗並重送 `twoFactorToken`）。
+    /// 未受理者（見 [`Self::factor_mode`]）由 daemon 給可懂錯誤。
     pub fn is_supported(provider: i32) -> bool {
-        matches!(provider, 0 | 1)
+        Self::factor_mode(provider).is_some()
+    }
+
+    /// 本客戶面能否產出該因子需要的輸入：純欄位任何面都可；
+    /// 憑證島面（webview／原生安全金鑰）只有 GUI 有，CLI 傳 false。
+    pub fn usable_on(provider: i32, has_island: bool) -> bool {
+        match Self::factor_mode(provider) {
+            None => false,
+            Some(mode) => !mode.needs_island() || has_island,
+        }
     }
 
     /// 因子繁中顯示名（CLI/GUI 共用，未知編號顯示原值不亂併名）。
@@ -1116,6 +1269,71 @@ impl TwoFactorProviderInfo {
             7 => "WebAuthn",
             8 => "備用救援碼",
             _ => "未知因子",
+        }
+    }
+
+    /// 收碼格式閘（純函數，單測點）：trim 後依因子形態校驗，回可送伺服器的正規形態。
+    /// 救援碼小寫化（Vaultwarden 以 `totp_recover.to_lowercase()` 比對，
+    /// 實錄 `src/db/models/user.rs:169-175`，大寫原樣送必敗），
+    /// 容許貼上時夾帶的空格與連字號。最終裁判仍是伺服器。
+    pub fn validate_token(provider: i32, raw: &str) -> Result<String, String> {
+        let s = raw.trim();
+        match Self::factor_mode(provider) {
+            None => Err(format!("不支援的因子編號 {provider}")),
+            Some(FactorMode::Otp) => {
+                if s.len() != 6 || !s.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err("驗證碼需為 6 位數字".into());
+                }
+                Ok(s.to_owned())
+            }
+            Some(FactorMode::YubikeyOtp) => {
+                // Vaultwarden `validate_yubikey_login`：長度必須恰 44，前 12 字元為金鑰 id。
+                if s.len() != 44 || !s.bytes().all(|b| b.is_ascii_alphanumeric()) {
+                    return Err("YubiKey OTP 需為 44 字元（請重新觸碰金鑰取得）".into());
+                }
+                Ok(s.to_owned())
+            }
+            Some(FactorMode::Recovery) => {
+                let compact: String = s.chars().filter(|c| !c.is_whitespace() && *c != '-').collect();
+                if !(24..=40).contains(&compact.len())
+                    || !compact.bytes().all(|b| b.is_ascii_alphanumeric())
+                {
+                    return Err("救援碼需為 24–40 字元英數（不含空格與連字號）".into());
+                }
+                Ok(compact.to_lowercase())
+            }
+            Some(FactorMode::DuoHandoff) => {
+                // 兩態皆合法（源檔對照）：iframe 態 `AUTH|…:APP|…` 以 ':' 切兩段
+                // （Vaultwarden `duo.rs:284-300`）；redirect（OIDC）態 `<code>|<state>`
+                // 以 '|' 切兩段（`duo_oidc.rs:417-436`）。最終裁判是伺服器。
+                let by_colon: Vec<&str> = s.split(':').collect();
+                let by_pipe: Vec<&str> = s.split('|').collect();
+                let ok = (by_colon.len() == 2 && by_colon.iter().all(|p| !p.is_empty()))
+                    || (by_pipe.len() == 2 && by_pipe.iter().all(|p| !p.is_empty()));
+                if !ok {
+                    return Err("Duo 結果形態不對（iframe 應為 AUTH…:APP…、\
+                                瀏覽器回捕應為 code|state 兩段）"
+                        .into());
+                }
+                Ok(s.to_owned())
+            }
+            Some(FactorMode::WebauthnAssertion) => {
+                let v: serde_json::Value =
+                    serde_json::from_str(s).map_err(|_| "安全金鑰簽章形態不對（非 JSON）".to_owned())?;
+                let resp = v
+                    .get("response")
+                    .and_then(|r| r.as_object())
+                    .ok_or_else(|| "安全金鑰簽章缺 response 欄".to_owned())?;
+                let has = |k1: &str, k2: &str| resp.contains_key(k1) || resp.contains_key(k2);
+                if v.get("id").and_then(|i| i.as_str()).unwrap_or("").is_empty()
+                    || !has("authenticatorData", "authenticator_data")
+                    || !has("clientDataJson", "clientDataJSON")
+                    || !resp.contains_key("signature")
+                {
+                    return Err("安全金鑰簽章欄位不全".into());
+                }
+                Ok(s.to_owned())
+            }
         }
     }
 }
@@ -1518,10 +1736,20 @@ mod tests {
                 TwoFactorProviderInfo {
                     provider: 0,
                     hint: None,
+                    details: None,
                 },
                 TwoFactorProviderInfo {
                     provider: 1,
                     hint: Some("a***@b.test".into()),
+                    details: None,
+                },
+                TwoFactorProviderInfo {
+                    provider: 2,
+                    hint: None,
+                    details: Some(TwoFactorDetails::DuoIframe {
+                        host: "api-abc123.duosecurity.com".into(),
+                        signature: "AUTH|dGVzdA==|sig:APP|dGVzdA==|sig".into(),
+                    }),
                 },
             ],
         };
@@ -1533,9 +1761,159 @@ mod tests {
         assert_eq!(serde_json::to_string(&back).unwrap(), j);
         assert!(TwoFactorProviderInfo::is_supported(0));
         assert!(TwoFactorProviderInfo::is_supported(1));
-        assert!(!TwoFactorProviderInfo::is_supported(2));
         assert_eq!(TwoFactorProviderInfo::label(3), "YubiKey");
         assert_eq!(TwoFactorProviderInfo::label(99), "未知因子");
+    }
+
+    /// PR3 紀律：`details` 置尾欄 must `default`——舊 daemon 的 JSON 幀
+    /// （只有 provider/hint）要能解析成 None，不得互炸；postcard 新幀往返同檢。
+    #[test]
+    fn provider_info_tolerates_legacy_frames_without_details() {
+        let legacy = serde_json::json!({ "provider": 7, "hint": null });
+        let info: TwoFactorProviderInfo = serde_json::from_value(legacy).unwrap();
+        assert_eq!(info.details, None);
+        let full = TwoFactorProviderInfo {
+            provider: 7,
+            hint: None,
+            details: Some(TwoFactorDetails::Webauthn {
+                challenge: "b64url-challenge".into(),
+                credential_ids: vec!["credA".into(), "credB".into()],
+                rp_id: Some("vault.example.com".into()),
+            }),
+        };
+        let bytes = postcard::to_allocvec(&full).unwrap();
+        let back: TwoFactorProviderInfo = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(back, full);
+    }
+
+    /// 因子白名單與收碼形態（一表全收）：YubiKey OTP 44 字元、救援碼小寫化、
+    /// Duo 兩段、WebAuthn assertion JSON 欄位；未知編號與已淘汰因子拒。
+    #[test]
+    fn factor_modes_and_token_gates() {
+        use TwoFactorProviderInfo as P;
+        assert_eq!(P::factor_mode(0), Some(FactorMode::Otp));
+        assert_eq!(P::factor_mode(2), Some(FactorMode::DuoHandoff));
+        assert_eq!(P::factor_mode(3), Some(FactorMode::YubikeyOtp));
+        assert_eq!(P::factor_mode(7), Some(FactorMode::WebauthnAssertion));
+        assert_eq!(P::factor_mode(8), Some(FactorMode::Recovery));
+        for legacy in [4, 5, 6, 99] {
+            assert_eq!(P::factor_mode(legacy), None, "{legacy} 不該受理");
+            assert!(!P::is_supported(legacy));
+        }
+        for p in [0, 1, 2, 3, 7, 8] {
+            assert!(P::is_supported(p), "{p} 應受理");
+        }
+        // 純欄位因子任何面可用；憑證島因子只有 GUI（has_island=true）可用。
+        assert!(P::usable_on(3, false) && P::usable_on(8, false));
+        assert!(!P::usable_on(2, false) && !P::usable_on(7, false));
+        assert!(P::usable_on(2, true) && P::usable_on(7, true));
+
+        let otp44 = "c".to_owned() + &"b".repeat(43);
+        assert_eq!(P::validate_token(3, &otp44).unwrap(), otp44);
+        assert_eq!(P::validate_token(3, &format!("  {otp44}\n")).unwrap(), otp44);
+        assert!(P::validate_token(3, &"b".repeat(43)).is_err());
+        assert!(P::validate_token(3, &format!("{}!", otp44)).is_err());
+
+        let code = "Y3XV 4T6Z-7QBJ-KMNP-2RTW-3XYZ-ABCD";
+        assert_eq!(P::validate_token(8, code).unwrap(), "y3xv4t6z7qbjkmnp2rtw3xyzabcd");
+        assert!(P::validate_token(8, "short").is_err());
+        assert!(P::validate_token(0, "12345").is_err());
+        assert_eq!(P::validate_token(0, " 123456 ").unwrap(), "123456");
+
+        let duo = "AUTH|dGVzdA==|sig1|AUTO|AUTO:APP|dGVzdA==|sig2";
+        assert_eq!(P::validate_token(2, duo).unwrap(), duo);
+        // redirect（OIDC）態：`<code>|<state>` 兩段
+        assert_eq!(
+            P::validate_token(2, "dlm3Xk9s|2e1f4a6b").unwrap(),
+            "dlm3Xk9s|2e1f4a6b"
+        );
+        assert!(P::validate_token(2, "AUTH|only-one-segment").is_err());
+        assert!(P::validate_token(2, "AUTH|a:mid:APP|b").is_err());
+        assert!(P::validate_token(2, "").is_err());
+
+        let assertion = serde_json::json!({
+            "id": "cred",
+            "rawId": "cred",
+            "type": "public-key",
+            "extensions": {},
+            "response": {
+                "authenticatorData": "ad",
+                "clientDataJson": "cd",
+                "signature": "sig"
+            }
+        })
+        .to_string();
+        assert_eq!(P::validate_token(7, &assertion).unwrap(), assertion);
+        assert!(P::validate_token(7, r#"{"id":"c","response":{}}"#).is_err());
+        assert!(P::validate_token(7, "not json").is_err());
+        assert!(P::validate_token(4, "123456").is_err());
+    }
+
+    /// 管理面置尾變體：postcard 索引追加＋JSON 往返同檢（Call/Response 兩側）。
+    #[test]
+    fn two_factor_management_frames_roundtrip() {
+        let calls = [
+            TwoFactorCall::List,
+            TwoFactorCall::GetAuthenticator {
+                master_password: Some("pw".into()),
+            },
+            TwoFactorCall::EnableAuthenticator {
+                master_password: Some("pw".into()),
+                token: "123456".into(),
+                key: "SECRET".into(),
+            },
+            TwoFactorCall::Disable {
+                master_password: Some("pw".into()),
+                provider: 0,
+            },
+            TwoFactorCall::GetRecoveryCode {
+                master_password: None,
+            },
+            TwoFactorCall::EmailSendCode {
+                master_password: Some("pw".into()),
+                email: "a@b.test".into(),
+            },
+            TwoFactorCall::EmailVerify {
+                master_password: Some("pw".into()),
+                email: "a@b.test".into(),
+                token: "123456".into(),
+            },
+            TwoFactorCall::EnableYubikey {
+                master_password: Some("pw".into()),
+                otp: "c".repeat(44),
+            },
+        ];
+        for call in calls {
+            let wrapped = Call::TwoFactor(call);
+            let bytes = postcard::to_allocvec(&wrapped).unwrap();
+            let back: Call = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(postcard::to_allocvec(&back).unwrap(), bytes);
+        }
+        for resp in [
+            Response::TwoFactorStates(vec![
+                TwoFactorProviderState {
+                    provider: 0,
+                    enabled: true,
+                },
+                TwoFactorProviderState {
+                    provider: 8,
+                    enabled: false,
+                },
+            ]),
+            Response::TwoFactorTotp {
+                secret: "SECRET".into(),
+                key_uri: Some("otpauth://totp/…".into()),
+            },
+            Response::TwoFactorRecoveryCode(Some("abc123".into())),
+            Response::TwoFactorRecoveryCode(None),
+        ] {
+            let bytes = postcard::to_allocvec(&resp).unwrap();
+            let back: Response = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(postcard::to_allocvec(&back).unwrap(), bytes);
+            let j = serde_json::to_string(&resp).unwrap();
+            let back: Response = serde_json::from_str(&j).unwrap();
+            assert_eq!(serde_json::to_string(&back).unwrap(), j);
+        }
     }
 
     impl ClientMsg {

@@ -274,6 +274,15 @@ impl std::fmt::Display for TwoFactorProvider {
     }
 }
 
+impl TwoFactorProvider {
+    /// 該因子的交涉材料（Duo host/signature、WebAuthn challenge、YubiKey nfc）。
+    /// 解析在邊界（本 crate），過線時已是型別形態——見
+    /// [`crate::two_factor::challenge_details`]。
+    pub fn challenge_details(&self) -> Option<bw_proto::TwoFactorDetails> {
+        crate::two_factor::challenge_details(self.kind.as_i32(), self.details.as_ref())
+    }
+}
+
 pub fn build_form(login: &PasswordLogin, defaults: &crate::ClientOptions) -> Vec<(String, String)> {
     let mut form: Vec<(String, String)> = vec![
         ("grant_type".to_owned(), "password".to_owned()),

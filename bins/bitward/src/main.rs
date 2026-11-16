@@ -13,8 +13,8 @@ use bw_proto::{
     AdminCall, AgentCall, Auth, AuthCall, Call, CipherDraft, CipherField, CipherFieldKind,
     ClientMsg, FieldEdit, FillCall, ImportItem, ItemId, ItemKind, ItemView, MutationId,
     OverlayOpWire, PROTO_VERSION, PasskeyCall, ProtoVersion, Query, Resolution, Response,
-    ServerMsg, SessionToken, Settings, SortKey, SyncCall, TwoFactorInput, TwoFactorProviderInfo,
-    UseCall, VaultCall, View, WtpError,
+    ServerMsg, SessionToken, Settings, SortKey, SyncCall, TwoFactorCall, TwoFactorInput,
+    TwoFactorProviderInfo, UseCall, VaultCall, View, WtpError,
 };
 
 #[derive(Parser)]
@@ -61,6 +61,13 @@ enum Cmd {
     Settings {
         #[command(subcommand)]
         cmd: SettingsCmd,
+    },
+    /// 服務端 2FA 因子管理面（PR3）：清單／TOTP／Email／YubiKey／救援碼／停用。
+    /// 需要驗身的子命令一律從 stdin 讀主密碼一行（A11：密碼不進 argv）。
+    #[command(alias = "2fa")]
+    TwoFactor {
+        #[command(subcommand)]
+        cmd: TwoFactorCmd,
     },
     Sync,
     Ls {
@@ -475,6 +482,27 @@ enum SettingsCmd {
     Show,
     /// 寫入設定：`<payload>` 為 Settings 形態 JSON，缺欄＝官方預設
     Set { payload: String },
+}
+
+#[derive(Subcommand)]
+enum TwoFactorCmd {
+    /// 已啟用因子清單（不需要主密碼，只要已登入）
+    Ls,
+    /// 取 TOTP 金鑰與 otpauth URI（stdin：主密碼）
+    TotpKey,
+    /// 以驗證器現碼啟用 TOTP（stdin：主密碼、6 位碼；`--key` 取 TotpKey 的 secret）
+    TotpEnable { key: String },
+    /// 取備用救援碼（stdin：主密碼）
+    Recovery,
+    /// 寄 Email 因子驗證碼（stdin：主密碼）
+    EmailSend { email: String },
+    /// 以信中碼確認 Email 因子（stdin：主密碼、碼）
+    EmailVerify { email: String, token: String },
+    /// 登記一把 YubiKey（stdin：主密碼、44 字元 OTP）
+    YubikeyAdd,
+    /// 停用一個因子（`provider`＝upstream 編號：0 TOTP、1 Email、2 Duo、
+    /// 3 YubiKey、7 WebAuthn；stdin：主密碼）
+    Disable { provider: i32 },
 }
 
 #[derive(Subcommand)]
@@ -1018,19 +1046,34 @@ async fn login_2fa_rounds(
     else {
         unreachable!("login_2fa_rounds 只接 Login call");
     };
+    let mut last_pick: Option<i32> = None;
     for _ in 0..5 {
         let providers = match &reply {
             Ok(Response::TwoFactorRequest { providers }) if !providers.is_empty() => {
                 providers.clone()
             }
-            _ => return Ok(reply),
+            _ => {
+                // 救援碼是一次性的：用掉之後伺服器把該帳號的 2FA 全部清空
+                // （Vaultwarden `identity.rs:874-881`：`TwoFactor::delete_all_by_user`
+                // ＋清 totp_recover）。使用者必須知道下次登入不再被挑戰。
+                if matches!(last_pick, Some(8)) && matches!(reply, Ok(Response::Status(_))) {
+                    eprintln!(
+                        "注意：本次以備用救援碼登入，伺服器已清空該帳號的全部第二因子（含救援碼）。\
+                         請到 GUI 設定頁「雙重驗證」重新啟用因子。"
+                    );
+                }
+                return Ok(reply);
+            }
         };
         eprintln!("此帳號需要第二因子驗證。可用因子：");
         for p in &providers {
-            let gate = if TwoFactorProviderInfo::is_supported(p.provider) {
-                String::new()
-            } else {
+            let gate = if !TwoFactorProviderInfo::is_supported(p.provider) {
                 "（此因子尚未支援）".to_owned()
+            } else if !TwoFactorProviderInfo::usable_on(p.provider, false) {
+                // CLI 沒有 webview／原生憑證島： Duo 與 WebAuthn 得回 GUI 完成。
+                "（需在 GUI 登入完成）".to_owned()
+            } else {
+                String::new()
             };
             let hint = p
                 .hint
@@ -1045,7 +1088,7 @@ async fn login_2fa_rounds(
         }
         let default = providers
             .iter()
-            .find(|p| TwoFactorProviderInfo::is_supported(p.provider))
+            .find(|p| TwoFactorProviderInfo::usable_on(p.provider, false))
             .map(|p| p.provider);
         match default {
             Some(d) => eprintln!("選擇因子編號（預設 {d}）："),
@@ -1066,26 +1109,38 @@ async fn login_2fa_rounds(
             });
             continue;
         };
-        if !TwoFactorProviderInfo::is_supported(pick) {
+        if !TwoFactorProviderInfo::usable_on(pick, false) {
+            let why = if TwoFactorProviderInfo::is_supported(pick) {
+                "本因子需在 GUI 完成交涉（Duo 網頁／安全金鑰）"
+            } else {
+                "此因子尚未支援，請改選其他因子"
+            };
             eprintln!(
-                "此因子尚未支援：{}（請改選手機驗證器或 Email）",
-                TwoFactorProviderInfo::label(pick)
+                "{}：{}（{why}）",
+                TwoFactorProviderInfo::label(pick),
+                pick
             );
             reply = Ok(Response::TwoFactorRequest {
                 providers: providers.clone(),
             });
             continue;
         }
-        eprintln!("輸入 6 位驗證碼：");
+        let placeholder = TwoFactorProviderInfo::factor_mode(pick)
+            .map(|m| m.placeholder())
+            .unwrap_or("驗證碼");
+        eprintln!("輸入{placeholder}：");
         let code = read_line_stdin()?;
-        let code = code.trim().to_owned();
-        if code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
-            eprintln!("驗證碼格式不對：需要 6 位數字");
-            reply = Ok(Response::TwoFactorRequest {
-                providers: providers.clone(),
-            });
-            continue;
-        }
+        let code = match TwoFactorProviderInfo::validate_token(pick, &code) {
+            Ok(c) => c,
+            Err(msg) => {
+                eprintln!("輸入格式不對：{msg}");
+                reply = Ok(Response::TwoFactorRequest {
+                    providers: providers.clone(),
+                });
+                continue;
+            }
+        };
+        last_pick = Some(pick);
         rid += 1;
         let next = Call::Auth(AuthCall::Login {
             server: server.clone(),
@@ -2322,6 +2377,20 @@ fn print_response(resp: &Response, json: bool) {
         // 本機設定：扁平 Settings JSON（e2e/GUI 直讀，無外殼）
         Response::Settings(s) => {
             println!("{}", serde_json::to_string_pretty(s).unwrap());
+        }
+        // 2FA 因子清單：編號旁附繁中標籤（人讀不靠猜編號，jq 仍走 provider 欄）
+        Response::TwoFactorStates(v) => {
+            let rows: Vec<_> = v
+                .iter()
+                .map(|s| {
+                    json!({
+                        "provider": s.provider,
+                        "label": TwoFactorProviderInfo::label(s.provider),
+                        "enabled": s.enabled,
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&rows).unwrap());
         }
         Response::Profile(p) => println!("{}", json!(p)),
         Response::Ok => println!("ok"),

@@ -22,7 +22,7 @@ use bw_keys::KeyStore;
 use bw_proto::{
     AccountInfo, AdminCall, AgentCall, AuditChainInfo, AuthCall, Call, FillCall, ItemId, ItemView,
     OutboxCounts, PROTO_VERSION, PasskeyCall, PushCall, Response, StatusInfo, SyncCall,
-    TwoFactorInput, TwoFactorProviderInfo, UseCall, VaultCall, View, WtpError,
+    TwoFactorCall, TwoFactorInput, TwoFactorProviderInfo, UseCall, VaultCall, View, WtpError,
 };
 use bw_server::{Client, PasswordLogin, ServerError, TwoFactorProviderType};
 use bw_store::{AuditFilter, AuditRecord, Store};
@@ -650,6 +650,7 @@ impl Hub {
                     Ok(Response::Json(Value::Array(list)))
                 }
             },
+            Call::TwoFactor(tfc) => self.two_factor_manage(tfc).await,
             Call::Fill(FillCall::AutoType { id, template }) => {
                 self.autotype(*id, template.as_deref()).await
             }
@@ -764,13 +765,13 @@ impl Hub {
         if let Some(tf) = two_factor {
             if !TwoFactorProviderInfo::is_supported(tf.provider) {
                 return Err(denied(format!(
-                    "此因子尚未支援：{}（請選手機驗證器或 Email）",
+                    "此因子尚未支援：{}（請改選手機驗證器、Email、YubiKey、WebAuthn 或救援碼）",
                     TwoFactorProviderInfo::label(tf.provider)
                 )));
             }
             login = login.two_factor(
                 TwoFactorProviderType::from_i32(tf.provider),
-                tf.token.clone(),
+                token,
                 tf.remember,
             );
         }
@@ -792,6 +793,9 @@ impl Hub {
                                 })
                                 .flatten()
                                 .map(str::to_owned),
+                            // 因子交涉材料（Duo host/signature、WebAuthn challenge、
+                            // YubiKey nfc）：邊界已解析成型別形態，原樣過線。
+                            details: p.challenge_details(),
                         })
                         .collect(),
                 });
@@ -1605,6 +1609,16 @@ fn action_tag(c: &Call) -> String {
         Call::Push(PushCall::RegisterPush { .. }) => "Push.RegisterPush",
         Call::Push(PushCall::UnregisterPush { .. }) => "Push.UnregisterPush",
         Call::Push(PushCall::ListPush) => "Push.ListPush",
+        Call::TwoFactor(TwoFactorCall::List) => "TwoFactor.List",
+        Call::TwoFactor(TwoFactorCall::GetAuthenticator { .. }) => "TwoFactor.GetAuthenticator",
+        Call::TwoFactor(TwoFactorCall::EnableAuthenticator { .. }) => {
+            "TwoFactor.EnableAuthenticator"
+        }
+        Call::TwoFactor(TwoFactorCall::Disable { .. }) => "TwoFactor.Disable",
+        Call::TwoFactor(TwoFactorCall::GetRecoveryCode { .. }) => "TwoFactor.GetRecoveryCode",
+        Call::TwoFactor(TwoFactorCall::EmailSendCode { .. }) => "TwoFactor.EmailSendCode",
+        Call::TwoFactor(TwoFactorCall::EmailVerify { .. }) => "TwoFactor.EmailVerify",
+        Call::TwoFactor(TwoFactorCall::EnableYubikey { .. }) => "TwoFactor.EnableYubikey",
         Call::Use(UseCall::TotpCode { .. }) => "Use.TotpCode",
         Call::Use(UseCall::GeneratePassword { .. }) => "Use.GeneratePassword",
         Call::Use(UseCall::ResolveRef { .. }) => "Use.ResolveRef",
@@ -1712,6 +1726,11 @@ fn sensitivity_of_call(c: &Call, resp: Option<&Response>) -> bw_proto::Sensitivi
         // 註冊/退註出口為 Ok，token 本體是呼叫端自帶的不透明識別子
         Call::Push(PushCall::ListPush) => Identity,
         Call::Push(_) => Opaque,
+        // 2FA 管理面：TOTP key 與救援碼出口是秘密（Secret 級，同 Use.TotpCode）；
+        // 清單／啟用／停用出口只有編號與布爾，主密碼從不上線出棧（hash 只在請求側）。
+        Call::TwoFactor(TwoFactorCall::GetAuthenticator { .. })
+        | Call::TwoFactor(TwoFactorCall::GetRecoveryCode { .. }) => Secret,
+        Call::TwoFactor(_) => Identity,
         Call::Auth(_) | Call::Admin(_) | Call::Sync(_) | Call::Agent(_) | Call::Fill(_) => Opaque,
     }
 }
@@ -1851,8 +1870,8 @@ mod tests {
         m
     }
 
-    /// 解析器三態：有 key（解包得 item key）／無 key（歸屬鑰直解）／
-    /// 解包失敗（None，不誤退回）；共享兩形態（org 包 item key 的兩段鏈）。
+    /// PR3 管理面分派：未登入快速拒、缺主密碼給可懂原因、清單與取碼走真代理路徑
+    /// （本地 mock server 記 method/path/body，斷言 `/two-factor/*` 出線形態）。
     #[tokio::test]
     async fn cipher_decrypt_key_three_states() {
         let (hub, _d) = crate::passkey::tests::unlocked_hub("keyres1").await;

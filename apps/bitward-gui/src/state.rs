@@ -848,7 +848,8 @@ pub fn validate_login(server: &str, email: &str, password: &str) -> Result<Strin
     normalize_server(server).map_err(str::to_owned)
 }
 
-/// 第二步預選因子（純函數，單測點）：首個本批支援的因子（Authenticator/Email）；
+/// 第二步預選因子（純函數，單測點）：首個本客戶面可用的因子。GUI 有 Duo
+/// webview 與原生安全金鑰島，故可用集合＝daemon 受理集合（`is_supported`）；
 /// 全部未支援時退回首個列出的（選了會拿到 daemon「此因子尚未支援」可懂錯誤，
 /// 看得見總比默靜成功好）。空清單＝None。
 pub fn default_provider(infos: &[bw_proto::TwoFactorProviderInfo]) -> Option<i32> {
@@ -859,14 +860,10 @@ pub fn default_provider(infos: &[bw_proto::TwoFactorProviderInfo]) -> Option<i32
         .map(|p| p.provider)
 }
 
-/// 一次性驗證碼格式閘（純函數，單測點）：6 位數字（TOTP/Email 代碼同形）。
-/// 通過時回 trim 後的碼；最終裁判仍是伺服器。
-pub fn validate_otp(raw: &str) -> Result<String, String> {
-    let s = raw.trim();
-    if s.len() != 6 || !s.bytes().all(|b| b.is_ascii_digit()) {
-        return Err("驗證碼需為 6 位數字".into());
-    }
-    Ok(s.to_owned())
+/// 一次性輸入格式閘（純函數，單測點）：因子形態表在 bw-proto（CLI/GUI/daemon
+/// 同源，見 `TwoFactorProviderInfo::validate_token`），這裡只做轉名與傳參。
+pub fn validate_factor(provider: i32, raw: &str) -> Result<String, String> {
+    bw_proto::TwoFactorProviderInfo::validate_token(provider, raw)
 }
 
 /// 登入錯誤可懂化（批次 8）：保留 daemon 原文（使用者要看真話），
@@ -1773,7 +1770,8 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             let server = core.login.server.get();
             let email = core.login.email.get().trim().to_owned();
             let pw = core.login.password.get().clone();
-            let code = match validate_otp(&core.login.code.get()) {
+            let provider = core.login.provider.get();
+            let code = match validate_factor(provider, &core.login.code.get()) {
                 Ok(c) => c,
                 Err(msg) => {
                     core.login.error.set(Some(msg));
@@ -3549,27 +3547,41 @@ mod tests {
 
     #[test]
     fn default_provider_prefers_supported_then_first() {
-        let info = |p: i32| bw_proto::TwoFactorProviderInfo { provider: p, hint: None };
+        let info = |p: i32| bw_proto::TwoFactorProviderInfo {
+            provider: p,
+            hint: None,
+            details: None,
+        };
         // 首個支援因子（Authenticator=0）優先，即使不是清單第一位。
         assert_eq!(
             default_provider(&[info(1), info(0)]),
             Some(1),
             "Email(1) 是首個支援因子時選它"
         );
-        assert_eq!(default_provider(&[info(2), info(0)]), Some(0));
-        // 全未支援：退回首個列出的（選了給 daemon 可懂錯誤，不沉默）。
-        assert_eq!(default_provider(&[info(3), info(2)]), Some(3));
+        // Duo(2) 在 GUI 有 webview 島＝可用，故排第一時就選它。
+        assert_eq!(default_provider(&[info(2), info(0)]), Some(2));
+        // 全未支援（U2f=4、未知 99）：退回首個列出的（選了給 daemon 可懂錯誤，不沉默）。
+        assert_eq!(default_provider(&[info(4), info(99)]), Some(4));
         assert_eq!(default_provider(&[]), None);
     }
 
     #[test]
-    fn validate_otp_gates_six_digits() {
-        assert_eq!(validate_otp(" 123456 ").unwrap(), "123456");
-        assert_eq!(validate_otp("000000").unwrap(), "000000");
-        assert_eq!(validate_otp("12345").unwrap_err(), "驗證碼需為 6 位數字");
-        assert_eq!(validate_otp("1234567").unwrap_err(), "驗證碼需為 6 位數字");
-        assert_eq!(validate_otp("12a456").unwrap_err(), "驗證碼需為 6 位數字");
-        assert_eq!(validate_otp("").unwrap_err(), "驗證碼需為 6 位數字");
+    fn validate_factor_gates_per_provider() {
+        // 6 位碼（Authenticator/Email）
+        assert_eq!(validate_factor(0, " 123456 ").unwrap(), "123456");
+        assert_eq!(validate_factor(1, "000000").unwrap(), "000000");
+        assert_eq!(validate_factor(0, "12345").unwrap_err(), "驗證碼需為 6 位數字");
+        assert_eq!(validate_factor(0, "12a456").unwrap_err(), "驗證碼需為 6 位數字");
+        // 救援碼：去分隔符＋小寫化（Vaultwarden 以小寫比對，實錄 user.rs:169-175）
+        assert_eq!(
+            validate_factor(8, "Y3XV-4T6Z-7QBJ-KMNP-2RTW-3XYZ-ABCD").unwrap(),
+            "y3xv4t6z7qbjkmnp2rtw3xyzabcd"
+        );
+        // YubiKey OTP 44 字元
+        assert!(validate_factor(3, &"b".repeat(43)).is_err());
+        assert_eq!(validate_factor(3, &"b".repeat(44)).unwrap(), "b".repeat(44));
+        // 未受理因子
+        assert!(validate_factor(4, "123456").is_err());
     }
 
     #[test]

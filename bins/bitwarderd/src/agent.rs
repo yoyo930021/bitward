@@ -12,7 +12,7 @@ use bw_agent::{
 };
 use bw_proto::{
     AgentCall, ApprovalId, AuthCall, Call, EventTopic, PasskeyCall, PushCall, Response, RunPlan,
-    SessionId, SyncCall, UseCall, VaultCall, View, WtpError,
+    SessionId, SyncCall, TwoFactorCall, UseCall, VaultCall, View, WtpError,
 };
 use bw_store::{SessionRow, SessionState};
 
@@ -325,6 +325,17 @@ impl Hub {
                 (Access::See(bw_proto::Sensitivity::Opaque), None)
             }
             Call::Push(PushCall::ListPush) => (Access::See(bw_proto::Sensitivity::Identity), None),
+            // 2FA 管理面（PR3）：清單只列因子編號＝Identity；取 TOTP key／救援碼
+            // 的出口帶秘密＝Reveal(Secret)（同 Send.Get 紀律，agent 要讀得先被授
+            // reveal:secret）；啟用/停用是帳號狀態改動＝Mutate(Patch)。
+            Call::TwoFactor(TwoFactorCall::List) => {
+                (Access::See(bw_proto::Sensitivity::Identity), None)
+            }
+            Call::TwoFactor(TwoFactorCall::GetAuthenticator { .. })
+            | Call::TwoFactor(TwoFactorCall::GetRecoveryCode { .. }) => {
+                (Access::Reveal(bw_proto::Sensitivity::Secret), None)
+            }
+            Call::TwoFactor(_) => (Access::Mutate(MutateOp::Patch), None),
             Call::Use(UseCall::TotpCode { id }) => (Access::Use(UseKind::TotpCode), Some(*id)),
             Call::Use(UseCall::ResolveRef { .. }) => {
                 (Access::Reveal(bw_proto::Sensitivity::Secret), None)
