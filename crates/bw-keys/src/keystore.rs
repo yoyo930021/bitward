@@ -57,10 +57,7 @@ pub trait KeyStore: Send + Sync {
     /// 等於假保護（使用者實錄：按 Touch ID 鈕直接進庫、指紋沒發生）。
     /// 不支援生物的封存后端直接委派 `load_wrapped`（其可用性由呼叫端
     /// `biometric_available` 把關）。
-    fn load_wrapped_biometric(
-        &self,
-        label: &AccountLabel,
-    ) -> Result<Option<SealedKey>, KeyError> {
+    fn load_wrapped_biometric(&self, label: &AccountLabel) -> Result<Option<SealedKey>, KeyError> {
         self.load_wrapped(label)
     }
     fn clear(&self, label: &AccountLabel) -> Result<(), KeyError>;

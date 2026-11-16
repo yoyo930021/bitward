@@ -193,7 +193,9 @@ impl Hub {
     /// 還原屬寫路徑改造，本批不硬做，回包 `restoreSupported:false` 註記。
     pub async fn reports_cipher_history(&self, id: ItemId) -> Result<Response, WtpError> {
         let server = self.server.read().await;
-        let h = server.as_ref().ok_or_else(|| denied("離線：歷史資料源在伺服器"))?;
+        let h = server
+            .as_ref()
+            .ok_or_else(|| denied("離線：歷史資料源在伺服器"))?;
         let unsupported = || {
             Response::Json(json!({
                 "supported": false,
@@ -203,7 +205,9 @@ impl Hub {
         };
         let raw = match h.client.cipher_history(id).await {
             Ok(v) => v,
-            Err(bw_server::ServerError::Http { status: 404 | 405, .. }) => {
+            Err(bw_server::ServerError::Http {
+                status: 404 | 405, ..
+            }) => {
                 return Ok(unsupported());
             }
             Err(e) => return Err(crate::hub::map_server_err(e)),
@@ -342,12 +346,16 @@ impl Hub {
             .map_err(|_| WtpError::Locked)?
             .map_err(denied)?;
         let client = self.client().await?;
-        let created = client.folder_create(&enc_name).await.map_err(crate::hub::map_server_err)?;
+        let created = client
+            .folder_create(&enc_name)
+            .await
+            .map_err(crate::hub::map_server_err)?;
         let id_s = created
             .get("id")
             .and_then(Value::as_str)
             .ok_or_else(|| crate::hub::drift("folders 回包缺 id"))?;
-        let id = Uuid::parse_str(id_s).map_err(|_| crate::hub::drift(format!("folder id {id_s}")))?;
+        let id =
+            Uuid::parse_str(id_s).map_err(|_| crate::hub::drift(format!("folder id {id_s}")))?;
         self.store.folder_put(id, &created).map_err(denied)?;
         Ok(Response::Json(json!({"id": id.to_string(), "name": name})))
     }
@@ -453,7 +461,9 @@ impl Hub {
             bw_proto::EventTopic::VaultChanged,
             json!({"id": id.to_string(), "op": "purge"}),
         );
-        Ok(Response::Json(json!({"purged": id.to_string(), "mirror_rows": n})))
+        Ok(Response::Json(
+            json!({"purged": id.to_string(), "mirror_rows": n}),
+        ))
     }
 
     /// 原子批次匯入（`VaultCall::Import`；語意見 proto 端註解）：
@@ -519,7 +529,9 @@ impl Hub {
                         tags.push(t.clone());
                     }
                 }
-                let _ = self.store.overlay(ids[i], bw_store::OverlayOp::SetTags(tags));
+                let _ = self
+                    .store
+                    .overlay(ids[i], bw_store::OverlayOp::SetTags(tags));
             }
         }
         self.reindex_many(&ids)?;

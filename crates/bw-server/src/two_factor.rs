@@ -249,8 +249,10 @@ pub fn challenge_details(provider: i32, raw: Option<&Value>) -> Option<TwoFactor
                 });
             }
             let host = get_str(raw, &["Host", "host"])?;
-            let signature =
-                get_str(raw, &["Signature", "signature", "SignedRequest", "signedRequest"])?;
+            let signature = get_str(
+                raw,
+                &["Signature", "signature", "SignedRequest", "signedRequest"],
+            )?;
             Some(TwoFactorDetails::DuoIframe {
                 host: host.to_owned(),
                 signature: signature.to_owned(),
@@ -342,7 +344,8 @@ mod tests {
     /// 挑戰細節：四形態各取所需，Email／未知回 None（水漬位在 hint）。
     #[test]
     fn challenge_details_per_provider() {
-        let duo_iframe = serde_json::json!({"Host": "api-abc.duosecurity.com", "Signature": "AUTH|a|b:APP|c|d"});
+        let duo_iframe =
+            serde_json::json!({"Host": "api-abc.duosecurity.com", "Signature": "AUTH|a|b:APP|c|d"});
         assert_eq!(
             challenge_details(2, Some(&duo_iframe)),
             Some(TwoFactorDetails::DuoIframe {
@@ -378,7 +381,10 @@ mod tests {
             challenge_details(3, Some(&serde_json::json!({"Nfc": true}))),
             Some(TwoFactorDetails::Yubikey { nfc: true })
         );
-        assert_eq!(challenge_details(1, Some(&serde_json::json!({"Email": "a***@b.test"}))), None);
+        assert_eq!(
+            challenge_details(1, Some(&serde_json::json!({"Email": "a***@b.test"}))),
+            None
+        );
         assert_eq!(challenge_details(0, Some(&serde_json::json!(null))), None);
         assert_eq!(challenge_details(2, None), None);
     }

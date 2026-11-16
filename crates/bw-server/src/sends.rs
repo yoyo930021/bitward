@@ -30,7 +30,7 @@ use serde_json::{Value, json};
 
 use bw_proto::ItemId;
 
-use crate::json::{get_str, get};
+use crate::json::{get, get_str};
 use crate::{Client, ServerError};
 
 /// 接收方存取的語意四態（[`Client::send_access`]；狀態碼→語意的集中映射，
@@ -181,10 +181,7 @@ impl Client {
         file_id: &str,
         password_hash: Option<&str>,
     ) -> Result<Vec<u8>, ServerError> {
-        let url = format!(
-            "{}/sends/{id}/access/file/{file_id}",
-            self.url("api").await
-        );
+        let url = format!("{}/sends/{id}/access/file/{file_id}", self.url("api").await);
         let resp = self
             .http
             .post(&url)

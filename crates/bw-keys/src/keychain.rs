@@ -10,9 +10,7 @@ use core_foundation::dictionary::CFDictionary;
 use core_foundation::string::CFString;
 use security_framework::access_control::SecAccessControl;
 use security_framework::base::Error;
-use security_framework_sys::access_control::{
-    kSecAccessControlBiometryCurrentSet,
-};
+use security_framework_sys::access_control::kSecAccessControlBiometryCurrentSet;
 use security_framework_sys::base::errSecItemNotFound;
 use security_framework_sys::item::{
     kSecAttrAccessControl, kSecAttrAccount, kSecAttrService, kSecClass, kSecClassGenericPassword,
@@ -56,34 +54,36 @@ fn create_biometric_acl() -> Result<SecAccessControl, String> {
 /// （檔案型鑰匙圈建立者 partition 免提示,查詢路徑照走）;`deny`＝模擬
 /// 用戶拒絕（測錯誤鏈路,不碰真 prompt）。
 fn evaluate_biometric_prompt() -> Result<CFType, KeyError> {
+    use objc2::AnyThread;
     use objc2::rc::Retained;
     use objc2::runtime::Bool;
-    use objc2::AnyThread;
     use objc2_foundation::{NSError, NSString};
     use objc2_local_authentication::{LAContext, LAPolicy};
 
-    let ctx: Retained<LAContext> =
-        unsafe { LAContext::init(LAContext::alloc()) };
+    let ctx: Retained<LAContext> = unsafe { LAContext::init(LAContext::alloc()) };
     tracing::info!("keychain biometric: LAContext evaluate 開跑（prompt 應彈窗）");
     match std::env::var("BW_KEYS_LA_MOCK").as_deref() {
         Ok("pass") => {}
         Ok("deny") => {
-            return Err(KeyError::KeyStore("生物辨識遭拒絕或失敗：deny(mock)".into()))
+            return Err(KeyError::KeyStore(
+                "生物辨識遭拒絕或失敗：deny(mock)".into(),
+            ));
         }
         _ => {
             let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
             let reason = NSString::from_str("使用 Touch ID 解鎖密碼庫");
-            let block: block2::RcBlock<dyn Fn(Bool, *mut NSError)> = block2::RcBlock::new(move |ok: Bool, err: *mut NSError| {
-                let msg = if ok.is_true() {
-                    Ok(())
-                } else if err.is_null() {
-                    Err("unknown".to_string())
-                } else {
-                    let e = unsafe { &*err };
-                    Err(format!("{}({})", e.localizedDescription(), e.code()))
-                };
-                let _ = tx.send(msg);
-            });
+            let block: block2::RcBlock<dyn Fn(Bool, *mut NSError)> =
+                block2::RcBlock::new(move |ok: Bool, err: *mut NSError| {
+                    let msg = if ok.is_true() {
+                        Ok(())
+                    } else if err.is_null() {
+                        Err("unknown".to_string())
+                    } else {
+                        let e = unsafe { &*err };
+                        Err(format!("{}({})", e.localizedDescription(), e.code()))
+                    };
+                    let _ = tx.send(msg);
+                });
             unsafe {
                 ctx.evaluatePolicy_localizedReason_reply(
                     LAPolicy::DeviceOwnerAuthenticationWithBiometrics,
@@ -104,9 +104,7 @@ fn evaluate_biometric_prompt() -> Result<CFType, KeyError> {
     // LAContext 是 NSObject(CFType 同指針域);wrap_under_get_rule +1 持有,
     // 查詢存活期內有效。
     Ok(unsafe {
-        CFType::wrap_under_get_rule(
-            Retained::as_ptr(&ctx) as core_foundation::base::CFTypeRef,
-        )
+        CFType::wrap_under_get_rule(Retained::as_ptr(&ctx) as core_foundation::base::CFTypeRef)
     })
 }
 
@@ -289,10 +287,7 @@ impl KeyStore for KeychainKeystore {
     /// daemon 自己讀自己寫的 item 根本不會問指紋（假保護,使用者實錄）。
     /// evaluate 通過的 context 以 `kSecUseAuthenticationContext` 綁進查詢,
     /// 讓 SecItem 層沿用同一份辨識結果（拒否/錯指→不上拋鑰）。
-    fn load_wrapped_biometric(
-        &self,
-        label: &AccountLabel,
-    ) -> Result<Option<SealedKey>, KeyError> {
+    fn load_wrapped_biometric(&self, label: &AccountLabel) -> Result<Option<SealedKey>, KeyError> {
         self.guard()?;
         let ctx = evaluate_biometric_prompt()?;
         self.copy_sealed(&Self::account(label), Some(ctx))
@@ -474,4 +469,3 @@ mod tests {
         assert!(matches!(ks.load_wrapped(&label), Ok(None)));
     }
 }
-

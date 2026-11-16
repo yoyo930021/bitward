@@ -100,8 +100,7 @@ impl Hub {
     ) -> Result<Response, WtpError> {
         self.require_unlocked()?;
         if let Some(f) = &draft.folder_id {
-            Uuid::parse_str(f)
-                .map_err(|_| denied(format!("folder_id 需為 UUID，got {f:?}")))?;
+            Uuid::parse_str(f).map_err(|_| denied(format!("folder_id 需為 UUID，got {f:?}")))?;
         }
         let id = Uuid::new_v4();
         let cipher = self.encrypt_draft(draft, Some(id))?;
@@ -177,9 +176,7 @@ impl Hub {
                     }
                     // 官方 UriMatchType：null|0..5（5=Never 僅值域，UI 不列）
                     if match_type.is_some_and(|m| m > 5) {
-                        return Err(denied(format!(
-                            "match 值域 null|0..5，got {match_type:?}"
-                        )));
+                        return Err(denied(format!("match 值域 null|0..5，got {match_type:?}")));
                     }
                 }
                 FieldEdit::AppendField { field } => {
@@ -231,9 +228,10 @@ impl Hub {
                 )),
                 // match 走 leaf 座標系（uri.<n>.match）：three_way 得以看見
                 // 判定欄的雙端改動，漂移合併不靜默吞掉（apply_merged 明文落欄）。
-                FieldEdit::SetUriMatch { index, match_type } => {
-                    Some((format!("uri.{index}.match"), match_type.map(|m| m.to_string())))
-                }
+                FieldEdit::SetUriMatch { index, match_type } => Some((
+                    format!("uri.{index}.match"),
+                    match_type.map(|m| m.to_string()),
+                )),
                 _ => None,
             })
             .collect();
@@ -246,9 +244,8 @@ impl Hub {
             .machine
             .with_keys(|kb| -> Option<Value> {
                 let key = self.cipher_decrypt_key(kb, &base, &org_keys)?;
-                let enc = |v: &str| {
-                    bw_crypto::encrypt_bytes_key(&key, v.as_bytes()).unwrap_or_default()
-                };
+                let enc =
+                    |v: &str| bw_crypto::encrypt_bytes_key(&key, v.as_bytes()).unwrap_or_default();
                 let ours = bw_vault::apply_merged(&base, &map, &enc);
                 // 陣列形態操作（Set 型 leaf 做不到的增刪）：先刪（索引由大而小，
                 // 免位移）後附加，全部落在 ours 副本上。uri 與 field 同族紀律。
@@ -870,7 +867,8 @@ impl Hub {
                 let _ = self.store.settle(m.id, MutState::Queued);
                 return Err((
                     bw_server::ServerError::Rejected(
-                        "move re-wrap item key unavailable (org key not derived or unwrap failed)".into(),
+                        "move re-wrap item key unavailable (org key not derived or unwrap failed)"
+                            .into(),
                     ),
                     true,
                 ));
@@ -1182,9 +1180,7 @@ fn apply_uri_ops(
         return ours;
     }
     let obj = ours.as_object_mut().expect("cipher must be object");
-    let login = obj
-        .entry("login")
-        .or_insert_with(|| serde_json::json!({}));
+    let login = obj.entry("login").or_insert_with(|| serde_json::json!({}));
     if !login.is_object() {
         *login = serde_json::json!({});
     }
@@ -1517,8 +1513,11 @@ mod tests {
             .rewrap_moved_key(&personal, Some(org_id), &org_keys)
             .unwrap()
             .expect("帶 key 項目必有新信封");
-        assert_eq!(dec_bytes(&org_bytes, &env).as_deref(), Some(item.as_slice()),
-            "個人→共享：item key 改由 org key 包");
+        assert_eq!(
+            dec_bytes(&org_bytes, &env).as_deref(),
+            Some(item.as_slice()),
+            "個人→共享：item key 改由 org key 包"
+        );
         let shared_cipher = json!({
             "id": shared.to_string(), "type": 1, "organizationId": org_id.to_string(),
             "collectionIds": [], "name": "2.a|b|c",
@@ -1528,8 +1527,11 @@ mod tests {
             .rewrap_moved_key(&shared_cipher, None, &org_keys)
             .unwrap()
             .expect("帶 key 項目必有新信封");
-        assert_eq!(dec_bytes(&user_bytes, &env2).as_deref(), Some(item.as_slice()),
-            "共享→個人：item key 改由 user key 包");
+        assert_eq!(
+            dec_bytes(&user_bytes, &env2).as_deref(),
+            Some(item.as_slice()),
+            "共享→個人：item key 改由 user key 包"
+        );
         assert_eq!(
             hub.rewrap_moved_key(&json!({"type": 1, "name": "2.a|b|c"}), None, &org_keys)
                 .unwrap(),
@@ -1537,7 +1539,8 @@ mod tests {
             "無 key 舊項目維持現狀（不憑空造 key 欄）"
         );
         assert!(
-            hub.rewrap_moved_key(&personal, Some(Uuid::new_v4()), &org_keys).is_err(),
+            hub.rewrap_moved_key(&personal, Some(Uuid::new_v4()), &org_keys)
+                .is_err(),
             "目標 org key 未派生 → Err 延後重試"
         );
     }
@@ -1844,7 +1847,10 @@ mod tests {
         assert_eq!(hub.store.query(&Query::default()).unwrap().len(), 2);
         assert_eq!(hub.store.depth().unwrap().queued, 2);
         let id0 = Uuid::parse_str(v["ids"][0].as_str().unwrap()).unwrap();
-        assert_eq!(hub.store.overlay_get(id0).unwrap().tags, vec!["t".to_string()]);
+        assert_eq!(
+            hub.store.overlay_get(id0).unwrap().tags,
+            vec!["t".to_string()]
+        );
         let id1 = Uuid::parse_str(v["ids"][1].as_str().unwrap()).unwrap();
         let note1 = hub.store.item(id1).unwrap().unwrap().enc_cipher;
         assert_eq!(note1["type"], json!(2), "SecureNote 走官方線格式");
@@ -1931,7 +1937,11 @@ mod tests {
             Some("https://two.test")
         );
         // 預驗：越界 index 與空網址擋在入列前
-        assert!(hub.write_patch("s", id, &[FieldEdit::RemoveUri { index: 9 }]).await.is_err());
+        assert!(
+            hub.write_patch("s", id, &[FieldEdit::RemoveUri { index: 9 }])
+                .await
+                .is_err()
+        );
         assert!(
             hub.write_patch("s", id, &[FieldEdit::AppendUri { uri: "  ".into() }])
                 .await
@@ -1973,24 +1983,47 @@ mod tests {
         let due = hub.store.take_due(16).unwrap();
         assert_eq!(due[0].payload["touched"][0], "uri.0.match");
         for mm in &due {
-            hub.store.settle(mm.id, bw_store::MutState::Applied).unwrap();
+            hub.store
+                .settle(mm.id, bw_store::MutState::Applied)
+                .unwrap();
         }
         // None＝回落 null
-        hub.write_patch("s", id, &[FieldEdit::SetUriMatch { index: 0, match_type: None }])
-            .await
-            .unwrap();
+        hub.write_patch(
+            "s",
+            id,
+            &[FieldEdit::SetUriMatch {
+                index: 0,
+                match_type: None,
+            }],
+        )
+        .await
+        .unwrap();
         let m = hub.store.item(id).unwrap().unwrap().enc_cipher;
         assert!(m["login"]["uris"][0]["match"].is_null());
         // 值域 6 與越界 index 入列前拒
         assert!(
-            hub.write_patch("s", id, &[FieldEdit::SetUriMatch { index: 0, match_type: Some(6) }])
-                .await
-                .is_err()
+            hub.write_patch(
+                "s",
+                id,
+                &[FieldEdit::SetUriMatch {
+                    index: 0,
+                    match_type: Some(6)
+                }]
+            )
+            .await
+            .is_err()
         );
         assert!(
-            hub.write_patch("s", id, &[FieldEdit::SetUriMatch { index: 3, match_type: Some(0) }])
-                .await
-                .is_err()
+            hub.write_patch(
+                "s",
+                id,
+                &[FieldEdit::SetUriMatch {
+                    index: 3,
+                    match_type: Some(0)
+                }]
+            )
+            .await
+            .is_err()
         );
         // Masked 投影回填 uri_matches（GUI 編輯基準）
         let v = hub
@@ -2034,7 +2067,9 @@ mod tests {
         // deletedDate），必須擋下語意才正確
         hub.write_delete("s3", &[id]).await.unwrap();
         let err = hub.write_set_archived("s4", id, true).await.unwrap_err();
-        assert!(matches!(&err, WtpError::Denied { grant_gap } if grant_gap.contains("restore")),
-            "{err:?}");
+        assert!(
+            matches!(&err, WtpError::Denied { grant_gap } if grant_gap.contains("restore")),
+            "{err:?}"
+        );
     }
 }

@@ -229,33 +229,23 @@ impl Hub {
             // 資料夾與硬刪比照 cipher 的 create/delete 級（無獨立 MutateOp：
             // Target 判定走 item/folder 歸屬，folder 級 grant 對 CreateFolder
             // （item None）只由 Target::All 命中——新建資料夾無歸屬可判定）。
-            Call::Vault(VaultCall::CreateFolder { .. }) => {
-                (Access::Mutate(MutateOp::Create), None)
+            Call::Vault(VaultCall::CreateFolder { .. }) => (Access::Mutate(MutateOp::Create), None),
+            Call::Vault(VaultCall::ListFolders) => {
+                (Access::See(bw_proto::Sensitivity::Identity), None)
             }
-            Call::Vault(VaultCall::ListFolders) => (
-                Access::See(bw_proto::Sensitivity::Identity),
-                None,
-            ),
-            Call::Vault(VaultCall::DeleteFolder { .. }) => {
-                (Access::Mutate(MutateOp::Delete), None)
-            }
-            Call::Vault(VaultCall::Purge { id }) => {
-                (Access::Mutate(MutateOp::Delete), Some(*id))
-            }
+            Call::Vault(VaultCall::DeleteFolder { .. }) => (Access::Mutate(MutateOp::Delete), None),
+            Call::Vault(VaultCall::Purge { id }) => (Access::Mutate(MutateOp::Delete), Some(*id)),
             // 批次匯入＝多筆 Create；item None（Target::All 級授權）
-            Call::Vault(VaultCall::Import { .. }) => {
-                (Access::Mutate(MutateOp::Create), None)
-            }
+            Call::Vault(VaultCall::Import { .. }) => (Access::Mutate(MutateOp::Create), None),
             // 附件：上傳改的是 cipher（Patch 級）、下載出口是內容（See secret）、
             // 刪除比照 Delete；item 錨定便於 item:/folder: grant 判定
             Call::Vault(VaultCall::Attachment { sub }) => match sub {
                 bw_proto::AttachmentOp::Upload { item_id, .. } => {
                     (Access::Mutate(MutateOp::Patch), Some(*item_id))
                 }
-                bw_proto::AttachmentOp::Download { item_id, .. } => (
-                    Access::See(bw_proto::Sensitivity::Secret),
-                    Some(*item_id),
-                ),
+                bw_proto::AttachmentOp::Download { item_id, .. } => {
+                    (Access::See(bw_proto::Sensitivity::Secret), Some(*item_id))
+                }
                 bw_proto::AttachmentOp::Delete { item_id, .. } => {
                     (Access::Mutate(MutateOp::Delete), Some(*item_id))
                 }

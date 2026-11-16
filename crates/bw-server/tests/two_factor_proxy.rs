@@ -29,10 +29,8 @@ impl Mock {
     fn spawn(script: Vec<(&str, (u16, String))>) -> Mock {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let queues: Vec<(String, (u16, String))> = script
-            .into_iter()
-            .map(|(p, r)| (p.to_owned(), r))
-            .collect();
+        let queues: Vec<(String, (u16, String))> =
+            script.into_iter().map(|(p, r)| (p.to_owned(), r)).collect();
         let hits = Arc::new(Mutex::new(Vec::new()));
         let hits_c = hits.clone();
         std::thread::spawn(move || {
@@ -221,7 +219,10 @@ async fn authenticator_key_enable_and_disable_wire_shapes() {
         })
     );
 
-    client.two_factor_disable("HASH==", 0).await.expect("disable");
+    client
+        .two_factor_disable("HASH==", 0)
+        .await
+        .expect("disable");
     assert_eq!(
         mock.json_body("POST /api/two-factor/disable"),
         serde_json::json!({"masterPasswordHash": "HASH==", "type": 0})
@@ -232,11 +233,21 @@ async fn authenticator_key_enable_and_disable_wire_shapes() {
 async fn email_yubikey_and_recovery_shapes() {
     let mock = Mock::spawn(vec![
         ("/api/two-factor/send-email", (200, "{}".to_owned())),
-        ("/api/two-factor/email", (200, "{\"email\":\"a@b.test\",\"enabled\":true}".to_owned())),
-        ("/api/two-factor/yubikey", (200, "{\"enabled\":true}".to_owned())),
+        (
+            "/api/two-factor/email",
+            (200, "{\"email\":\"a@b.test\",\"enabled\":true}".to_owned()),
+        ),
+        (
+            "/api/two-factor/yubikey",
+            (200, "{\"enabled\":true}".to_owned()),
+        ),
         (
             "/api/two-factor/get-recover",
-            (200, "{\"code\":\"y3xv4t6z7qbjkmnp2rtw3xyzabcd\",\"object\":\"twoFactorRecover\"}".to_owned()),
+            (
+                200,
+                "{\"code\":\"y3xv4t6z7qbjkmnp2rtw3xyzabcd\",\"object\":\"twoFactorRecover\"}"
+                    .to_owned(),
+            ),
         ),
     ]);
     let client = client_with_token(&mock).await;
@@ -288,18 +299,30 @@ async fn email_yubikey_and_recovery_shapes() {
 async fn recovery_code_absent_is_none_not_error() {
     let mock = Mock::spawn(vec![(
         "/api/two-factor/get-recover",
-        (200, "{\"code\":null,\"object\":\"twoFactorRecover\"}".to_owned()),
+        (
+            200,
+            "{\"code\":null,\"object\":\"twoFactorRecover\"}".to_owned(),
+        ),
     )]);
     let client = client_with_token(&mock).await;
-    assert_eq!(client.two_factor_recovery_code("HASH==").await.unwrap(), None);
+    assert_eq!(
+        client.two_factor_recovery_code("HASH==").await.unwrap(),
+        None
+    );
 }
 
 #[tokio::test]
 async fn unauthenticated_management_call_fails_fast() {
     let mock = Mock::spawn(vec![("/api/two-factor", (200, "{\"data\":[]}".to_owned()))]);
     let client = Client::new(&mock.base()).unwrap();
-    let err = client.two_factor_list().await.expect_err("無 bearer 應快速失敗");
-    assert!(matches!(err, bw_server::ServerError::Unauthenticated), "{err:?}");
+    let err = client
+        .two_factor_list()
+        .await
+        .expect_err("無 bearer 應快速失敗");
+    assert!(
+        matches!(err, bw_server::ServerError::Unauthenticated),
+        "{err:?}"
+    );
     assert!(mock.hits.lock().unwrap().is_empty(), "不該打出請求");
 }
 
@@ -324,7 +347,10 @@ fn retry_form_carries_three_factor_shapes() {
     })
     .to_string();
     let cases: [(TwoFactorProviderType, &str); 3] = [
-        (TwoFactorProviderType::YubiKey, &(String::from("c") + &"b".repeat(43))),
+        (
+            TwoFactorProviderType::YubiKey,
+            &(String::from("c") + &"b".repeat(43)),
+        ),
         (
             TwoFactorProviderType::Duo,
             "AUTH|aGVsbG8=|sig1|AUTO|AUTO:APP|aGVsbG8=|sig2",
@@ -347,7 +373,7 @@ fn retry_form_carries_three_factor_shapes() {
                 _ => {}
             }
         }
-            }
+    }
 }
 
 /// `retry_with` 端到端：挑戰重送後伺服器收表單、回 token（含 Keys）。

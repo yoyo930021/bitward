@@ -46,12 +46,16 @@ impl crate::hub::Hub {
         }
         let dir = self.data_dir.join("icons");
         let file = dir.join(format!("{host}.png"));
-        if fresh_cache(&file, ICON_TTL_MS, now_ms()) && let Ok(bytes) = std::fs::read(&file) {
+        if fresh_cache(&file, ICON_TTL_MS, now_ms())
+            && let Ok(bytes) = std::fs::read(&file)
+        {
             return Ok(Response::AttachmentBytes(bytes));
         }
         let _gate = self.icon_gate.lock().await;
         // 雙重檢查：排隊期間第一個呼叫已把快取填好
-        if fresh_cache(&file, ICON_TTL_MS, now_ms()) && let Ok(bytes) = std::fs::read(&file) {
+        if fresh_cache(&file, ICON_TTL_MS, now_ms())
+            && let Ok(bytes) = std::fs::read(&file)
+        {
             return Ok(Response::AttachmentBytes(bytes));
         }
         let client = self.client().await?;

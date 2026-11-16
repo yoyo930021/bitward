@@ -45,7 +45,8 @@ impl ApnsConfig {
         staging: bool,
     ) -> Result<Self, String> {
         let pem_str = std::str::from_utf8(pem).map_err(|e| e.to_string())?;
-        let key = SigningKey::from_pkcs8_pem(pem_str).map_err(|e| format!("APNs .p8 解析失敗: {e}"))?;
+        let key =
+            SigningKey::from_pkcs8_pem(pem_str).map_err(|e| format!("APNs .p8 解析失敗: {e}"))?;
         let endpoint = if staging {
             "https://api.sandbox.push.apple.com".to_string()
         } else {
@@ -139,8 +140,14 @@ MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgQczA8C+zpC3p+q0M
 wbyM5XjY2CXkv6vaUJkGmkoDXZOhRANCAAQyYnNJVzUqZQhk5bxgOsqDHIIKpOEE
 ZCk+RA68NQS3ZMU4c2saIPqmcNdUbv/pBfCZx4sGwO2T5fMKfwug7tbl
 -----END PRIVATE KEY-----";
-        ApnsConfig::from_pem(pem.as_bytes(), "KEYID123", "TEAM456", "io.bitward.dev", false)
-            .unwrap()
+        ApnsConfig::from_pem(
+            pem.as_bytes(),
+            "KEYID123",
+            "TEAM456",
+            "io.bitward.dev",
+            false,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -149,7 +156,14 @@ ZCk+RA68NQS3ZMU4c2saIPqmcNdUbv/pBfCZx4sGwO2T5fMKfwug7tbl
         let jwt = c.provider_token();
         let parts: Vec<&str> = jwt.split('.').collect();
         assert_eq!(parts.len(), 3, "JWT 必須三段");
-        let dec = |s: &str| String::from_utf8(base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s).unwrap()).unwrap();
+        let dec = |s: &str| {
+            String::from_utf8(
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(s)
+                    .unwrap(),
+            )
+            .unwrap()
+        };
         let header: serde_json::Value = serde_json::from_str(&dec(parts[0])).unwrap();
         assert_eq!(header["alg"], "ES256");
         assert_eq!(header["kid"], "KEYID123");
@@ -158,7 +172,10 @@ ZCk+RA68NQS3ZMU4c2saIPqmcNdUbv/pBfCZx4sGwO2T5fMKfwug7tbl
         assert!(claims["iat"].as_u64().unwrap() > 0);
         // ES256 簽名 = raw r‖s 64 bytes
         assert_eq!(
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[2]).unwrap().len(),
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(parts[2])
+                .unwrap()
+                .len(),
             64
         );
     }
@@ -169,8 +186,9 @@ ZCk+RA68NQS3ZMU4c2saIPqmcNdUbv/pBfCZx4sGwO2T5fMKfwug7tbl
         let c = cfg();
         let jwt = c.provider_token();
         let parts: Vec<&str> = jwt.split('.').collect();
-        let sig_bytes =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
+        let sig_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(parts[2])
+            .unwrap();
         let sig = Signature::from_slice(&sig_bytes).unwrap();
         let verifying = *c.signing.verifying_key();
         use p256::ecdsa::signature::Verifier;

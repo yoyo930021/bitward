@@ -469,9 +469,7 @@ pub enum Reports {
     /// 項目版本歷史：代理伺服器 `GET /api/ciphers/{id}/history`（官方舊版線格式，
     /// 查證記錄見 daemon `reports_cipher_history`）。VW 1.37.2 未實裝該路由
     /// （實錄 404）→ 回 {"supported":false,"versions":[]}，GUI 據此收合歷史節。
-    CipherHistory {
-        id: ItemId,
-    },
+    CipherHistory { id: ItemId },
 }
 
 /// Send 面（`VaultCall::Send` 子孫；置尾紀律同宿主）。加密模型見 bw-crypto
@@ -510,13 +508,9 @@ pub enum SendOp {
     /// 需解鎖態（seed 從鏡像 `key` 信封解出）；回應 `Response::Json`
     /// （{"id","url","webUrl"}，webUrl＝本機接收頁變體）。審計只記動作與 id，
     /// **不落片段**（A11 延伸）。
-    Get {
-        id: ItemId,
-    },
+    Get { id: ItemId },
     /// 刪除（需連網；伺服器 404＝已不存在，照收斂摘鏡像列回 Ok）。
-    Remove {
-        id: ItemId,
-    },
+    Remove { id: ItemId },
     /// 取用密碼：`Some`＝設/換（`PUT /sends/{id}` 帶新哈希，seed 不變＝
     /// 既有連結的解密密鑰不受影響）；`None`＝清除（`remove-password`）。
     /// 需解鎖態＋連網；回應 `Response::Json`（{"id","hasPassword"}）。
@@ -875,30 +869,19 @@ pub enum FieldEdit {
     /// 改自訂欄型別（按 index 定位）。官方語意：type 改動连带整欄重加密，
     /// 所以欄位級合併把「同欄 type 改 × 同欄 name/value 改」判**同欄衝突**
     /// 進收件匣（principle：別靜默覆蓋），bw-vault::three_way 實現判定。
-    SetType {
-        index: u32,
-        kind: CipherFieldKind,
-    },
+    SetType { index: u32, kind: CipherFieldKind },
     /// 附加自訂欄（落 `fields[]` 尾；name 必填）。
-    AppendField {
-        field: CipherField,
-    },
+    AppendField { field: CipherField },
     /// 移除自訂欄（按 index；越界回錯）。
-    RemoveField {
-        index: u32,
-    },
+    RemoveField { index: u32 },
     /// 附加網址列（落 `login.uris[]` 尾；官方形態 `{uri:<信封>, match:null}`）。
     /// 陣列形態變更＝全 PUT 路徑（查證 2026-11-10：VW partial 端點只收
     /// folderId/favorite——既有 quirk；bw-sync `uri.<n>` 文法僅 leaf 值編輯，
     /// 增刪不在該路徑）。欄位級合併把增刪視為 `uri.<n>` 同族索引位移：
     /// 雙端各自改同索引列＝衝突收件匣（比照 field type×值紀律，不靜默）。
-    AppendUri {
-        uri: String,
-    },
+    AppendUri { uri: String },
     /// 移除網址列（按 index；越界回錯）。
-    RemoveUri {
-        index: u32,
-    },
+    RemoveUri { index: u32 },
     /// 改網址列的 match 判定（官方 `login.uris[].match`：null=預設、
     /// 0=網域、1=網域＋子域、2=開頭符合、3=精確、4=正規表達式、5=永不）。
     /// `None`＝回落預設（null）。值為明文整數不落信封（協定欄位形態）；
@@ -1294,7 +1277,10 @@ impl TwoFactorProviderInfo {
                 Ok(s.to_owned())
             }
             Some(FactorMode::Recovery) => {
-                let compact: String = s.chars().filter(|c| !c.is_whitespace() && *c != '-').collect();
+                let compact: String = s
+                    .chars()
+                    .filter(|c| !c.is_whitespace() && *c != '-')
+                    .collect();
                 if !(24..=40).contains(&compact.len())
                     || !compact.bytes().all(|b| b.is_ascii_alphanumeric())
                 {
@@ -1321,14 +1307,17 @@ impl TwoFactorProviderInfo {
                 Ok(s.to_owned())
             }
             Some(FactorMode::WebauthnAssertion) => {
-                let v: serde_json::Value =
-                    serde_json::from_str(s).map_err(|_| "安全金鑰簽章形態不對（非 JSON）".to_owned())?;
+                let v: serde_json::Value = serde_json::from_str(s)
+                    .map_err(|_| "安全金鑰簽章形態不對（非 JSON）".to_owned())?;
                 let resp = v
                     .get("response")
                     .and_then(|r| r.as_object())
                     .ok_or_else(|| "安全金鑰簽章缺 response 欄".to_owned())?;
                 let has = |k1: &str, k2: &str| resp.contains_key(k1) || resp.contains_key(k2);
-                if v.get("id").and_then(|i| i.as_str()).unwrap_or("").is_empty()
+                if v.get("id")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("")
+                    .is_empty()
                     || !has("authenticatorData", "authenticator_data")
                     || !has("clientDataJson", "clientDataJSON")
                     || !resp.contains_key("signature")
@@ -1600,7 +1589,10 @@ mod tests {
         ] {
             let bytes = postcard::to_allocvec(&call).unwrap();
             let back: Call = postcard::from_bytes(&bytes).unwrap();
-            assert_eq!(serde_json::to_string(&back).unwrap(), serde_json::to_string(&call).unwrap());
+            assert_eq!(
+                serde_json::to_string(&back).unwrap(),
+                serde_json::to_string(&call).unwrap()
+            );
         }
         let resp = Response::Settings(Settings::default());
         let bytes = postcard::to_allocvec(&resp).unwrap();
@@ -1609,12 +1601,22 @@ mod tests {
         // 批次 2/3 新變體：postcard 往返＋JSON 欄名（match 為關鍵字、線名不轉義）
         let edit = Call::Vault(VaultCall::Patch {
             id: Uuid::new_v4(),
-            edits: vec![FieldEdit::SetUriMatch { index: 2, match_type: Some(3) }],
+            edits: vec![FieldEdit::SetUriMatch {
+                index: 2,
+                match_type: Some(3),
+            }],
         });
         let bytes = postcard::to_allocvec(&edit).unwrap();
         let back: Call = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(serde_json::to_string(&back).unwrap(), serde_json::to_string(&edit).unwrap());
-        assert!(serde_json::to_string(&edit).unwrap().contains("\"match\":3"));
+        assert_eq!(
+            serde_json::to_string(&back).unwrap(),
+            serde_json::to_string(&edit).unwrap()
+        );
+        assert!(
+            serde_json::to_string(&edit)
+                .unwrap()
+                .contains("\"match\":3")
+        );
         let del = Call::Passkey(PasskeyCall::DeletePasskey {
             item_id: Uuid::new_v4(),
             credential_id: "cred".into(),
@@ -1650,14 +1652,22 @@ mod tests {
     fn unlock_frame_tolerates_legacy_without_password() {
         let legacy = serde_json::json!({"Unlock": {"biometric": false}});
         let call: AuthCall = serde_json::from_value(legacy).unwrap();
-        assert!(matches!(call, AuthCall::Unlock { biometric: false, password: None }));
+        assert!(matches!(
+            call,
+            AuthCall::Unlock {
+                biometric: false,
+                password: None
+            }
+        ));
         let full = AuthCall::Unlock {
             biometric: true,
             password: Some("pw".into()),
         };
         let j = serde_json::to_string(&full).unwrap();
         let back: AuthCall = serde_json::from_str(&j).unwrap();
-        assert!(matches!(back, AuthCall::Unlock { biometric: true, password: Some(p) } if p == "pw"));
+        assert!(
+            matches!(back, AuthCall::Unlock { biometric: true, password: Some(p) } if p == "pw")
+        );
     }
 
     /// 批次 8 紀律：StatusInfo 尾附 email/server 兩欄 must `default`——
@@ -1813,12 +1823,18 @@ mod tests {
 
         let otp44 = "c".to_owned() + &"b".repeat(43);
         assert_eq!(P::validate_token(3, &otp44).unwrap(), otp44);
-        assert_eq!(P::validate_token(3, &format!("  {otp44}\n")).unwrap(), otp44);
+        assert_eq!(
+            P::validate_token(3, &format!("  {otp44}\n")).unwrap(),
+            otp44
+        );
         assert!(P::validate_token(3, &"b".repeat(43)).is_err());
         assert!(P::validate_token(3, &format!("{}!", otp44)).is_err());
 
         let code = "Y3XV 4T6Z-7QBJ-KMNP-2RTW-3XYZ-ABCD";
-        assert_eq!(P::validate_token(8, code).unwrap(), "y3xv4t6z7qbjkmnp2rtw3xyzabcd");
+        assert_eq!(
+            P::validate_token(8, code).unwrap(),
+            "y3xv4t6z7qbjkmnp2rtw3xyzabcd"
+        );
         assert!(P::validate_token(8, "short").is_err());
         assert!(P::validate_token(0, "12345").is_err());
         assert_eq!(P::validate_token(0, " 123456 ").unwrap(), "123456");
@@ -2090,10 +2106,12 @@ mod tests {
             idx(&AuthCall::WhoAmI),
             idx(&serde_json::from_str::<AuthCall>(r#""WhoAmI""#).unwrap())
         );
-        assert!(idx(&AuthCall::ChangePassword {
-            current: None,
-            new: None
-        }) > idx(&AuthCall::WhoAmI));
+        assert!(
+            idx(&AuthCall::ChangePassword {
+                current: None,
+                new: None
+            }) > idx(&AuthCall::WhoAmI)
+        );
     }
 
     #[test]
@@ -2152,7 +2170,13 @@ mod tests {
         }];
         let j = serde_json::to_string(&v).unwrap();
         assert!(j.contains("\"attachments\""));
-        assert_eq!(serde_json::from_str::<ItemView>(&j).unwrap().attachments.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<ItemView>(&j)
+                .unwrap()
+                .attachments
+                .len(),
+            1
+        );
         let empty = serde_json::to_string(&ItemView::metadata(meta())).unwrap();
         assert!(!empty.contains("\"attachments\""));
     }
@@ -2200,11 +2224,10 @@ mod tests {
         let idx = |c: &VaultCall| postcard::to_allocvec(c).unwrap()[0];
         // 置尾紀律：Send 索引在 Reports 之後，既有變體不動
         assert!(
-            idx(&VaultCall::Send {
-                sub: SendOp::List
-            }) > idx(&VaultCall::Reports {
-                sub: Reports::PasswordReuse
-            })
+            idx(&VaultCall::Send { sub: SendOp::List })
+                > idx(&VaultCall::Reports {
+                    sub: Reports::PasswordReuse
+                })
         );
         let create = SendOp::Create {
             name: None,
@@ -2362,7 +2385,12 @@ mod tests {
         };
         // 置尾紀律：Import 索引必須在 Purge（三件套批次末位）之後
         let idx = |c: &VaultCall| postcard::to_allocvec(c).unwrap()[0];
-        assert!(idx(&imp) > idx(&VaultCall::Purge { id: ItemId::new_v4() }));
+        assert!(
+            idx(&imp)
+                > idx(&VaultCall::Purge {
+                    id: ItemId::new_v4()
+                })
+        );
         let j = serde_json::to_vec(&msg).unwrap();
         assert_eq!(serde_json::from_slice::<ClientMsg>(&j).unwrap().rid(), 16);
         let b = postcard::to_allocvec(&msg).unwrap();

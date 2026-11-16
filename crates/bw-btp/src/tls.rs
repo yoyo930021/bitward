@@ -343,7 +343,10 @@ mod provider_tests {
         let r = std::panic::catch_unwind(|| {
             let _ = rustls::ClientConfig::builder();
         });
-        assert!(r.is_ok(), "init_crypto_provider 後 auto-detect 仍 panic(雙 provider 未根除)");
+        assert!(
+            r.is_ok(),
+            "init_crypto_provider 後 auto-detect 仍 panic(雙 provider 未根除)"
+        );
         // 預設 provider 確已落定位於可用。
         assert!(rustls::crypto::CryptoProvider::get_default().is_some());
     }

@@ -160,7 +160,9 @@ impl Hub {
             .attachment_download(item_id, attachment_id)
             .await
             .map_err(crate::hub::map_server_err)?;
-        let url = meta.url.ok_or_else(|| crate::hub::drift("附件回包缺 url"))?;
+        let url = meta
+            .url
+            .ok_or_else(|| crate::hub::drift("附件回包缺 url"))?;
         let ct = client
             .attachment_fetch_bytes(&url)
             .await
@@ -302,23 +304,14 @@ mod tests {
             .with_keys(|kb| kb.user_key().as_bytes().to_vec())
             .unwrap();
         // key 欄＝附件金鑰被 user key 重包；檔身＝該金鑰加密的信封位元組
-        let att_key = bw_crypto::decrypt_bytes_with_key(
-            &user,
-            payload["key"].as_str().unwrap(),
-        )
-        .unwrap();
+        let att_key =
+            bw_crypto::decrypt_bytes_with_key(&user, payload["key"].as_str().unwrap()).unwrap();
         assert_eq!(att_key.len(), 64, "enc32+mac32 合成金鑰（UserKey 同構）");
-        let plain = bw_crypto::decrypt_bytes_with_key(
-            &att_key,
-            std::str::from_utf8(&ct).unwrap(),
-        )
-        .unwrap();
+        let plain =
+            bw_crypto::decrypt_bytes_with_key(&att_key, std::str::from_utf8(&ct).unwrap()).unwrap();
         assert_eq!(plain, b"secret-bytes");
-        let name = bw_crypto::decrypt_bytes_with_key(
-            &user,
-            payload["file_name"].as_str().unwrap(),
-        )
-        .unwrap();
+        let name = bw_crypto::decrypt_bytes_with_key(&user, payload["file_name"].as_str().unwrap())
+            .unwrap();
         assert_eq!(String::from_utf8(name).unwrap(), "帳單.pdf");
         // 同檔再傳：ref 去重但兩列各自持有引用計數（blob_release 語意的登録側）
         hub.attach_upload("s2", cid, "again.pdf", b"secret-bytes")
@@ -331,9 +324,15 @@ mod tests {
         let (hub, _d) = unlocked_hub("att2").await;
         let cid = personal_cipher(&hub, "n2");
         let big = vec![0u8; MAX_ATTACHMENT_BYTES + 1];
-        let err = hub.attach_upload("s", cid, "big.bin", &big).await.unwrap_err();
+        let err = hub
+            .attach_upload("s", cid, "big.bin", &big)
+            .await
+            .unwrap_err();
         assert!(matches!(err, WtpError::Denied { .. }), "{err:?}");
-        assert!(hub.attach_upload("s", cid, "", b"x").await.is_err(), "空檔名拒");
+        assert!(
+            hub.attach_upload("s", cid, "", b"x").await.is_err(),
+            "空檔名拒"
+        );
 
         let org = Uuid::new_v4();
         let shared = Uuid::new_v4();
@@ -377,17 +376,22 @@ mod tests {
                 }),
             )
             .unwrap();
-        hub.attach_upload("s", id, "帳單.pdf", b"ik-bytes").await.unwrap();
+        hub.attach_upload("s", id, "帳單.pdf", b"ik-bytes")
+            .await
+            .unwrap();
         let due = hub.store.take_due(8).unwrap();
         let payload = due[0].payload.clone();
         let att_key =
             bw_crypto::decrypt_bytes_with_key(&item, payload["key"].as_str().unwrap()).unwrap();
-        let ct = hub.store.blob_open(payload["blob"].as_str().unwrap()).unwrap();
+        let ct = hub
+            .store
+            .blob_open(payload["blob"].as_str().unwrap())
+            .unwrap();
         let plain =
             bw_crypto::decrypt_bytes_with_key(&att_key, std::str::from_utf8(&ct).unwrap()).unwrap();
         assert_eq!(plain, b"ik-bytes");
-        let name =
-            bw_crypto::decrypt_bytes_with_key(&item, payload["file_name"].as_str().unwrap()).unwrap();
+        let name = bw_crypto::decrypt_bytes_with_key(&item, payload["file_name"].as_str().unwrap())
+            .unwrap();
         assert_eq!(name, "帳單.pdf".as_bytes());
         assert!(
             bw_crypto::decrypt_bytes_with_key(&user, payload["key"].as_str().unwrap()).is_err(),
@@ -432,8 +436,7 @@ mod tests {
         assert_eq!(rows[0].size, Some(11));
         // dec 形態："2.Zm58|eA==|bQ==" 解出 "fn|"（base64 段 Zm58 → "fn|"）
         let metas = hub.attachment_projection(cid, &|s: &str| {
-            s.strip_prefix("2.Zm58|eA==|bQ==")
-                .map(|_| "fn".to_string())
+            s.strip_prefix("2.Zm58|eA==|bQ==").map(|_| "fn".to_string())
         });
         assert_eq!(metas[0].file_name, "fn");
         assert_eq!(metas[0].size_name.as_deref(), Some("11.00 bytes"));

@@ -771,7 +771,8 @@ impl Hub {
         {
             arr.remove(idx);
         }
-        self.enqueue_passkey_patch(session, item, base, ours).await?;
+        self.enqueue_passkey_patch(session, item, base, ours)
+            .await?;
         Ok(Response::Ok)
     }
 }
@@ -1614,8 +1615,10 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn delete_passkey_clears_mirror_and_enqueues_patch() {
         let (hub, dir) = unlocked_hub("del").await;
-        let Response::PasskeyAttestation { credential_id, .. } =
-            hub.passkey_register("s", &register_call(None)).await.unwrap()
+        let Response::PasskeyAttestation { credential_id, .. } = hub
+            .passkey_register("s", &register_call(None))
+            .await
+            .unwrap()
         else {
             panic!("expect attestation");
         };
@@ -1625,7 +1628,8 @@ pub(crate) mod tests {
         let item = entries[0].item_id.expect("list 帶 item 歸屬");
         // 歸屬不符：錯 item_id 不動鏡像
         assert!(matches!(
-            hub.passkey_delete("s", ItemId::new_v4(), &credential_id).await,
+            hub.passkey_delete("s", ItemId::new_v4(), &credential_id)
+                .await,
             Err(WtpError::NotFound)
         ));
         let due = hub.store.take_due(16).unwrap();
@@ -1644,9 +1648,11 @@ pub(crate) mod tests {
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].payload["op"], "patch");
         assert_eq!(due[0].payload["touched"][0], "fido2Credentials");
-        assert!(due[0].payload["ours"]["login"]["fido2Credentials"]
-            .as_array()
-            .is_some_and(|a| a.is_empty()));
+        assert!(
+            due[0].payload["ours"]["login"]["fido2Credentials"]
+                .as_array()
+                .is_some_and(|a| a.is_empty())
+        );
         let Response::Passkeys(entries) = hub.passkey_list(None).unwrap() else {
             panic!("expect passkeys");
         };

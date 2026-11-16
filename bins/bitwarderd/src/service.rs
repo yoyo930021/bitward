@@ -46,7 +46,9 @@ fn service_label() -> String {
 #[cfg(target_os = "macos")]
 fn retire_legacy_plist() {
     let Some(home) = dirs::home_dir() else { return };
-    let old = home.join("Library/LaunchAgents").join(format!("{LEGACY_LABEL}.plist"));
+    let old = home
+        .join("Library/LaunchAgents")
+        .join(format!("{LEGACY_LABEL}.plist"));
     let _ = launchctl(&["bootout", &bootstrap_target(), &old.display().to_string()]);
     let _ = std::fs::remove_file(&old);
 }
@@ -103,16 +105,16 @@ pub fn render_plist(
     // e2e 白名單旗同步入 env：launchd 拉起的 daemon 渲染同一模板（判定穩定）。
     let label = service_label();
     if std::env::var("BW_SERVICE_ALLOW_DEV_HEAL").is_ok() {
-        env_inner.push_str("        <key>BW_SERVICE_ALLOW_DEV_HEAL</key>\n        <string>1</string>\n");
+        env_inner
+            .push_str("        <key>BW_SERVICE_ALLOW_DEV_HEAL</key>\n        <string>1</string>\n");
     }
     if std::env::var("BW_SERVICE_LABEL").is_ok() {
         env_inner.push_str(&format!(
             "        <key>BW_SERVICE_LABEL</key>\n        <string>{label}</string>\n"
         ));
     }
-    let env_block = format!(
-        "    <key>EnvironmentVariables</key>\n    <dict>\n{env_inner}    </dict>\n"
-    );
+    let env_block =
+        format!("    <key>EnvironmentVariables</key>\n    <dict>\n{env_inner}    </dict>\n");
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -291,7 +293,11 @@ fn self_heal_macos(group: Option<&str>, sock: Option<&str>) -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     let allow_dev = std::env::var("BW_SERVICE_ALLOW_DEV_HEAL").is_ok();
     let under_launchd = unsafe { libc::getppid() } == 1;
-    let rendered = desired_plist(&exe, group.unwrap_or("group.8V5224A99M.io.bitward.dev"), sock);
+    let rendered = desired_plist(
+        &exe,
+        group.unwrap_or("group.8V5224A99M.io.bitward.dev"),
+        sock,
+    );
     if !should_self_heal(
         Some(&existing),
         &rendered,
@@ -424,7 +430,11 @@ fn run_macos(
             std::fs::write(&plist, xml).map_err(|e| e.to_string())?;
             // e2e 出口：只验渲染/落檔，不碰 launchd 域（同 Label 已载会撞真注册）。
             if std::env::var("BW_SERVICE_NO_BOOTSTRAP").is_ok() {
-                return Ok(format!("installed {} <- {} (no-bootstrap)", service_label(), exe.display()));
+                return Ok(format!(
+                    "installed {} <- {} (no-bootstrap)",
+                    service_label(),
+                    exe.display()
+                ));
             }
             // 重裝語意：先 bootout（容忍未載入）再 bootstrap。
             let _ = launchctl(&["bootout", &bootstrap_target(), &plist.display().to_string()]);
@@ -434,7 +444,11 @@ fn run_macos(
                 &bootstrap_target(),
                 &plist.display().to_string(),
             ])?;
-            Ok(format!("installed {} <- {}", service_label(), exe.display()))
+            Ok(format!(
+                "installed {} <- {}",
+                service_label(),
+                exe.display()
+            ))
         }
         ServiceAction::Uninstall => {
             let _ = launchctl(&["bootout", &bootstrap_target(), &plist.display().to_string()]);
@@ -586,7 +600,10 @@ mod tests {
                 "模板必須恆含 Keychain 開關：{plist}"
             );
         }
-        assert!(!a.contains("BITWARD_DATA_DIR"), "無 data_dir 環境不應寫入該鍵");
+        assert!(
+            !a.contains("BITWARD_DATA_DIR"),
+            "無 data_dir 環境不應寫入該鍵"
+        );
         assert!(b.contains("<key>BITWARD_DATA_DIR</key>\n        <string>/tmp/vault</string>"));
         // 兩態都是合法可解析形態的骨架（含 Label/exe/group）。
         assert!(a.contains(EXE) && a.contains(GROUP) && a.contains(LABEL));
@@ -662,25 +679,49 @@ mod tests {
         // 正式二進位 + 指向本檔 + 內容過舊 + launchd 直屬 → 觸發。
         assert!(should_self_heal(Some(&stale), &rendered, EXE, false, true));
         // 同文 → 跳過（冪等）。
-        assert!(!should_self_heal(Some(&rendered), &rendered, EXE, false, true));
+        assert!(!should_self_heal(
+            Some(&rendered),
+            &rendered,
+            EXE,
+            false,
+            true
+        ));
         // plist 指向別家（/Applications vs 本檔是 temp）→ 跳過，不越權。
         assert!(!should_self_heal(
-            Some(&stale), &rendered, "/somewhere/else/bitwarderd", false, true
+            Some(&stale),
+            &rendered,
+            "/somewhere/else/bitwarderd",
+            false,
+            true
         ));
         // 14.9 四閘：正式二進位但**非 launchd 直屬**（terminal 手跑探測帶自訂
         // --sock,把一次性參數當真相源覆寫註冊、幽靈頂掉常駐 13 分鐘的實錄）
         // → 跳過；dev 白名單旗仍可放行（e2e 於 temp HOME 內驗判定軸）。
-        assert!(!should_self_heal(Some(&stale), &rendered, EXE, false, false));
+        assert!(!should_self_heal(
+            Some(&stale),
+            &rendered,
+            EXE,
+            false,
+            false
+        ));
         assert!(should_self_heal(Some(&stale), &rendered, EXE, true, false));
         // repo 構建目錄二進位（/target/debug|release）→ 預設跳過（14.7 紀律：
         // dev 實例絕不碰常駐註冊域）；e2e 白名單旗可放行。
         let dev = render_plist("/repo/target/debug/bitwarderd", GROUP, LOG, SOCK, None);
         let dev_stale = dev.replace("<string>1</string>", "<string>0</string>");
         assert!(!should_self_heal(
-            Some(&dev_stale), &dev, "/repo/target/debug/bitwarderd", false, true
+            Some(&dev_stale),
+            &dev,
+            "/repo/target/debug/bitwarderd",
+            false,
+            true
         ));
         assert!(should_self_heal(
-            Some(&dev_stale), &dev, "/repo/target/debug/bitwarderd", true, false
+            Some(&dev_stale),
+            &dev,
+            "/repo/target/debug/bitwarderd",
+            true,
+            false
         ));
         // 未安裝 → 跳過。
         assert!(!should_self_heal(None, &rendered, EXE, false, true));
