@@ -253,8 +253,35 @@ pub(crate) fn bind_sock(
         // sock 0600；同 uid 已是信任邊界，peer_uid 驗證兜底。
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
             let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            // B1：建後 lstat 驗目錄歸屬，不符即拒啟——防他人搶先建
+            // `/private/tmp/io.bitward.dev/`（世界可寫／他人擁有／symlink）後
+            // 冒充 socket。set_permissions 對非己目錄會 EPERM 靜默失敗，故必驗。
+            let md =
+                std::fs::symlink_metadata(parent).map_err(|e| format!("sock dir lstat: {e}"))?;
+            if md.file_type().is_symlink() {
+                return Err(format!(
+                    "sock 目錄 {} 是 symlink，拒絕啟動（可能被搶佔）",
+                    parent.display()
+                ));
+            }
+            if md.uid() != unsafe { libc::geteuid() } {
+                return Err(format!(
+                    "sock 目錄 {} 擁有者 uid {} 非本使用者（{}），拒絕啟動",
+                    parent.display(),
+                    md.uid(),
+                    unsafe { libc::geteuid() }
+                ));
+            }
+            let mode = md.permissions().mode() & 0o777;
+            if mode != 0o700 {
+                return Err(format!(
+                    "sock 目錄 {} 權限應為 0700，實為 {:04o}，拒絕啟動",
+                    parent.display(),
+                    mode
+                ));
+            }
         }
     }
     let listener = tokio::net::UnixListener::bind(path).map_err(|e| e.to_string())?;
@@ -852,6 +879,40 @@ mod sock_tests {
                 .expect("accept 逾時")
                 .expect("連線落在舊聽者而非被搶走");
         drop((c, accepted, foreign));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[tokio::test]
+    async fn bind_sock_refuses_symlink_parent_dir() {
+        // B1：他人搶先建 sock 目錄為 symlink → lstat 驗非 symlink、拒啟。
+        let base = tmp_tagged("b1sym");
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.join("io.bitward.dev");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let sock = link.join("daemon.sock");
+        let err = match bind_sock(&sock, &base) {
+            Ok(h) => {
+                drop(h);
+                panic!("symlink 目錄應拒啟");
+            }
+            Err(e) => e,
+        };
+        assert!(err.contains("symlink"), "應因 symlink 拒絕：{err}");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn bind_sock_forces_0700_on_parent() {
+        // B1：正常（本使用者擁有）目錄綁定成功，且 sock 目錄收斂為 0700。
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmp_tagged("b1mode");
+        let _ = std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755));
+        let sock = d.join("daemon.sock");
+        let held = bind_sock(&sock, &d).expect("正常目錄應綁定成功");
+        let mode = std::fs::metadata(&d).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "bind_sock 應把 sock 目錄收斂為 0700");
+        drop(held);
         std::fs::remove_dir_all(&d).ok();
     }
 

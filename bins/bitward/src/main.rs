@@ -838,6 +838,20 @@ async fn main() {
     }
 }
 
+/// B1：連上本機 daemon socket 後，用 `getpeereid` 驗對端程序 uid 等於自己。
+/// 世界可寫目錄被他人搶佔時，連上的可能是偽造 server；交 token／主密碼前先擋。
+fn verify_server_peer(stream: &tokio::net::UnixStream) -> Result<(), String> {
+    use std::os::unix::io::AsRawFd;
+    match bw_btp::peer_uid_from_fd(stream.as_raw_fd()) {
+        Ok(uid) if uid == unsafe { libc::geteuid() } => Ok(()),
+        Ok(uid) => Err(format!(
+            "daemon socket 對端 uid {uid} 非本使用者（{}），拒絕（目錄可能被搶佔）",
+            unsafe { libc::geteuid() }
+        )),
+        Err(e) => Err(format!("無法驗證 daemon socket 對端 uid：{e}")),
+    }
+}
+
 async fn open_session(
     sock: &std::path::Path,
     data_dir: &std::path::Path,
@@ -854,6 +868,9 @@ async fn open_session(
         let stream = tokio::net::UnixStream::connect(sock)
             .await
             .map_err(|_| format!("連不到 daemon（{}）；先啟動 bitwarderd", sock.display()))?;
+        // B1：經搶佔目錄連上的可能是他人偽造的 socket，連上即驗對端 uid＝本使用者，
+        // 否則把 token／主密碼交給對方前就擋下。
+        verify_server_peer(&stream)?;
         let (mut rd, mut wr) = stream.into_split();
         let saved: Option<SessionToken> = if attempt == 0 {
             std::fs::read_to_string(session_file(data_dir))
