@@ -603,12 +603,12 @@ impl Hub {
             Call::Use(UseCall::TotpCode { id }) => self.totp(*id),
             Call::Use(UseCall::GeneratePassword { policy }) => {
                 let opts = bw_crypto::PasswordOptions {
-                    length: policy.get("length").and_then(Value::as_u64).unwrap_or(20) as usize,
-                    lowercase: flag(policy, "lowercase"),
-                    uppercase: flag(policy, "uppercase"),
-                    numbers: flag(policy, "numbers"),
-                    special: flag(policy, "special"),
-                    avoid_ambiguous: flag(policy, "avoidAmbiguous"),
+                    length: policy.length,
+                    lowercase: policy.lowercase,
+                    uppercase: policy.uppercase,
+                    numbers: policy.numbers,
+                    special: policy.special,
+                    avoid_ambiguous: policy.avoid_ambiguous,
                 };
                 let pw = bw_crypto::generate_password(&opts).map_err(denied)?;
                 Ok(Response::Secret(pw))
@@ -696,7 +696,23 @@ impl Hub {
                     .map_err(denied)?;
                 Ok(Response::Audit(
                     rows.iter()
-                        .filter_map(|r| serde_json::to_value(r).ok())
+                        .map(|r| bw_proto::AuditRow {
+                            ts: r.ts.clone(),
+                            session: r.session.clone(),
+                            action: r.action.clone(),
+                            item: r.item.clone(),
+                            // 鏡像层的 field 文字是 FieldPath 的 JSON 表示；解不開
+                            // （史前非座標值）＝None，顯示層缺席、鏈驗算不受影響。
+                            field: r
+                                .field
+                                .as_ref()
+                                .and_then(|f| serde_json::from_value(f.clone()).ok()),
+                            sens: r.sens,
+                            outcome: r.outcome.clone(),
+                            bytes_out: r.bytes_out,
+                            approval: r.approval.clone(),
+                            epoch: r.epoch,
+                        })
                         .collect(),
                 ))
             }
@@ -719,11 +735,13 @@ impl Hub {
             Call::Agent(AgentCall::Deny { id }) => self.deny(sess, *id),
             Call::Agent(AgentCall::Revoke { session: sid }) => self.revoke(sess, *sid),
             Call::Agent(AgentCall::ListSessions) => self.list_sessions(sess),
-            Call::Agent(AgentCall::ListPending) => Ok(Response::Sessions(
+            Call::Agent(AgentCall::ListPending) => Ok(Response::PendingApprovals(
                 self.pending_list()
                     .into_iter()
-                    .map(|(id, summary, requested_at_ms)| {
-                        json!({"id": id, "summary": summary, "requested_at_ms": requested_at_ms})
+                    .map(|(id, summary, requested_at_ms)| bw_proto::PendingApproval {
+                        id,
+                        summary,
+                        requested_at_ms,
                     })
                     .collect(),
             )),
@@ -1749,10 +1767,6 @@ pub(crate) fn project_identity(
         passport_number: field("passportNumber"),
         license_number: field("licenseNumber"),
     })
-}
-
-fn flag(v: &Value, k: &str) -> bool {
-    v.get(k).and_then(Value::as_bool).unwrap_or(true)
 }
 
 fn sha256_hex(s: &str) -> String {

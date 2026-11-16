@@ -1535,7 +1535,7 @@ impl core::fmt::Debug for FieldEdit {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum UseCall {
     TotpCode { id: ItemId },
-    GeneratePassword { policy: serde_json::Value },
+    GeneratePassword { policy: PasswordPolicy },
     ResolveRef { uri: String },
     Run { plan: RunPlan },
 }
@@ -1706,10 +1706,15 @@ pub enum Response {
         token: SessionToken,
         expires_epoch_ms: u64,
     },
-    /// 行內容為自構 JSON（字串/整數，無 f64）——postcard-safe，見測試。
-    Audit(Vec<serde_json::Value>),
+    /// 審計鏈讀側（PR5 D3 型別化；行內容見 `AuditRow`）。
+    Audit(Vec<AuditRow>),
     AuditChain(AuditChainInfo),
-    Sessions(Vec<serde_json::Value>),
+    /// 本機 agent session 帳（PR5 D3：原 `Sessions(Vec<Value>)` 的第一形態）。
+    AgentSessions(Vec<AgentSessionInfo>),
+    /// 待人工核准佇列（PR5 D3：第二形態；GUI 佇列與 e2e 取 id 的來源）。
+    PendingApprovals(Vec<PendingApproval>),
+    /// 未消耗的配對碼清單（PR5 D3：第三形態）。
+    Pairings(Vec<PairedCode>),
     Account(Option<AccountInfo>),
     Profile(ServerProfile),
     Version(String),
@@ -2135,6 +2140,91 @@ pub struct SendUrl {
 pub struct SendPasswordState {
     pub id: String,
     pub has_password: bool,
+}
+
+// —— 尾巴三群型別化（PR5 子批 D3）：policy 請求欄、審計列、session 清單 ——
+
+/// `Use:GeneratePassword` 的政策（請求方向；原為手搭 `json!` 六鍵）。
+/// `#[serde(default)]`：舊 thin 端的幀缺鍵＝本 struct 的預設（引擎值域 5–128
+/// 與「至少一個字元集」的最終把關在 `bw_crypto`，不在這裡）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PasswordPolicy {
+    pub length: usize,
+    pub lowercase: bool,
+    pub uppercase: bool,
+    pub numbers: bool,
+    pub special: bool,
+    #[serde(rename = "avoidAmbiguous")]
+    pub avoid_ambiguous: bool,
+}
+
+impl Default for PasswordPolicy {
+    /// 預設＝原 daemon 讀取端的兜底值（length 20、全字元集開、避歧義預設**開**
+    /// 屬 daemon `flag()` 的既有寬容語意：缺欄回 true）。
+    fn default() -> Self {
+        Self {
+            length: 20,
+            lowercase: true,
+            uppercase: true,
+            numbers: true,
+            special: true,
+            avoid_ambiguous: true,
+        }
+    }
+}
+
+/// `Agent:Audit` 的一列＝審計 hash 鏈的讀側形態（PR5 D3 型別化）。
+/// 欄名與 `bw_store::AuditRecord` 的 serde 輸出逐一同名，CLI `bitward audit`
+/// 的 JSON 契約與 `cardid.sh` 的 `.field=="CardNumber"` 路徑因此零改。
+/// `field` 是 §2.1 唯一座標系的 `FieldPath`（鏡像层舊行若帶非座標形態的字串，
+/// 在 daemon 邊界解不開＝None：只影響顯示，鏈驗算仍在 store 側按原始文字重算）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditRow {
+    pub ts: String,
+    pub session: Option<String>,
+    pub action: String,
+    pub item: Option<String>,
+    pub field: Option<FieldPath>,
+    pub sens: Sensitivity,
+    pub outcome: String,
+    pub bytes_out: u64,
+    pub approval: Option<String>,
+    pub epoch: u64,
+}
+
+/// `Agent:ListSessions` 的一列（互動端可見的本機 session 帳）。
+/// `grants` 是 DSL 字串（與 `pair start --grant` 同語彙；`bw_agent::grant_to_dsl`
+/// 為 `parse_grants` 的逆函數，有往返測）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSessionInfo {
+    pub id: String,
+    /// `Interactive`／`Device`（daemon `SessionKind` 的顯示名）。
+    pub kind: String,
+    pub name: Option<String>,
+    pub epoch: u64,
+    pub revoked: bool,
+    /// 到期時刻；互動端從不過期＝None。
+    pub expires_at_ms: Option<u64>,
+    pub grants: Vec<String>,
+    /// 用量帳本合計（呼叫次數）。
+    pub usage: u32,
+}
+
+/// `Agent:ListPending` 的一列（待人工核准佇列；GUI 佇列與 e2e 取 id 用）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingApproval {
+    pub id: String,
+    pub summary: String,
+    pub requested_at_ms: u64,
+}
+
+/// `Auth:PairList` 的一列（尚未被 join 消耗的配對碼）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairedCode {
+    pub code: String,
+    pub name: String,
+    pub expires_at_ms: u64,
 }
 
 /// 全型別化回應：這是 P2 切 postcard 主線的前置（`Value` 的 f64 postcard 不支援）。

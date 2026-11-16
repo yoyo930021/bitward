@@ -2,6 +2,10 @@
 
 真相源紀律：各腳本頭註解是该車道的斷言清單；本檔只定收案閘，不重複腳本內容。
 
+協定形態斷言的歸屬：腳本經 **CLI stdout**（`--json` 或人讀）斷言者屬使用者契約，協定改動不得破；
+直接打 BTP 幀讀 `Response` 變體名者（如 `pushpath.sh` 內嵌的 `wtp.py` 讀 `.Ok.<Variant>`）
+屬**測試內部 fixture**，協定型別改名時同批追隨改鍵名，不算破契約（PR5 D3 裁決）。
+
 ## 收案閘（每批 code-ready 前必跑，兩 workspace 都算）
 
 root workspace（repo 根）：

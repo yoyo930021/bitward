@@ -3554,7 +3554,9 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         }
         Cmd::FetchPending => {
             core.ipc_quiet(|s| match s.call(&Call::Agent(AgentCall::ListPending)) {
-                Ok(Response::Sessions(rows)) => Cmd::PendingLoaded(Arc::new(parse_pending(&rows))),
+                Ok(Response::PendingApprovals(rows)) => {
+                    Cmd::PendingLoaded(Arc::new(pending_rows(rows)))
+                }
                 // 輪詢失敗靜默（下一拍重試；連線死因已由其他路徑顯式報）。
                 _ => Cmd::PendingLoaded(Arc::new(Vec::new())),
             });
@@ -4064,21 +4066,15 @@ pub fn parse_folders(v: &serde_json::Value) -> Vec<FolderEntry> {
         .unwrap_or_default()
 }
 
-/// `Response::Sessions`（ListPending 行）→ 佇列列；缺 id 跳過。
-/// `requested_at_ms` 為 daemon 後補欄位，缺席＝None（UI 不虛構時間）。
-pub fn parse_pending(rows: &[serde_json::Value]) -> Vec<PendingRow> {
-    rows.iter()
-        .filter_map(|row| {
-            let id = row.get("id").and_then(|i| i.as_str())?.to_owned();
-            Some(PendingRow {
-                id,
-                summary: row
-                    .get("summary")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or_default()
-                    .to_owned(),
-                requested_at_ms: row.get("requested_at_ms").and_then(|t| t.as_u64()),
-            })
+/// `Response::PendingApprovals`（型別化行，PR5 D3）→ 佇列列。
+/// `requested_at_ms` 在型別上是必填欄位，UI 仍按 Option 處理（欄位缺席的
+/// 舊語意保留給渲染層：0 不顯示時間）。
+pub fn pending_rows(rows: Vec<bw_proto::PendingApproval>) -> Vec<PendingRow> {
+    rows.into_iter()
+        .map(|r| PendingRow {
+            id: r.id,
+            summary: r.summary,
+            requested_at_ms: (r.requested_at_ms > 0).then_some(r.requested_at_ms),
         })
         .collect()
 }
@@ -5153,16 +5149,22 @@ mod tests {
 
     #[test]
     fn parse_pending_maps_rows_and_tolerates_missing_time() {
-        let v = serde_json::json!([
-            {"id": "x1", "summary": "Vault.Get.Reveal", "requested_at_ms": 1794000000123u64},
-            {"id": "x2", "summary": "Use.Run"},
-            {"summary": "缺id跳過"},
+        let rows = pending_rows(vec![
+            bw_proto::PendingApproval {
+                id: "x1".into(),
+                summary: "Vault.Get.Reveal".into(),
+                requested_at_ms: 1794000000123,
+            },
+            bw_proto::PendingApproval {
+                id: "x2".into(),
+                summary: "Use.Run".into(),
+                requested_at_ms: 0,
+            },
         ]);
-        let rows = parse_pending(v.as_array().unwrap());
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].id, "x1");
         assert_eq!(rows[0].requested_at_ms, Some(1794000000123));
-        // daemon 尚未帶時間欄：None 而非虛構值。
+        // 0＝daemon 未帶時間語意的等位：None 而非虛構值。
         assert_eq!(rows[1].requested_at_ms, None);
     }
 

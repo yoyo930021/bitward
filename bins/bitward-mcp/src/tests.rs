@@ -549,9 +549,18 @@ async fn totp_audit_whoami_mappings() {
     fake.replies
         .send(ServerMsg::Reply {
             rid,
-            outcome: Ok(Response::Audit(vec![
-                serde_json::json!({"action": "Vault.List"}),
-            ])),
+            outcome: Ok(Response::Audit(vec![bw_proto::AuditRow {
+                ts: "1794000000000".into(),
+                session: None,
+                action: "Vault.List".into(),
+                item: None,
+                field: None,
+                sens: bw_proto::Sensitivity::Identity,
+                outcome: "ok".into(),
+                bytes_out: 0,
+                approval: None,
+                epoch: 1,
+            }])),
         })
         .unwrap();
     let r = h.json().await;

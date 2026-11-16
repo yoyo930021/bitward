@@ -1735,14 +1735,14 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             no_special,
             avoid_ambiguous,
         } => Call::Use(UseCall::GeneratePassword {
-            policy: serde_json::json!({
-                "length": *length as u64,
-                "lowercase": !no_lowercase,
-                "uppercase": !no_uppercase,
-                "numbers": !no_numbers,
-                "special": !no_special,
-                "avoidAmbiguous": *avoid_ambiguous,
-            }),
+            policy: bw_proto::PasswordPolicy {
+                length: *length,
+                lowercase: !no_lowercase,
+                uppercase: !no_uppercase,
+                numbers: !no_numbers,
+                special: !no_special,
+                avoid_ambiguous: *avoid_ambiguous,
+            },
         }),
         Cmd::Autotype { id, template } => Call::Fill(FillCall::AutoType {
             id: parse_id(id)?,
@@ -2612,7 +2612,9 @@ fn print_response(resp: &Response, json: bool) {
         Response::Account(a) => println!("{}", serde_json::to_string_pretty(&a).unwrap()),
         Response::AuditChain(c) => println!("{}", serde_json::to_string_pretty(&c).unwrap()),
         Response::Conflicts(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap()),
-        Response::Sessions(v) => println!("{}", serde_json::to_string_pretty(v).unwrap()),
+        Response::AgentSessions(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap()),
+        Response::PendingApprovals(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap()),
+        Response::Pairings(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap()),
         Response::DupGroups(g) => println!("{}", serde_json::to_string_pretty(g).unwrap()),
         Response::PairInfo(p) => println!("{}", serde_json::to_string_pretty(p).unwrap()),
         // agentpath.sh 依賴的扁平形狀：{"token","session","expires_at_ms"}

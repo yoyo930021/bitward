@@ -533,32 +533,35 @@ impl Hub {
         if caller.kind != SessionKind::Interactive {
             return Err(denied("只有互動端能列 session"));
         }
-        let rows: Vec<Value> = self
+        let rows: Vec<bw_proto::AgentSessionInfo> = self
             .sessions
             .lock()
             .unwrap()
             .values()
-            .map(|s| {
-                json!({
-                    "id": s.row.id,
-                    "kind": format!("{:?}", s.kind),
-                    "name": s.row.principal.get("name").cloned().unwrap_or(Value::Null),
-                    "epoch": s.row.epoch,
-                    "revoked": s.revoked.load(std::sync::atomic::Ordering::Relaxed),
-                    "expires_at_ms": s.expires_at_ms,
-                    "grants": serde_json::to_value(s.grants.read().unwrap().clone()).unwrap_or(json!([])),
-                    "usage": s
-                        .ledger
-                        .lock()
-                        .unwrap()
-                        .snapshot()
-                        .values()
-                        .map(|u| u.total)
-                        .sum::<u32>(),
-                })
+            .map(|s| bw_proto::AgentSessionInfo {
+                id: s.row.id.clone(),
+                kind: format!("{:?}", s.kind),
+                name: s
+                    .row
+                    .principal
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                epoch: s.row.epoch,
+                revoked: s.revoked.load(std::sync::atomic::Ordering::Relaxed),
+                expires_at_ms: s.expires_at_ms,
+                grants: bw_agent::grant_set_to_dsl(&s.grants.read().unwrap()),
+                usage: s
+                    .ledger
+                    .lock()
+                    .unwrap()
+                    .snapshot()
+                    .values()
+                    .map(|u| u.total)
+                    .sum::<u32>(),
             })
             .collect();
-        Ok(Response::Sessions(rows))
+        Ok(Response::AgentSessions(rows))
     }
 
     pub fn pending_list(&self) -> Vec<(String, String, u64)> {
@@ -632,17 +635,19 @@ impl Hub {
 
     pub fn pair_list(&self) -> Response {
         let now = self.store.now_ms();
-        let rows: Vec<Value> = self
+        let rows: Vec<bw_proto::PairedCode> = self
             .pairings
             .lock()
             .unwrap()
             .iter()
             .filter(|(_, s)| s.expires_at_ms > now)
-            .map(
-                |(code, s)| json!({"code": code, "name": s.name, "expires_at_ms": s.expires_at_ms}),
-            )
+            .map(|(code, s)| bw_proto::PairedCode {
+                code: code.clone(),
+                name: s.name.clone(),
+                expires_at_ms: s.expires_at_ms,
+            })
             .collect();
-        Response::Sessions(rows)
+        Response::Pairings(rows)
     }
 
     pub fn pair_revoke_code(&self, code: &str) -> Result<Response, WtpError> {

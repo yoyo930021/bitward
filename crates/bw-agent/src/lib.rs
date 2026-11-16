@@ -163,11 +163,68 @@ pub fn parse_grants(spec: &str) -> Result<GrantSet, ParseError> {
     Ok(GrantSet(out))
 }
 
+/// `parse_grants` 的逆：把單條 grant 印回 DSL 字串（session 清單的可讀形態）。
+#[must_use]
+pub fn grant_to_dsl(g: &Grant) -> String {
+    let access = match g.access {
+        Access::See(s) => format!("see:{}", sens_word(s)),
+        Access::Reveal(s) => format!("reveal:{}", sens_word(s)),
+        Access::Use(k) => match k {
+            UseKind::TotpCode => "use:totp",
+            UseKind::InjectEnv => "use:env",
+            UseKind::Run => "use:run",
+            UseKind::Passkey => "use:passkey",
+        }
+        .to_owned(),
+        Access::Mutate(op) => match op {
+            MutateOp::Create => "mutate:create",
+            MutateOp::Patch => "mutate:patch",
+            MutateOp::Delete => "mutate:delete",
+            MutateOp::Move => "mutate:move",
+        }
+        .to_owned(),
+    };
+    let target = match &g.target {
+        Target::All => "all".to_owned(),
+        Target::Item(u) => format!("item:{u}"),
+        Target::Folder(u) => format!("folder:{u}"),
+        Target::Collection(u) => format!("collection:{u}"),
+        Target::Tag(t) => format!("tag:{t}"),
+        Target::UriDomain(d) => format!("uri:{d}"),
+    };
+    let mut seg = format!("{access} {target}");
+    if let Some(n) = g.budget.max_uses {
+        seg.push_str(&format!(" uses={n}"));
+    }
+    if let Some(n) = g.budget.max_bytes_out {
+        seg.push_str(&format!(" bytes={n}"));
+    }
+    if g.requires_approval {
+        seg.push_str(" approve");
+    }
+    seg
+}
+
+/// 整個 grant 集的 DSL（`;` 分隔，同 `parse_grants` 輸入形態）。
+#[must_use]
+pub fn grant_set_to_dsl(set: &GrantSet) -> Vec<String> {
+    set.0.iter().map(grant_to_dsl).collect()
+}
+
+fn sens_word(s: Sensitivity) -> &'static str {
+    match s {
+        Sensitivity::Identity => "identity",
+        Sensitivity::Secret => "secret",
+        _ => "opaque",
+    }
+}
+
 fn parse_access(tok: &str) -> Result<Access, ParseError> {
     let (head, arg) = tok
         .split_once(':')
         .ok_or_else(|| ParseError::UnknownAccess(tok.to_string()))?;
     let sens = |s: &str| match s {
+        "opaque" => Some(Sensitivity::Opaque),
         "identity" => Some(Sensitivity::Identity),
         "secret" => Some(Sensitivity::Secret),
         _ => None,
@@ -420,6 +477,29 @@ mod tests {
 
     fn id() -> Uuid {
         Uuid::parse_str("0f0d0000-0000-4000-8000-0000000000c1").unwrap()
+    }
+
+    /// `grant_to_dsl` 必須是 `parse_grants` 的左逆：印出的每一段都能解析回原 grant
+    /// （session 清單的 grants 欄以此為契約，不是格式化裝飾）。
+    #[test]
+    fn grant_dsl_roundtrips() {
+        let dsl = format!(
+            "see:opaque all; see:identity tag:work; reveal:secret item:{} uses=50 bytes=4096 approve; use:totp folder:{}; use:env collection:{}; use:run uri:example.com; use:passkey all; mutate:create all; mutate:patch all; mutate:delete all; mutate:move all",
+            id(),
+            id(),
+            id()
+        );
+        let set = parse_grants(&dsl).unwrap();
+        let rendered = grant_set_to_dsl(&set);
+        assert_eq!(rendered.len(), set.0.len());
+        for seg in &rendered {
+            let one = parse_grants(seg).expect("渲染段必須可解析");
+            assert_eq!(one.0.len(), 1, "一段一 grant：{seg}");
+            assert!(set.0.contains(&one.0[0]), "渲染段解析後不在原集合：{seg}");
+        }
+        // 再渲染一次必得同一組字串（冪等＝欄序與語彙穩定）。
+        let again = grant_set_to_dsl(&parse_grants(&rendered.join("; ")).unwrap());
+        assert_eq!(rendered, again);
     }
 
     #[test]

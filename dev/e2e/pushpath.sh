@@ -170,10 +170,10 @@ W device "$CODE" >"$D/device.out" 2>&1 & DEVPID=$!
 PEND=""
 for _ in $(seq 1 40); do
   PEND=$(W pending 2>/dev/null) || true
-  jq -e '.Ok.Sessions | length >= 1' <<<"$PEND" >/dev/null 2>&1 && break
+  jq -e '.Ok.PendingApprovals | length >= 1' <<<"$PEND" >/dev/null 2>&1 && break;
   sleep 0.25
 done
-APID=$(jq -r '(.Ok.Sessions[0].id // "null")' <<<"$PEND")
+APID=$(jq -r '(.Ok.PendingApprovals[0].id // "null")' <<<"$PEND")
 [[ "$APID" != "null" ]] || fail "pending 佇列空（approve 閘未觸發）: $PEND"
 W approve "$APID" | jq -e '.Ok' >/dev/null || fail "approve 失敗"
 wait $DEVPID || fail "device 呼叫非零退出"

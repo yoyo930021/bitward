@@ -1,11 +1,9 @@
-//! 密碼產生器：面板狀態機與 daemon policy JSON（純函數，可單測）。
+//! 密碼產生器：面板狀態機與送 daemon 的型別化 policy（純函數，可單測）。
 //! 隨機數與字集組裝全在 daemon（`Use:GeneratePassword` → hub 翻成
-//! `bw_crypto::PasswordOptions`），GUI 只收參數、夾取、序列化——
+//! `bw_crypto::PasswordOptions`），GUI 只收參數、夾取、填 `PasswordPolicy` 欄位——
 //! 零業務邏輯紀律不破。
 //! 批次 9：開關拆成官方六旗（大寫/小寫/數字/符號/易讀排除 0OlI1/
 //! 避免相似），長度界面對齊官方 5–128。
-
-use serde_json::{Value, json};
 
 /// 滑桿範圍（官方 sdk-internal 界 5..=128）；預設 20（GUI 既有口徑）。
 pub const LENGTH_MIN: usize = 5;
@@ -65,17 +63,17 @@ impl GenState {
         self.uppercase || self.lowercase || self.digits || self.symbols
     }
 
-    /// `Use:GeneratePassword` 的 policy；欄名與 hub 讀取端一致
-    /// （length/lowercase/uppercase/numbers/special/avoidAmbiguous）。
-    pub fn policy(&self) -> Value {
-        json!({
-            "length": self.length.clamp(LENGTH_MIN, LENGTH_MAX) as u64,
-            "lowercase": self.lowercase,
-            "uppercase": self.uppercase,
-            "numbers": self.digits,
-            "special": self.symbols,
-            "avoidAmbiguous": self.avoid_ambiguous,
-        })
+    /// `Use:GeneratePassword` 的政策（PR5 D3 型別化：欄名即 `PasswordPolicy` 欄位，
+    /// 不再靠字串鍵對齊 daemon 讀取端）。
+    pub fn policy(&self) -> bw_proto::PasswordPolicy {
+        bw_proto::PasswordPolicy {
+            length: self.length.clamp(LENGTH_MIN, LENGTH_MAX),
+            lowercase: self.lowercase,
+            uppercase: self.uppercase,
+            numbers: self.digits,
+            special: self.symbols,
+            avoid_ambiguous: self.avoid_ambiguous,
+        }
     }
 }
 
@@ -133,12 +131,12 @@ mod tests {
             avoid_ambiguous: true,
         };
         let p = g.policy();
-        assert_eq!(p["length"], 24);
-        assert_eq!(p["uppercase"], true);
-        assert_eq!(p["lowercase"], false);
-        assert_eq!(p["numbers"], true);
-        assert_eq!(p["special"], false);
-        assert_eq!(p["avoidAmbiguous"], true);
+        assert_eq!(p.length, 24);
+        assert!(p.uppercase);
+        assert!(!p.lowercase);
+        assert!(p.numbers);
+        assert!(!p.special);
+        assert!(p.avoid_ambiguous);
     }
 
     #[test]
