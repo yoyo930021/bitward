@@ -1104,8 +1104,38 @@ pub struct CipherField {
     pub kind: CipherFieldKind,
 }
 
+/// `Debug` 去敏用的佔位標記：包裹可能含明文的值，只報「有無」不報內容（V7）。
+struct Masked<T>(T);
+impl<T: Maskable> core::fmt::Debug for Masked<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.0.is_present() {
+            f.write_str("Some(<masked>)")
+        } else {
+            f.write_str("None")
+        }
+    }
+}
+
+trait Maskable {
+    fn is_present(&self) -> bool;
+}
+impl Maskable for Option<String> {
+    fn is_present(&self) -> bool {
+        self.is_some()
+    }
+}
+impl Maskable for &Option<String> {
+    fn is_present(&self) -> bool {
+        self.as_ref().is_some()
+    }
+}
+
 /// CLI 邊界的明文草稿；加密只發生在 daemon 的 `with_keys` 閉包。
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+///
+/// `Debug` 手寫去敏（V7）：password/totp/notes/username/自訂欄值/卡節/身分節
+/// 一律遮罩，只留 kind/name/uris/favorite/folder_id 等非機密欄——防止核准摘要
+/// 或 `tracing::debug!(?draft)` 把明文推上 ntfy/APNs。
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CipherDraft {
     pub kind: ItemKind,
     pub name: String,
@@ -1133,6 +1163,41 @@ pub struct CipherDraft {
     /// 身分節明文草稿（type 4；僅 kind==Identity 時有效）。欄名見 [`IDENTITY_FIELDS`]。
     #[serde(default)]
     pub identity: Option<IdentityDraft>,
+}
+
+impl core::fmt::Debug for CipherDraft {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CipherDraft")
+            .field("kind", &self.kind)
+            .field("name", &self.name)
+            .field("username", &Masked(&self.username))
+            .field("password", &Masked(&self.password))
+            .field("totp", &Masked(&self.totp))
+            .field("uris", &self.uris)
+            .field("notes", &Masked(&self.notes))
+            .field("favorite", &self.favorite)
+            .field("folder_id", &self.folder_id)
+            .field("fields", &MaskedFields(&self.fields))
+            .field("uri_matches", &self.uri_matches)
+            .field("card", &self.card.as_ref().map(|_| "CardDraft(<masked>)"))
+            .field(
+                "identity",
+                &self.identity.as_ref().map(|_| "IdentityDraft(<masked>)"),
+            )
+            .finish()
+    }
+}
+
+/// 自訂欄清單的去敏投影：留 name/kind，值遮罩（hidden/text 欄值都可能含機密）。
+struct MaskedFields<'a>(&'a [CipherField]);
+impl core::fmt::Debug for MaskedFields<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut l = f.debug_list();
+        for field in self.0 {
+            l.entry(&(field.name.as_str(), field.kind, Masked(&field.value)));
+        }
+        l.finish()
+    }
 }
 
 /// 卡片節明文草稿（官方 `card` 六欄；None/空字串＝該欄不寫）。
@@ -1351,13 +1416,23 @@ pub fn identity_draft_to_export(d: &Option<IdentityDraft>) -> Option<serde_json:
 /// 批次匯入的一筆（`VaultCall::Import` 載體）。draft 是**明文欄位結構**：
 /// 與 `AuthCall::Login` 的 password 同級紀律——明文只走 UDS/TLS 本機線
 /// （A11：不落 argv），加密發生在 daemon `with_keys` 閉包。
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ImportItem {
     #[serde(default)]
     pub draft: CipherDraft,
     /// 本地 overlay 標籤（§2.4：協定無 tags 欄位，匯入時直落 overlay 表）
     #[serde(default)]
     pub tags: Vec<String>,
+}
+
+/// `Debug` 委派 `CipherDraft` 的去敏投影（V7）：draft 內明文字段已遮罩，tags 非機密原樣留。
+impl core::fmt::Debug for ImportItem {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ImportItem")
+            .field("draft", &self.draft)
+            .field("tags", &self.tags)
+            .finish()
+    }
 }
 
 /// 欄位編輯。`Set` 的 path 文法三處共用（bw-vault flatten、bw-sync build_put_body、daemon）：
@@ -1368,7 +1443,10 @@ pub struct ImportItem {
 /// `card.<欄名>`／`identity.<欄名>`（PR1 型別節：欄名＝官方線鍵名白名單，
 /// 值域見 `CARD_FIELDS`／`IDENTITY_FIELDS`；全欄 EncString，None＝清 null）。
 /// 增刪欄位走 `AppendField`／`RemoveField`（陣列形態變更，非 leaf 值編輯）。
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// `Debug` 手寫去敏（V7）：`Set` 值與 `AppendField` 欄值遮罩（path 可為 password/totp/notes），
+/// 結構欄（index/kind/path/uri）非機密原樣留。
+#[derive(Clone, Serialize, Deserialize)]
 pub enum FieldEdit {
     /// leaf 值編輯（path 文法見模組文件）
     Set {
@@ -1404,6 +1482,46 @@ pub enum FieldEdit {
         #[serde(rename = "match")]
         match_type: Option<u8>,
     },
+}
+
+impl core::fmt::Debug for FieldEdit {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Set { path, value } => f
+                .debug_struct("FieldEdit::Set")
+                .field("path", path)
+                .field("value", &Masked(value))
+                .finish(),
+            Self::SetType { index, kind } => f
+                .debug_struct("FieldEdit::SetType")
+                .field("index", index)
+                .field("kind", kind)
+                .finish(),
+            Self::AppendField { field } => f
+                .debug_struct("FieldEdit::AppendField")
+                .field("name", &field.name)
+                .field("kind", &field.kind)
+                .field("value", &Masked(&field.value))
+                .finish(),
+            Self::RemoveField { index } => f
+                .debug_struct("FieldEdit::RemoveField")
+                .field("index", index)
+                .finish(),
+            Self::AppendUri { uri } => f
+                .debug_struct("FieldEdit::AppendUri")
+                .field("uri", uri)
+                .finish(),
+            Self::RemoveUri { index } => f
+                .debug_struct("FieldEdit::RemoveUri")
+                .field("index", index)
+                .finish(),
+            Self::SetUriMatch { index, match_type } => f
+                .debug_struct("FieldEdit::SetUriMatch")
+                .field("index", index)
+                .field("match_type", match_type)
+                .finish(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2046,6 +2164,81 @@ pub enum EventTopic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // —— V7：明文承載型別的 Debug 必須去敏（防 `tracing::debug!(?draft)` 誤用）——
+
+    #[test]
+    fn cipher_draft_debug_masks_secret_fields() {
+        let draft = CipherDraft {
+            kind: ItemKind::Login,
+            name: "GitHub".into(),
+            username: Some("octo-SENTINEL".into()),
+            password: Some("pw-SENTINEL".into()),
+            totp: Some("totp-SENTINEL".into()),
+            uris: vec!["github.com".into()],
+            notes: Some("note-SENTINEL".into()),
+            favorite: true,
+            fields: vec![CipherField {
+                name: "PIN".into(),
+                value: Some("pin-SENTINEL".into()),
+                kind: CipherFieldKind::Hidden,
+            }],
+            card: Some(CardDraft {
+                number: Some("4111-SENTINEL".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let s = format!("{draft:?}");
+        for leak in [
+            "octo-SENTINEL",
+            "pw-SENTINEL",
+            "totp-SENTINEL",
+            "note-SENTINEL",
+            "pin-SENTINEL",
+            "4111-SENTINEL",
+        ] {
+            assert!(!s.contains(leak), "明文不得進 Debug：{leak} 洩在 {s}");
+        }
+        // 非機密欄仍可辨識（供除錯與核准摘要白名單）
+        assert!(
+            s.contains("GitHub") && s.contains("github.com") && s.contains("PIN"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn import_item_and_field_edit_debug_mask_values() {
+        let item = ImportItem {
+            draft: CipherDraft {
+                password: Some("imp-SENTINEL".into()),
+                ..Default::default()
+            },
+            tags: vec!["finance".into()],
+        };
+        let si = format!("{item:?}");
+        assert!(!si.contains("imp-SENTINEL"), "{si}");
+        assert!(si.contains("finance"), "tags 非機密應保留：{si}");
+
+        let edit = FieldEdit::Set {
+            path: "password".into(),
+            value: Some("ed-SENTINEL".into()),
+        };
+        let se = format!("{edit:?}");
+        assert!(se.contains("password"), "path 應保留：{se}");
+        assert!(!se.contains("ed-SENTINEL"), "值不得進 Debug：{se}");
+
+        let append = FieldEdit::AppendField {
+            field: CipherField {
+                name: "API Key".into(),
+                value: Some("ak-SENTINEL".into()),
+                kind: CipherFieldKind::Hidden,
+            },
+        };
+        let sa = format!("{append:?}");
+        assert!(sa.contains("API Key"), "{sa}");
+        assert!(!sa.contains("ak-SENTINEL"), "{sa}");
+    }
 
     fn meta() -> ItemMeta {
         ItemMeta {

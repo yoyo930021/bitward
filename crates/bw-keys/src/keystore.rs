@@ -33,11 +33,26 @@ impl AccountLabel {
 
 /// 封存的 user key：已 stretch 的金鑰本體（64B）+ 附帶的 RSA 私鑰信封。
 /// 這是 `DeviceAssertion` 離線解鎖的載體。
-#[derive(Clone, Debug)]
+///
+/// `Debug` 去敏（V7）：金鑰本體與私鑰信封是落盤機密，只報長度／有無，不報位元組。
+#[derive(Clone)]
 pub struct SealedKey {
     pub user_key: Zeroizing<Vec<u8>>,
     pub keys_fingerprint: Option<String>,
     pub enc_private_key: Option<Zeroizing<String>>,
+}
+
+impl core::fmt::Debug for SealedKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SealedKey")
+            .field("user_key", &format_args!("<{} bytes>", self.user_key.len()))
+            .field("keys_fingerprint", &self.keys_fingerprint)
+            .field(
+                "enc_private_key",
+                &self.enc_private_key.as_ref().map(|_| "<masked>"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -177,6 +192,21 @@ fn write_0600(path: &Path, bytes: &[u8]) -> Result<(), KeyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sealed_key_debug_hides_key_material() {
+        let key = SealedKey {
+            user_key: Zeroizing::new(vec![0xABu8; 64]),
+            keys_fingerprint: Some("fp-visible".into()),
+            enc_private_key: Some(Zeroizing::new("2.SENTINELIV|ct|mac".into())),
+        };
+        let s = format!("{key:?}");
+        assert!(s.contains("fp-visible"), "指紋非機密應保留：{s}");
+        assert!(!s.contains("2.SENTINELIV"), "私鑰信封不得進 Debug：{s}");
+        // user_key 位元組（0xAB）不得以十進/十六進明文形式外洩
+        assert!(s.contains("<64 bytes>") || s.contains("64 bytes"), "{s}");
+        assert!(!s.contains("171"), "0xAB=171 不得進 Debug：{s}");
+    }
 
     #[test]
     fn file_keystore_roundtrip_and_zero_permissions() {

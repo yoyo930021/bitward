@@ -820,6 +820,27 @@ pub fn item_of(call: &Call) -> Option<uuid::Uuid> {
 fn summarize(call: &Call) -> String {
     match call {
         Call::Vault(VaultCall::Get { id, view }) => format!("vault get {id} view={view:?}"),
+        // 建立／匯入帶明文草稿：只報名稱／筆數，欄值不外洩（V7）
+        Call::Vault(VaultCall::Create { draft }) => format!("vault create {:?}", draft.name),
+        Call::Vault(VaultCall::Import { items, .. }) => {
+            let shown: Vec<&str> = items
+                .iter()
+                .take(5)
+                .map(|i| i.draft.name.as_str())
+                .collect();
+            let more = items.len().saturating_sub(shown.len());
+            let tail = if more > 0 {
+                format!(" +{more}")
+            } else {
+                String::new()
+            };
+            format!("vault import {} 筆 {shown:?}{tail}", items.len())
+        }
+        // 欄位編輯：報 id 與被改的欄位路徑（值不進摘要，值可能＝新密碼）
+        Call::Vault(VaultCall::Patch { id, edits }) => {
+            let paths: Vec<String> = edits.iter().map(edit_path).collect();
+            format!("vault patch {id} 欄位={paths:?}")
+        }
         Call::Use(UseCall::ResolveRef { uri }) => format!("resolve {uri}"),
         Call::Use(UseCall::Run { plan }) => {
             format!("run {:?}", plan.argv.first().cloned().unwrap_or_default())
@@ -828,7 +849,56 @@ fn summarize(call: &Call) -> String {
         Call::Vault(VaultCall::Attachment { sub }) => crate::attach::op_summary(sub),
         // Send Create 帶明文內容/密碼與整檔位元組，同理走形態摘要
         Call::Vault(VaultCall::Send { sub }) => crate::send::op_summary(sub),
+        // Auth／TwoFactor／EA Takeover 承載主密碼或一次性碼明文：只報動作標籤，
+        // 絕不讓整枚 Call 走 `Debug`（這些變體的欄位不保證去敏）（V7）
+        Call::Auth(inner) => auth_summary(inner),
+        Call::TwoFactor(inner) => two_factor_summary(inner),
+        Call::EmergencyAccess(EaCall::Takeover { ea_id, .. }) => format!("ea takeover {ea_id}"),
         other => format!("{other:?}"),
+    }
+}
+
+/// `FieldEdit` 的非機密標籤：結構欄留值、值欄遮罩（摘要只說「改了哪一欄」）。
+fn edit_path(edit: &bw_proto::FieldEdit) -> String {
+    use bw_proto::FieldEdit as F;
+    match edit {
+        F::Set { path, .. } => path.clone(),
+        F::SetType { index, .. } => format!("field.{index}.type"),
+        F::AppendField { .. } => "field.append".into(),
+        F::RemoveField { index } => format!("field.{index}.remove"),
+        F::AppendUri { .. } => "uri.append".into(),
+        F::RemoveUri { index } => format!("uri.{index}.remove"),
+        F::SetUriMatch { index, .. } => format!("uri.{index}.match"),
+    }
+}
+
+/// `AuthCall` 摘要：email／server／provider 等非機密識別子可留，password／api_key／
+/// 配對碼／two-factor token 一律遮罩（V7）。
+fn auth_summary(call: &AuthCall) -> String {
+    match call {
+        AuthCall::Login { server, email, .. } => format!("login {email}@{server}"),
+        AuthCall::Unlock { biometric, .. } => format!("unlock biometric={biometric}"),
+        AuthCall::Lock => "lock".into(),
+        AuthCall::SignOut => "sign-out".into(),
+        AuthCall::PairStart { name, grant, .. } => format!("pair start {name} grant={grant:?}"),
+        AuthCall::PairList => "pair list".into(),
+        AuthCall::PairRevoke { .. } => "pair revoke <code>".into(),
+        AuthCall::WhoAmI => "whoami".into(),
+        AuthCall::ChangePassword { .. } => "change-password".into(),
+    }
+}
+
+/// `TwoFactorCall` 摘要：master_password／token／key／otp 明文全部遮罩，只報動作與因子編號（V7）。
+fn two_factor_summary(call: &TwoFactorCall) -> String {
+    match call {
+        TwoFactorCall::List => "2fa list".into(),
+        TwoFactorCall::GetAuthenticator { .. } => "2fa get-authenticator".into(),
+        TwoFactorCall::EnableAuthenticator { .. } => "2fa enable-authenticator".into(),
+        TwoFactorCall::Disable { provider, .. } => format!("2fa disable {provider}"),
+        TwoFactorCall::GetRecoveryCode { .. } => "2fa get-recovery-code".into(),
+        TwoFactorCall::EmailSendCode { email, .. } => format!("2fa email-send {email}"),
+        TwoFactorCall::EmailVerify { email, .. } => format!("2fa email-verify {email}"),
+        TwoFactorCall::EnableYubikey { .. } => "2fa enable-yubikey".into(),
     }
 }
 
@@ -943,6 +1013,102 @@ mod tests {
             g.0.iter()
                 .any(|x| x.access == Access::See(bw_proto::Sensitivity::Identity)),
             "追加 grant 必須生效"
+        );
+    }
+
+    // —— V7：核准摘要去敏，明文不得經 summarize 洩漏 ——
+
+    #[test]
+    fn summarize_create_hides_plaintext_password_and_totp() {
+        let draft = bw_proto::CipherDraft {
+            kind: bw_proto::ItemKind::Login,
+            name: "GitHub".into(),
+            username: Some("octocat".into()),
+            password: Some("hunter2-SENTINEL".into()),
+            totp: Some("JBSWY3DPSENTINEL".into()),
+            uris: vec!["github.com".into()],
+            notes: Some("secret note SENTINEL".into()),
+            favorite: false,
+            ..Default::default()
+        };
+        let s = summarize(&Call::Vault(VaultCall::Create { draft }));
+        assert!(s.contains("GitHub"), "名稱屬非機密白名單，應保留：{s}");
+        assert!(s.contains("create"), "{s}");
+        for leak in [
+            "hunter2-SENTINEL",
+            "JBSWY3DPSENTINEL",
+            "secret note SENTINEL",
+            "octocat",
+        ] {
+            assert!(!s.contains(leak), "明文不得進摘要：{leak} 洩在 {s}");
+        }
+    }
+
+    #[test]
+    fn summarize_import_hides_plaintext() {
+        let item = bw_proto::ImportItem {
+            draft: bw_proto::CipherDraft {
+                name: "銀行".into(),
+                password: Some("pw-SENTINEL".into()),
+                ..Default::default()
+            },
+            tags: vec!["finance".into()],
+        };
+        let s = summarize(&Call::Vault(VaultCall::Import {
+            items: vec![item],
+            format: false,
+        }));
+        assert!(s.contains("銀行"), "{s}");
+        assert!(!s.contains("pw-SENTINEL"), "匯入明文不得進摘要：{s}");
+    }
+
+    #[test]
+    fn summarize_patch_reports_path_not_value() {
+        let s = summarize(&Call::Vault(VaultCall::Patch {
+            id: Uuid::new_v4(),
+            edits: vec![bw_proto::FieldEdit::Set {
+                path: "password".into(),
+                value: Some("newpw-SENTINEL".into()),
+            }],
+        }));
+        assert!(s.contains("password"), "欄位路徑應保留：{s}");
+        assert!(!s.contains("newpw-SENTINEL"), "編輯值不得進摘要：{s}");
+    }
+
+    #[test]
+    fn summarize_auth_and_2fa_never_debug_plaintext() {
+        let login = summarize(&Call::Auth(AuthCall::Login {
+            server: "https://vault.example".into(),
+            email: "me@example.com".into(),
+            password: Some("master-SENTINEL".into()),
+            api_key: None,
+            two_factor: None,
+        }));
+        assert!(login.contains("me@example.com"), "{login}");
+        assert!(
+            !login.contains("master-SENTINEL"),
+            "主密碼不得進摘要：{login}"
+        );
+        let enable = summarize(&Call::TwoFactor(TwoFactorCall::EnableAuthenticator {
+            master_password: Some("mp-SENTINEL".into()),
+            token: "123456".into(),
+            key: "SECRETKEYSENTINEL".into(),
+        }));
+        assert!(enable.contains("enable-authenticator"), "{enable}");
+        assert!(
+            !enable.contains("mp-SENTINEL")
+                && !enable.contains("SECRETKEYSENTINEL")
+                && !enable.contains("123456"),
+            "2FA 秘密不得進摘要：{enable}"
+        );
+        let take = summarize(&Call::EmergencyAccess(EaCall::Takeover {
+            ea_id: "ea-1".into(),
+            new_password: "takeover-SENTINEL".into(),
+        }));
+        assert!(take.contains("ea-1"), "{take}");
+        assert!(
+            !take.contains("takeover-SENTINEL"),
+            "接管新密碼不得進摘要：{take}"
         );
     }
 }

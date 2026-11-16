@@ -21,7 +21,7 @@ use crate::profile::Quirk;
 
 /// 認證用的 grant。master password hash 由呼叫方（bw-keys/bw-crypto）算好傳入：
 /// bw-server 不做金鑰派生，也不鏈接 bw-crypto。
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum TokenGrant {
     Password {
         email: String,
@@ -34,6 +34,29 @@ pub enum TokenGrant {
     },
 }
 
+/// `Debug` 去敏（V7）：master_password_hash／client_secret 是認證秘密，只留識別子。
+impl core::fmt::Debug for TokenGrant {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Password {
+                email,
+                device_identifier,
+                ..
+            } => f
+                .debug_struct("TokenGrant::Password")
+                .field("email", email)
+                .field("master_password_hash", &"<masked>")
+                .field("device_identifier", device_identifier)
+                .finish(),
+            Self::ClientCredentials { client_id, .. } => f
+                .debug_struct("TokenGrant::ClientCredentials")
+                .field("client_id", client_id)
+                .field("client_secret", &"<masked>")
+                .finish(),
+        }
+    }
+}
+
 /// 第二因子輸入。`provider` 是協定層的編號（見 [`crate::TwoFactorProviderType`]）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SecondFactor {
@@ -44,7 +67,9 @@ pub struct SecondFactor {
 }
 
 /// password grant 的完整請求參數（device 資訊在官方雲會被記錄到 devices 清單）。
-#[derive(Clone, Debug)]
+///
+/// `Debug` 去敏（V7）：master_password_hash 與二因子 token 是認證秘密，只留 email／device 識別子。
+#[derive(Clone)]
 pub struct PasswordLogin {
     pub email: String,
     pub master_password_hash: String,
@@ -53,6 +78,23 @@ pub struct PasswordLogin {
     pub client_id: Option<String>,
     pub scope: Option<String>,
     pub two_factor: Option<SecondFactor>,
+}
+
+impl core::fmt::Debug for PasswordLogin {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PasswordLogin")
+            .field("email", &self.email)
+            .field("master_password_hash", &"<masked>")
+            .field("device_identifier", &self.device_identifier)
+            .field("device_name", &self.device_name)
+            .field("client_id", &self.client_id)
+            .field("scope", &self.scope)
+            .field(
+                "two_factor",
+                &self.two_factor.as_ref().map(|_| "<second factor>"),
+            )
+            .finish()
+    }
 }
 
 impl PasswordLogin {
@@ -89,7 +131,9 @@ impl PasswordLogin {
 
 /// 成功登入後拿到的東西。`keys` 為 None 代表伺服器完全沒給金鑰資訊
 /// （client_credentials 就是這種：API key 不解鎖 vault）。
-#[derive(Clone, Debug)]
+///
+/// `Debug` 去敏（V7）：bearer／refresh token 與 raw 回應（含 token）是秘密，只報有無。
+#[derive(Clone)]
 pub struct TokenBundle {
     pub access_token: String,
     pub refresh_token: Option<String>,
@@ -98,6 +142,22 @@ pub struct TokenBundle {
     pub keys: Option<KeysBundle>,
     /// 伺服器原樣回應（token 已保留；這是 raw mirror 的來源）。
     pub raw: Value,
+}
+
+impl core::fmt::Debug for TokenBundle {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("TokenBundle")
+            .field("access_token", &"<masked>")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<masked>"),
+            )
+            .field("expires_in", &self.expires_in)
+            .field("token_type", &self.token_type)
+            .field("keys", &self.keys.as_ref().map(|_| "<keys bundle>"))
+            .field("raw", &"<masked>")
+            .finish()
+    }
 }
 
 /// 寬容解析後的 Keys 物件。缺的欄位就是 None，不炸。
@@ -515,4 +575,57 @@ pub(crate) fn refresh_form(
         ("client_id".to_owned(), defaults.client_id.clone()),
         ("scope".to_owned(), defaults.scope.clone()),
     ]
+}
+
+#[cfg(test)]
+mod debug_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn token_grant_debug_hides_secret() {
+        let pw = TokenGrant::Password {
+            email: "me@x.test".into(),
+            master_password_hash: "HASH-SENTINEL".into(),
+            device_identifier: "dev".into(),
+        };
+        let s = format!("{pw:?}");
+        assert!(s.contains("me@x.test") && s.contains("dev"), "{s}");
+        assert!(!s.contains("HASH-SENTINEL"), "{s}");
+        let cc = TokenGrant::ClientCredentials {
+            client_id: "cid".into(),
+            client_secret: "SECRET-SENTINEL".into(),
+        };
+        let s = format!("{cc:?}");
+        assert!(s.contains("cid"), "{s}");
+        assert!(!s.contains("SECRET-SENTINEL"), "{s}");
+    }
+
+    #[test]
+    fn password_login_debug_hides_hash_and_factor() {
+        let login = PasswordLogin::new("me@x.test", "MPHASH-SENTINEL", "dev").two_factor(
+            crate::TwoFactorProviderType::Authenticator,
+            "123456",
+            false,
+        );
+        let s = format!("{login:?}");
+        assert!(s.contains("me@x.test"), "{s}");
+        assert!(!s.contains("MPHASH-SENTINEL"), "{s}");
+        assert!(!s.contains("123456"), "{s}");
+    }
+
+    #[test]
+    fn token_bundle_debug_hides_tokens_and_raw() {
+        let bundle = TokenBundle {
+            access_token: "ACCESS-SENTINEL".into(),
+            refresh_token: Some("REFRESH-SENTINEL".into()),
+            expires_in: Some(3600),
+            token_type: "Bearer".into(),
+            keys: None,
+            raw: serde_json::json!({"AccessToken": "ACCESS-SENTINEL"}),
+        };
+        let s = format!("{bundle:?}");
+        assert!(s.contains("Bearer") && s.contains("3600"), "{s}");
+        assert!(!s.contains("ACCESS-SENTINEL"), "{s}");
+        assert!(!s.contains("REFRESH-SENTINEL"), "{s}");
+    }
 }

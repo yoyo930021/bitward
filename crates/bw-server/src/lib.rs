@@ -159,7 +159,9 @@ impl std::fmt::Debug for Client {
 }
 
 /// 建立帳號用（VW 預設開放註冊；官方雲走 web vault 的註冊流程）。
-#[derive(Clone, Debug)]
+///
+/// `Debug` 去敏（V7）：master_password_hash／加密 user key／私鑰信封／密碼提示是秘密，只報有無。
+#[derive(Clone)]
 pub struct NewAccount {
     pub email: String,
     pub name: String,
@@ -175,6 +177,30 @@ pub struct NewAccount {
     pub kdf_iterations: u32,
     pub kdf_memory: Option<u32>,
     pub kdf_parallelism: Option<u32>,
+}
+
+impl core::fmt::Debug for NewAccount {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("NewAccount")
+            .field("email", &self.email)
+            .field("name", &self.name)
+            .field("master_password_hash", &"<masked>")
+            .field("key", &"<masked>")
+            .field("public_key", &self.public_key)
+            .field(
+                "encrypted_private_key",
+                &self.encrypted_private_key.as_ref().map(|_| "<masked>"),
+            )
+            .field(
+                "master_password_hint",
+                &self.master_password_hint.as_ref().map(|_| "<masked>"),
+            )
+            .field("kdf", &self.kdf)
+            .field("kdf_iterations", &self.kdf_iterations)
+            .field("kdf_memory", &self.kdf_memory)
+            .field("kdf_parallelism", &self.kdf_parallelism)
+            .finish()
+    }
 }
 
 impl NewAccount {
@@ -869,6 +895,21 @@ pub(crate) fn jwt_claim_str(token: &str, claim: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_account_debug_hides_secrets() {
+        let acct = NewAccount::new("me@x.test", "Me", "MPHASH-SENTINEL", "2.iv|ct|mac-SENTINEL");
+        let s = format!("{acct:?}");
+        assert!(s.contains("me@x.test") && s.contains("Me"), "{s}");
+        assert!(
+            !s.contains("MPHASH-SENTINEL"),
+            "主密碼雜湊不得進 Debug：{s}"
+        );
+        assert!(
+            !s.contains("ct|mac-SENTINEL"),
+            "加密 user key 不得進 Debug：{s}"
+        );
+    }
 
     /// 從錄製的真實 access token 取 sub（hub 的群組鍵、API key 的 client_id 都靠它）。
     #[test]
