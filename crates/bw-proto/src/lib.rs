@@ -2073,6 +2073,70 @@ pub struct AutoTypeStats {
     pub fields: usize,
 }
 
+// —— Send 群回包形態（PR5 型別化子批 D2）——
+// 鏡像行是伺服器 raw JSON（`Value`），本節型別在 daemon 邊界取值（`as_str`/`as_i64`…），
+// 缺席欄位＝None 而非猜值——鎖態解不開 seed 時 name/url 恆 null 的語意原樣保留。
+
+/// `Send:Create` 回包：連結（含 fragment seed）與展示名。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendCreated {
+    /// 伺服器 id；回包缺 id 屬漂移，保留 None 讓呼叫端可見（不虛構）。
+    pub id: Option<String>,
+    pub url: String,
+    /// 本機接收頁（PR2 webui）變體連結；daemon 未開站＝None。
+    pub web_url: Option<String>,
+    pub name: String,
+    pub deletion_date: String,
+}
+
+/// `Send:List` 的一列（鏡像投影；名稱與 URL 需解鎖態）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendRow {
+    pub id: Option<String>,
+    /// 0＝文字、1＝檔案（upstream `SendType` 整數）。
+    #[serde(rename = "type")]
+    pub send_type: Option<u8>,
+    pub name: Option<String>,
+    pub url: Option<String>,
+    pub web_url: Option<String>,
+    pub deletion_date: Option<String>,
+    pub expiration_date: Option<String>,
+    pub max_access_count: Option<u32>,
+    pub access_count: Option<u32>,
+    /// 查證：Send JSON **無** viewed 欄，已檢視由 accessCount>0 推得（實錄）。
+    pub viewed: bool,
+    pub hide_email: Option<bool>,
+    /// `authType == 1`＝設了取用密碼。
+    pub has_password: bool,
+    /// 檔案大小（bytes）；文字 Send 恆 None。
+    pub file_size: Option<i64>,
+}
+
+/// `Send:List` 回包。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SendList {
+    pub items: Vec<SendRow>,
+}
+
+/// `Send:Url` 回包（重取既有連結，不需連網）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendUrl {
+    pub id: String,
+    pub url: String,
+    pub web_url: Option<String>,
+}
+
+/// `Send:Password` 回包：設/清後的取用密碼狀態（seed 不變⇒舊連結金鑰不受影響）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendPasswordState {
+    pub id: String,
+    pub has_password: bool,
+}
+
 /// 全型別化回應：這是 P2 切 postcard 主線的前置（`Value` 的 f64 postcard 不支援）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StatusInfo {
@@ -3506,6 +3570,81 @@ mod tests {
         roundtrip(&import);
         roundtrip(&pushes);
         roundtrip(&autotype);
+    }
+
+    /// PR5 D2 形態金標：Send 群型別化回包與原手搭 `json!` 同形＋postcard 往返。
+    #[test]
+    fn send_typed_shapes_are_json_compatible() {
+        let created = SendCreated {
+            id: Some("s-1".into()),
+            url: "https://vw/send/s-1/seed".into(),
+            web_url: None,
+            name: "筆記".into(),
+            deletion_date: "2026-11-20T00:00:00.000Z".into(),
+        };
+        let row = SendRow {
+            id: Some("s-1".into()),
+            send_type: Some(0),
+            name: Some("筆記".into()),
+            url: Some("u".into()),
+            web_url: None,
+            deletion_date: Some("d".into()),
+            expiration_date: None,
+            max_access_count: Some(2),
+            access_count: Some(0),
+            viewed: false,
+            hide_email: Some(false),
+            has_password: true,
+            file_size: None,
+        };
+        let list = SendList {
+            items: vec![row.clone()],
+        };
+        let url = SendUrl {
+            id: "s-1".into(),
+            url: "u".into(),
+            web_url: Some("http://127.0.0.1:1/s/s-1#seed".into()),
+        };
+        let pw = SendPasswordState {
+            id: "s-1".into(),
+            has_password: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&created).unwrap(),
+            serde_json::json!({
+                "id": "s-1",
+                "url": "https://vw/send/s-1/seed",
+                "webUrl": null,
+                "name": "筆記",
+                "deletionDate": "2026-11-20T00:00:00.000Z"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&list).unwrap(),
+            serde_json::json!({"items": [{
+                "id": "s-1", "type": 0, "name": "筆記", "url": "u", "webUrl": null,
+                "deletionDate": "d", "expirationDate": null, "maxAccessCount": 2,
+                "accessCount": 0, "viewed": false, "hideEmail": false,
+                "hasPassword": true, "fileSize": null
+            }]})
+        );
+        assert_eq!(
+            serde_json::to_value(&url).unwrap(),
+            serde_json::json!({"id": "s-1", "url": "u", "webUrl": "http://127.0.0.1:1/s/s-1#seed"})
+        );
+        assert_eq!(
+            serde_json::to_value(&pw).unwrap(),
+            serde_json::json!({"id": "s-1", "hasPassword": true})
+        );
+        fn pc<T: Serialize + serde::de::DeserializeOwned + PartialEq + core::fmt::Debug>(v: &T) {
+            let bytes = postcard::to_allocvec(v).unwrap();
+            let back: T = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(&back, v, "postcard 往返漂移");
+        }
+        pc(&created);
+        pc(&list);
+        pc(&url);
+        pc(&pw);
     }
 
     impl ClientMsg {

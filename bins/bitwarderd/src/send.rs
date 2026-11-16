@@ -18,7 +18,7 @@ use bw_crypto::{SendKey, b64url, unwrap_seed};
 use bw_proto::{ItemId, Response, SendContent, SendOp, WtpError};
 use bw_server::ServerError;
 
-use crate::hub::{DispatchResult, Hub, denied, drift, map_server_err};
+use crate::hub::{DispatchResult, Hub, denied, drift, map_server_err, typed_json};
 
 /// 檔案 Send 上限：借附件 32 MiB 紀律（同一條 BTP 幀容量推導，
 /// 見 `crate::attach::MAX_ATTACHMENT_BYTES`）。
@@ -185,13 +185,16 @@ impl Hub {
         let web_url = self
             .webui_base()
             .and_then(|b| compose_send_url_from(&resp, &b, &seed_b64));
-        Ok(Response::Json(json!({
-            "id": resp.get("id").cloned().unwrap_or(Value::Null),
-            "url": url,
-            "webUrl": web_url,
-            "name": display_name,
-            "deletionDate": resp.get("deletionDate").cloned().unwrap_or(json!(deletion_date)),
-        })))
+        typed_json(&bw_proto::SendCreated {
+            id: resp.get("id").and_then(Value::as_str).map(str::to_owned),
+            url,
+            web_url,
+            name: display_name,
+            deletion_date: resp
+                .get("deletionDate")
+                .and_then(Value::as_str)
+                .map_or_else(|| deletion_date.clone(), str::to_owned),
+        })
     }
 
     /// 清單：連網時先以 `GET /sends` 全量刷新鏡像（伺服器是真相源），
@@ -209,7 +212,7 @@ impl Hub {
         let rows = self.store.send_list().map_err(denied)?;
         let unlocked = self.machine.is_unlocked();
         let base = self.server_base().await.unwrap_or_default();
-        let items: Vec<Value> = rows
+        let items: Vec<bw_proto::SendRow> = rows
             .iter()
             .map(|s| {
                 let (name, url, web_url) = if unlocked {
@@ -217,24 +220,37 @@ impl Hub {
                 } else {
                     (None, None, None)
                 };
-                json!({
-                    "id": s.get("id"),
-                    "type": s.get("type"),
-                    "name": name,
-                    "url": url,
-                    "webUrl": web_url,
-                    "deletionDate": s.get("deletionDate"),
-                    "expirationDate": s.get("expirationDate"),
-                    "maxAccessCount": s.get("maxAccessCount"),
-                    "accessCount": s.get("accessCount"),
-                    "viewed": s.get("accessCount").and_then(Value::as_i64).unwrap_or(0) > 0,
-                    "hideEmail": s.get("hideEmail"),
-                    "hasPassword": s.get("authType").and_then(Value::as_i64) == Some(1),
-                    "fileSize": s.pointer("/file/size"),
-                })
+                bw_proto::SendRow {
+                    id: s.get("id").and_then(Value::as_str).map(str::to_owned),
+                    send_type: s.get("type").and_then(Value::as_u64).map(|v| v as u8),
+                    name,
+                    url,
+                    web_url,
+                    deletion_date: s
+                        .get("deletionDate")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    expiration_date: s
+                        .get("expirationDate")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    max_access_count: s
+                        .get("maxAccessCount")
+                        .and_then(Value::as_u64)
+                        .map(|v| v as u32),
+                    access_count: s
+                        .get("accessCount")
+                        .and_then(Value::as_u64)
+                        .map(|v| v as u32),
+                    // 查證：VW send JSON 無 viewed 欄，已檢視以存取計數推得（實錄）。
+                    viewed: s.get("accessCount").and_then(Value::as_i64).unwrap_or(0) > 0,
+                    hide_email: s.get("hideEmail").and_then(Value::as_bool),
+                    has_password: s.get("authType").and_then(Value::as_i64) == Some(1),
+                    file_size: s.pointer("/file/size").and_then(Value::as_i64),
+                }
             })
             .collect();
-        Ok(Response::Json(json!({ "items": items })))
+        typed_json(&bw_proto::SendList { items })
     }
 
     /// 分享 URL（Get）：鏡像 seed ＋帳號 server 值組裝；不需連網
@@ -263,11 +279,11 @@ impl Hub {
         let web_url = self
             .webui_base()
             .and_then(|b| compose_send_url_from(&s, &b, &seed_b64));
-        Ok(Response::Json(json!({
-            "id": id.to_string(),
-            "url": url,
-            "webUrl": web_url,
-        })))
+        typed_json(&bw_proto::SendUrl {
+            id: id.to_string(),
+            url,
+            web_url,
+        })
     }
 
     /// 刪除：需連網；伺服器 404＝已不存在（過期自清是常態），
@@ -316,9 +332,10 @@ impl Hub {
                 .await
                 .map_err(map_server_err)?;
             let _ = self.store.send_put(&updated);
-            return Ok(Response::Json(json!({
-                "id": id.to_string(), "hasPassword": false,
-            })));
+            return typed_json(&bw_proto::SendPasswordState {
+                id: id.to_string(),
+                has_password: false,
+            });
         }
         let key_env = s
             .get("key")
@@ -359,10 +376,10 @@ impl Hub {
         }
         let updated = client.send_put(id, &body).await.map_err(map_server_err)?;
         let _ = self.store.send_put(&updated);
-        Ok(Response::Json(json!({
-            "id": id.to_string(),
-            "hasPassword": true,
-        })))
+        typed_json(&bw_proto::SendPasswordState {
+            id: id.to_string(),
+            has_password: true,
+        })
     }
 
     /// 本機接收頁前綴（PR2）：webui 監聽在場才給；分享 URL 的 loopback 同形
