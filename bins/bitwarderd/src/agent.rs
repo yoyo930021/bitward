@@ -1173,15 +1173,23 @@ mod tests {
         let ok = hub
             .authorize(&sess, &Call::Vault(VaultCall::Delete { ids: vec![id1] }))
             .await;
-        assert!(matches!(ok, Ok(Some(_))), "持 id1 授權刪 id1 應放行：{ok:?}");
+        assert!(
+            matches!(ok, Ok(Some(_))),
+            "持 id1 授權刪 id1 應放行：{ok:?}"
+        );
         // 越權：批次含未授權的 id2 → 整批拒絕
         let bad = hub
             .authorize(
                 &sess,
-                &Call::Vault(VaultCall::Delete { ids: vec![id1, id2] }),
+                &Call::Vault(VaultCall::Delete {
+                    ids: vec![id1, id2],
+                }),
             )
             .await;
-        assert!(matches!(bad, Err(WtpError::Denied { .. })), "含他 id 應拒絕：{bad:?}");
+        assert!(
+            matches!(bad, Err(WtpError::Denied { .. })),
+            "含他 id 應拒絕：{bad:?}"
+        );
     }
 
     #[tokio::test]
