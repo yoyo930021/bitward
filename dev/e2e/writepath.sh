@@ -147,7 +147,15 @@ A settings set '{"lock_on_sleep_restart": false}' >/dev/null
 kill -9 "$PID_A" 2>/dev/null || true
 sleep 0.5
 BITWARD_DATA_DIR=$PWD/$DA ./target/debug/bitwarderd --data-dir "$DA" --sock "$DA/s" >>"$DA/log2" 2>&1 & PID_A=$!
-sleep 1
+# 就緒輪詢同 autodrain/orgpath 慣例（殭屍 sock 檔會讓 sleep+`-S` 假通過）；
+# 計時 T0 落在「已連通」之後，A7b 斷言的仍是 unlock 呼叫本身的耗時。
+RDY=0
+for _ in $(seq 1 60); do
+  A status >/dev/null 2>&1 && { RDY=1; break; }
+  kill -0 "$PID_A" 2>/dev/null || { echo "--- log2:"; tail -5 "$DA/log2"; break; }
+  sleep 0.25
+done
+[[ "$RDY" == 1 ]] || fail "A7b 重啟 daemon 未就緒（連不通 $DA/s）"
 rm -f "$DA/cli_session"   # 重啟後記憶體 session 消失；取新 session
 T0=$(python3 -c 'import time;print(time.time_ns())')
 A unlock >/dev/null
