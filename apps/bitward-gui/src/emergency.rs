@@ -175,7 +175,9 @@ fn contact_section(core: AppCore, title: &'static str, rows: Signal<Arc<Vec<EaCo
         ))
 }
 
-/// 單列：名稱＋email＋狀態章＋型別章＋等待天數＋動作鈕。
+/// 單列兩行式（尾修 1）：出廠窗 1120×760 下右欄只有 ~536px，單行塞名稱＋
+/// 兩章＋天數＋動作群會把按鈕挤出可達區（nsh `press("檢視")` 實錄 no
+/// pressable view）。上行＝名稱＋型別章＋狀態章；下行＝等待天數＋動作群。
 fn contact_row(c: EaContact, core: AppCore) -> View {
     let (fg, bg) = status_colors(c.status);
     let id = c.id.clone();
@@ -186,50 +188,62 @@ fn contact_row(c: EaContact, core: AppCore) -> View {
     };
     let show_confirm = can_confirm(&c);
     view()
-        .flex_row()
-        .items_center()
-        .gap_3()
-        .min_h(px(theme::ROW_H))
+        .flex_col()
+        .gap_1()
         .px_3()
+        .py_2()
         .rounded(px(theme::RADIUS_CONTROL))
         .border(px(1.0))
         .border_color(theme::HAIRLINE)
         .bg(theme::ELEVATED)
         .child(
-            text(display_name)
-                .text_size(px(theme::TEXT_ROW))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme::TEXT_PRIMARY),
+            view()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .min_h(px(28.0))
+                .child(
+                    text(display_name)
+                        .text_size(px(theme::TEXT_ROW))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::TEXT_PRIMARY),
+                )
+                .child(view().flex_1())
+                .child(ui::badge(
+                    c.access_type.label(),
+                    theme::ACCENT,
+                    theme::SURFACE,
+                ))
+                .child(ui::badge(c.status.label(), fg, bg)),
         )
-        .child(view().flex_1())
-        .child(ui::badge(
-            c.access_type.label(),
-            theme::ACCENT,
-            theme::SURFACE,
-        ))
-        .child(ui::badge(c.status.label(), fg, bg))
-        .child(row_note(format!("等待 {} 天", c.wait_time_days)))
-        .child(when(move || show_confirm, {
-            let show_core = core.clone();
-            let show_id = id.clone();
-            move || {
-                if crate::state::is_unlocked(&show_core.vault.get()) {
-                    let confirm_core = show_core.clone();
-                    let confirm_id = show_id.clone();
-                    ui::button("確認派鑰", ui::Btn::Primary, move || {
-                        confirm_core.send(Cmd::EaConfirm(confirm_id.clone()))
-                    })
-                } else {
-                    row_note("解鎖後可確認派鑰")
-                }
-            }
-        }))
-        .child(recovery_actions(&c, &id, &core))
-        .child(ui::button("撤銷", ui::Btn::Ghost, {
-            let revoke_core = core.clone();
-            let revoke_id = id.clone();
-            move || revoke_core.send(Cmd::EaRevoke(revoke_id.clone()))
-        }))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(row_note(format!("等待 {} 天", c.wait_time_days)))
+                .child(when(move || show_confirm, {
+                    let show_core = core.clone();
+                    let show_id = id.clone();
+                    move || {
+                        if crate::state::is_unlocked(&show_core.vault.get()) {
+                            let confirm_core = show_core.clone();
+                            let confirm_id = show_id.clone();
+                            ui::button("確認派鑰", ui::Btn::Primary, move || {
+                                confirm_core.send(Cmd::EaConfirm(confirm_id.clone()))
+                            })
+                        } else {
+                            row_note("解鎖後可確認派鑰")
+                        }
+                    }
+                }))
+                .child(recovery_actions(&c, &id, &core))
+                .child(ui::button("撤銷", ui::Btn::Ghost, {
+                    let revoke_core = core.clone();
+                    let revoke_id = id.clone();
+                    move || revoke_core.send(Cmd::EaRevoke(revoke_id.clone()))
+                })),
+        )
 }
 
 /// 恢復流動作列（C2）：依純判別閘現算——我在 grantor 側給「發起恢復」與

@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # 緊急存取（EA）雙帳號 e2e（PR4）：真 VW 1.37.2＋兩台獨立 daemon（grantor/grantee）。
 # 全鏈：invite（無 mail 自動 accept）→confirm（RSA-OAEP 派發 user key）→
-# initiate→approve→view（外部鑰唯讀投影）→lock 失效→takeover（改主密碼閉環）。
+# initiate→approve→view（外部鑰唯讀投影）→lock 失效→revoke 即時失效→takeover（改主密碼閉環）。
 # 自起 bitward-vw-ea 容器（埠 18101）＋獨立 data-dir，絕不碰常駐 demo 域。
-# 用法：dev/e2e/ea.sh
+# 用法：dev/e2e/ea.sh（EA_KEEP=1 留環境與容器供錄 fixtures／GUI 驗證）
+# GUI 可達性驗收（尾修 1，出廠窗 1120×760）：先築一條 RecoveryApproved 的
+# view 關係（EA_KEEP=1 跑完後：grantor `ea invite <grantee> && ea confirm <id>`、
+# grantee `ea initiate <id>`、grantor `ea approve <id>`），再
+#   BITWARD_GUI_SOCK=/tmp/bitward-ea-b/s nsh test apps/bitward-gui/nsh.json \
+#     --target macos < dev/e2e/ea-nsh-steps.js
+# （steps 按到「檢視」「撤銷」並留水印幀；撤銷為真操作，跑完關係即消）
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -110,7 +116,7 @@ echo "$VIEW_JSON" | jq -e '.[0].password == "s3cr3t-ea"' >/dev/null \
   || fail "view 未出 grantor 密碼明文（外部鑰鏈斷）：$(echo "$VIEW_JSON" | jq -c '.[0]|{username,password}')"
 pass "grantee 以派發金鑰讀到 grantor 帳密明文"
 
-# epoch 快取語意：同 epoch 重讀不打 VW（access log 只 1 發 view POST）。
+# epoch 快取語意：同 epoch 重讀只輕驗 granted 清單，不重打 view POST、不重解密。
 VIEW_POSTS_1=$(docker logs "$VW" 2>&1 | grep -cE "\[request\]\[INFO\] POST /api/emergency-access/[^ ]+/view" || true)
 BB ea view "$EAID" >/dev/null
 VIEW_POSTS_2=$(docker logs "$VW" 2>&1 | grep -cE "\[request\]\[INFO\] POST /api/emergency-access/[^ ]+/view" || true)
@@ -133,6 +139,20 @@ BG ea reject "$EAID" >/dev/null
 [[ "$(BB ea ls --granted | jq -r '.[0].status')" == "Confirmed" ]] \
   || fail "reject 後應回 Confirmed"
 pass "reject 閉環回 Confirmed（view 入口消失由 can_view 純測釘選）"
+
+# ── 尾修 2：revoke 即時失效（同 epoch 快取不得續供已撤銷的明文）────────
+BB ea initiate "$EAID" >/dev/null
+BG ea approve "$EAID" >/dev/null
+BB ea view "$EAID" >/dev/null          # 填快取
+BG ea revoke "$EAID" >/dev/null        # grantor 撤銷，grantee 未鎖庫
+REVOKE_ERR=$(BB ea view "$EAID" 2>&1; echo "rc=$?")
+if [[ "$REVOKE_ERR" == *"rc=0"* ]]; then
+  fail "revoke 後同 epoch view 應立即被拒（快取續供明文）"
+fi
+echo "$REVOKE_ERR" | grep -q "對方已撤銷或授權已失效" \
+  || fail "revoke 後 view 錯誤須經對映表在地化（實際：$REVOKE_ERR）"
+[[ "$(BB ea ls --granted | jq -r 'length')" == "0" ]] || fail "revoke 後 granted 清單應空"
+pass "revoke 即時失效：同 epoch view 即拒＋錯誤在地化＋清單收斂"
 
 # ── C3：接管閉環（第三受託人 takeover 型別）───────────────────
 ET="ea-takee-$TS@bitward.test"

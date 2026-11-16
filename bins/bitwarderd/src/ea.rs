@@ -15,7 +15,53 @@
 use bw_proto::{EaAccessType, EaCall, EaRole, ItemKind, ItemMeta, ItemView, Response, WtpError};
 use serde_json::Value;
 
-use crate::hub::{DispatchResult, denied, project_card, project_identity};
+use crate::hub::{DispatchResult, denied, map_server_err, project_card, project_identity};
+
+/// VW/雲的 EA 端點錯誤是英文原文（源檔 `err!("Emergency access not valid.")`
+/// 之類）；過一層常用對映再上收，未知形態原樣保留（誠實優先於整齊）。
+/// 錯誤由伺服器裁判、本地不攔流程——這裡只翻譯不吞。
+fn ea_err(e: bw_server::ServerError) -> WtpError {
+    if let bw_server::ServerError::Http { status, detail } = &e
+        && let Some(msg) = localize_ea_error(*status, detail)
+    {
+        return denied(msg);
+    }
+    map_server_err(e)
+}
+
+/// 對映表（純函數，單測釘點）：`detail` 已含伺服器訊息原文（`ApiError::parse`
+/// 收攏 errorModel/validationErrors/message）。比對用小寫包含；回 None＝
+/// 不認識，交回 `map_server_err` 原樣上拋。
+fn localize_ea_error(status: u16, detail: &str) -> Option<String> {
+    let low = detail.to_lowercase();
+    [
+        (
+            "emergency access is not enabled",
+            "伺服器未啟用緊急存取（自架需開 EA 設定）",
+        ),
+        (
+            "emergency access not valid",
+            "對方已撤銷或授權已失效（當前狀態不接受此操作）",
+        ),
+        ("can not set yourself", "不能把自己設為緊急联系人"),
+        ("already invited", "對方已在受託名單中"),
+        (
+            "grantee user does not exist",
+            "對方帳號不存在（且伺服器未開放邀請註冊）",
+        ),
+        ("grantee user not found", "找不到受託人帳號"),
+        ("invited user not found", "找不到受邀帳號（邀請可能已過期）"),
+        ("claim email does not match", "邀請信與此帳號的 email 不符"),
+        (
+            "emergency access invitation error",
+            "邀請已被更動（請請對方重發邀請）",
+        ),
+        ("has no public_key", "對方帳號沒有 RSA 公鑰，無法派發金鑰"),
+    ]
+    .into_iter()
+    .find(|(needle, _)| low.contains(needle))
+    .map(|(_, msg)| format!("{msg}（HTTP {status}）"))
+}
 
 impl crate::hub::Hub {
     pub(crate) async fn ea_dispatch(&self, call: &EaCall) -> DispatchResult {
@@ -48,7 +94,7 @@ impl crate::hub::Hub {
         } else {
             client.ea_approve(ea_id).await
         }
-        .map_err(crate::hub::map_server_err)?;
+        .map_err(ea_err)?;
         Ok(Response::Ok)
     }
 
@@ -60,10 +106,7 @@ impl crate::hub::Hub {
 
     async fn ea_list(&self, role: EaRole) -> DispatchResult {
         let client = self.ea_client().await?;
-        let contacts = client
-            .ea_list(role)
-            .await
-            .map_err(crate::hub::map_server_err)?;
+        let contacts = client.ea_list(role).await.map_err(ea_err)?;
         Ok(Response::EaContacts(contacts))
     }
 
@@ -85,7 +128,7 @@ impl crate::hub::Hub {
         client
             .ea_invite(email, access_type, wait_time_days)
             .await
-            .map_err(crate::hub::map_server_err)?;
+            .map_err(ea_err)?;
         Ok(Response::Ok)
     }
 
@@ -98,10 +141,7 @@ impl crate::hub::Hub {
             return Err(denied("確認緊急存取需要解鎖態（要用 user key 派發金鑰）"));
         }
         let client = self.ea_client().await?;
-        let contacts = client
-            .ea_list(EaRole::Grantee)
-            .await
-            .map_err(crate::hub::map_server_err)?;
+        let contacts = client.ea_list(EaRole::Grantee).await.map_err(ea_err)?;
         let contact = contacts
             .into_iter()
             .find(|c| c.id == ea_id)
@@ -109,10 +149,7 @@ impl crate::hub::Hub {
         let grantee_id = contact
             .user_id
             .ok_or_else(|| denied("對方尚未接受邀請（伺服器還沒有其 user id）"))?;
-        let public_key = client
-            .ea_public_key(&grantee_id)
-            .await
-            .map_err(crate::hub::map_server_err)?;
+        let public_key = client.ea_public_key(&grantee_id).await.map_err(ea_err)?;
         let key = self
             .machine
             .with_keys(|kb| {
@@ -124,29 +161,20 @@ impl crate::hub::Hub {
             })
             .map_err(|_| denied("vault 未解鎖"))?
             .map_err(|e| denied(format!("金鑰包裝失敗：{e}")))?;
-        client
-            .ea_confirm(ea_id, &key)
-            .await
-            .map_err(crate::hub::map_server_err)?;
+        client.ea_confirm(ea_id, &key).await.map_err(ea_err)?;
         Ok(Response::Ok)
     }
 
     async fn ea_revoke(&self, ea_id: &str) -> DispatchResult {
         let client = self.ea_client().await?;
-        client
-            .ea_revoke(ea_id)
-            .await
-            .map_err(crate::hub::map_server_err)?;
+        client.ea_revoke(ea_id).await.map_err(ea_err)?;
         Ok(Response::Ok)
     }
 
     /// grantor 拒絕恢復（狀態回 Confirmed）。
     async fn ea_reject(&self, ea_id: &str) -> DispatchResult {
         let client = self.ea_client().await?;
-        client
-            .ea_reject(ea_id)
-            .await
-            .map_err(crate::hub::map_server_err)?;
+        client.ea_reject(ea_id).await.map_err(ea_err)?;
         Ok(Response::Ok)
     }
 
@@ -154,8 +182,11 @@ impl crate::hub::Hub {
     /// 解自己的 RSA 私鑰 → `rsa_decrypt` 出 **grantor user key** → 經外部鑰
     /// 視窗（`cipher_field_decryptor` 吃候選鑰）投影 Reveal 級清單。
     /// 與 org 共享鏈同構：同一支三態選鑰解析器，只是候選鑰來自 EA 派發。
-    /// 快取按 `LockEpoch` 閘控：同 epoch 重讀不打網路（VW access log 可證），
-    /// 上鎖後 epoch 遞增＝整批作廢，重新解鎖須重取（plan epoch 語意）。
+    /// 快取按 `LockEpoch` 閘控：上鎖後 epoch 遞增＝整批作廢（plan epoch 語意）；
+    /// 同 epoch 命中也要過一發 `GET granted` 輕驗（產品裁決：revoke 即時失效，
+    /// 不可預期地讀到已撤銷的明文＝否）。輕驗只花一個清單往返——慢路徑是
+    /// 整庫 POST view＋RSA 解封＋逐筆投影，快取省的是大頭，計數斷言見
+    /// `dev/e2e/ea.sh`（view POST 不增）。
     async fn ea_view(&self, ea_id: &str) -> DispatchResult {
         if !self.machine.is_unlocked() {
             return Err(denied(
@@ -163,16 +194,28 @@ impl crate::hub::Hub {
             ));
         }
         let epoch = self.machine.epoch().0;
-        if let Some((e, items)) = self.ea_view_cache.lock().unwrap().get(ea_id)
-            && *e == epoch
-        {
-            return Ok(Response::EaView(items.clone()));
-        }
         let client = self.ea_client().await?;
-        let raw = client
-            .ea_view(ea_id)
-            .await
-            .map_err(crate::hub::map_server_err)?;
+        let cached = self
+            .ea_view_cache
+            .lock()
+            .unwrap()
+            .get(ea_id)
+            .filter(|(e, _)| *e == epoch)
+            .map(|(_, items)| items.clone());
+        if let Some(items) = cached {
+            let live = client
+                .ea_list(EaRole::Grantor)
+                .await
+                .map_err(ea_err)?
+                .iter()
+                .any(|c| c.id == ea_id && c.status == bw_proto::EaStatus::RecoveryApproved);
+            if live {
+                return Ok(Response::EaView(items));
+            }
+            // 關係已撤銷或狀態倒退（reject）：明文即棄，交伺服器裁判回可懂錯誤。
+            self.ea_view_cache.lock().unwrap().remove(ea_id);
+        }
+        let raw = client.ea_view(ea_id).await.map_err(ea_err)?;
         let key_env = raw
             .get("keyEncrypted")
             .and_then(Value::as_str)
@@ -230,10 +273,7 @@ impl crate::hub::Hub {
             )));
         }
         let client = self.ea_client().await?;
-        let raw = client
-            .ea_takeover(ea_id)
-            .await
-            .map_err(crate::hub::map_server_err)?;
+        let raw = client.ea_takeover(ea_id).await.map_err(ea_err)?;
         let key_env = raw
             .get("keyEncrypted")
             .and_then(Value::as_str)
@@ -246,10 +286,7 @@ impl crate::hub::Hub {
             Some(s) => s.to_owned(),
             // VW 態不帶 salt：＝grantor email，從 granted 清單按 ea_id 取。
             None => {
-                let contacts = client
-                    .ea_list(EaRole::Grantor)
-                    .await
-                    .map_err(crate::hub::map_server_err)?;
+                let contacts = client.ea_list(EaRole::Grantor).await.map_err(ea_err)?;
                 contacts
                     .into_iter()
                     .find(|c| c.id == ea_id)
@@ -278,7 +315,7 @@ impl crate::hub::Hub {
         client
             .ea_takeover_password(ea_id, &hash, &key)
             .await
-            .map_err(crate::hub::map_server_err)?;
+            .map_err(ea_err)?;
         Ok(Response::Ok)
     }
 
@@ -393,7 +430,41 @@ impl crate::hub::Hub {
 
 #[cfg(test)]
 mod tests {
+    use super::localize_ea_error;
     use serde_json::json;
+
+    #[test]
+    fn localizes_common_ea_server_errors() {
+        // VW 源檔原文形態（errorModel.message 進 detail）
+        assert!(
+            localize_ea_error(400, "Emergency access not valid.")
+                .unwrap_or_default()
+                .contains("對方已撤銷或授權已失效")
+        );
+        assert!(
+            localize_ea_error(400, "Emergency access is not enabled.")
+                .unwrap_or_default()
+                .contains("未啟用緊急存取")
+        );
+        assert!(
+            localize_ea_error(400, "You can not set yourself as an emergency contact.")
+                .unwrap_or_default()
+                .contains("自己")
+        );
+        assert!(
+            localize_ea_error(400, "Grantee user already invited: a@b.test")
+                .unwrap_or_default()
+                .contains("已在受託名單")
+        );
+        assert!(
+            localize_ea_error(404, "User has no public_key")
+                .unwrap_or_default()
+                .contains("RSA 公鑰")
+        );
+        // 大寫混排仍命中（比對小寫化）；未知英文原樣不放行（回 None→map_server_err）
+        assert!(localize_ea_error(400, "EMERGENCY ACCESS NOT VALID.").is_some());
+        assert_eq!(localize_ea_error(500, "Rocket exploded"), None);
+    }
 
     /// 外部鑰視窗單元（plan 驗收「org 共享鏈同構回歸」）：投影器吃的
     /// 候選鑰是 **grantor** user key（非本機鑰），三態選鑰同解析器——
