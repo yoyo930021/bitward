@@ -6,7 +6,7 @@
 //! 轉送，絕不按 UUID 解析。上傳收斂走 outbox（掛「未同步」），鏡像的附件
 //! 列在背景推送落地後才出現；刪除需連網，無離線佇列。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::export::ts_utc;
 
@@ -142,7 +142,32 @@ pub fn write_download(file_name: &str, bytes: &[u8]) -> Result<String, String> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
+    // item 5：附件是伺服器下載內容，標記 macOS 隔離屬位元，讓 Gatekeeper
+    // 在首次開啟時提示（best-effort，失敗不擋下載）。
+    set_quarantine(&path);
     Ok(path.display().to_string())
+}
+
+/// 寫 `com.apple.quarantine` xattr（macOS）：`<flags>;<hex 時刻>;<uuid>;<來源 app>`。
+/// 非 macOS no-op；用系統 `/usr/bin/xattr` 免引入額外 crate 依賴。
+fn set_quarantine(path: &Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // flags 0004 = 已隔離、尚未通過 Gatekeeper。
+        let value = format!("0004;{:x};{};Bitward", ts, uuid::Uuid::new_v4());
+        let _ = std::process::Command::new("/usr/bin/xattr")
+            .args(["-w", "com.apple.quarantine", &value])
+            .arg(path)
+            .status();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+    }
 }
 
 #[cfg(test)]
@@ -201,5 +226,24 @@ mod tests {
                 .unwrap()
                 .contains("attachment")
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn set_quarantine_marks_downloaded_attachment() {
+        let dir = std::env::temp_dir().join(format!("bw-quarantine-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("att.bin");
+        std::fs::write(&f, b"data").unwrap();
+        set_quarantine(&f);
+        let out = std::process::Command::new("/usr/bin/xattr")
+            .args(["-p", "com.apple.quarantine"])
+            .arg(&f)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(out.status.success(), "quarantine xattr 應已設定");
+        let v = String::from_utf8_lossy(&out.stdout);
+        assert!(v.contains("0004") && v.contains("Bitward"), "值異常：{v}");
     }
 }
