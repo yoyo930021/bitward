@@ -437,6 +437,18 @@ enum SendCmd {
         #[arg(name = "SEND_ID")]
         id: String,
     },
+    /// 接收方讀取（PR2）：解分享 URL 的金鑰片段→本地拉伸→存取端點→解密。
+    /// 不需登入／解鎖（接收方常無帳號），也不經 daemon。
+    Access {
+        /// 分享 URL（`{server}/#/send/{id}/{金鑰片段}`；片段必須整條保留）
+        url: String,
+        /// 從 stdin 讀取用密碼（此 Send 設了密碼時需要）
+        #[arg(long)]
+        password_stdin: bool,
+        /// 檔案 Send 輸出路徑（`-`＝stdout；省略＝原檔名落本目錄）
+        #[arg(short = 'o', long, value_name = "FILE")]
+        out: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -627,6 +639,35 @@ fn default_data_dir() -> PathBuf {
         .join("bitward")
 }
 
+/// 連線端預設 sock。Q3 裁決（2026-11-16）：Linux＝`$XDG_RUNTIME_DIR/bitward/daemon.sock`
+/// 主、`<data_dir>/daemon.sock` 退（主路徑不存在且退路存在才退——daemon 可能被
+/// `--sock` 起在 data_dir）；macOS 維持 data_dir 不動。純函數便單測。
+#[cfg(target_os = "linux")]
+fn pick_cli_sock(xdg_runtime_dir: Option<&str>, data_dir: &Path) -> PathBuf {
+    let fallback = data_dir.join("daemon.sock");
+    match xdg_runtime_dir {
+        Some(d) if !d.is_empty() => {
+            let main = std::path::Path::new(d).join("bitward").join("daemon.sock");
+            if !main.exists() && fallback.exists() {
+                fallback
+            } else {
+                main
+            }
+        }
+        _ => fallback,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn default_sock(data_dir: &Path) -> PathBuf {
+    pick_cli_sock(std::env::var("XDG_RUNTIME_DIR").ok().as_deref(), data_dir)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn default_sock(data_dir: &Path) -> PathBuf {
+    data_dir.join("daemon.sock")
+}
+
 #[tokio::main]
 async fn main() {
     // 批次 14.6:同 bitwarderd,先裝 ring provider 根除 auto-detect panic。
@@ -726,6 +767,24 @@ async fn run() -> Result<(), String> {
             let (server, email) = seed_target(&args)?;
             return dev_seed(&server, &email, name, uri, password).await;
         }
+        // 接收方路徑：金鑰在 URL 片段、讀取不需帳號——完全不經 daemon
+        // （接收方可能根本沒跑 daemon），故與 dev-* 同列提前返回。
+        Cmd::Send {
+            cmd:
+                SendCmd::Access {
+                    url,
+                    password_stdin,
+                    out,
+                },
+        } => {
+            let pw = if *password_stdin {
+                Some(read_line_stdin()?)
+            } else {
+                None
+            };
+            let accessed = access_send(url, pw.as_deref()).await?;
+            return emit_accessed(accessed, out.as_deref(), args.json);
+        }
         _ => {}
     }
     let data_dir = default_data_dir();
@@ -735,10 +794,7 @@ async fn run() -> Result<(), String> {
     {
         return pair_join(&args, &data_dir).await;
     }
-    let sock = args
-        .sock
-        .clone()
-        .unwrap_or_else(|| data_dir.join("daemon.sock"));
+    let sock = args.sock.clone().unwrap_or_else(|| default_sock(&data_dir));
     let (mut rd, mut wr): (
         Box<dyn tokio::io::AsyncRead + Unpin + Send>,
         Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
@@ -1662,6 +1718,10 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                         sub: bw_proto::SendOp::Remove { id: parse_id(id)? },
                     }));
                 }
+                // 接收方路徑在 run() 提前返回（不連 daemon），到此＝分派漏接
+                SendCmd::Access { .. } => {
+                    return Err("send access 不走 daemon（內部路徑錯誤）".into());
+                }
             };
             Call::Vault(VaultCall::Send {
                 sub: bw_proto::SendOp::Create {
@@ -2193,4 +2253,382 @@ async fn dev_seed(
         .map_err(|e| e.to_string())?;
     println!("seeded {}", created["id"].as_str().unwrap_or("?"));
     Ok(())
+}
+
+/// `send access` 的解密產物（列印與落檔由 [`emit_accessed`] 處理，
+/// 單測直接斷言返回值，不捕 stdout）。
+#[derive(Debug)]
+enum Accessed {
+    Text {
+        name: String,
+        text: String,
+    },
+    File {
+        name: String,
+        file_name: String,
+        bytes: Vec<u8>,
+    },
+}
+
+/// 分享 URL → `(server base, accessId, seed 鑰)`。官方形態
+/// `{server}/#/send/{accessId}/{b64url(seed)}`；片段不經伺服器（瀏覽器
+/// 不上送、本機只進解密閉包——A11「不落明文」延伸到 key 片段）。
+fn parse_send_url(url: &str) -> Result<(String, String, bw_crypto::SendKey), String> {
+    let (base, frag) = url
+        .split_once('#')
+        .ok_or("分享 URL 沒有金鑰片段（請貼上完整連結，含 # 之後）")?;
+    let rest = frag
+        .strip_prefix("/send/")
+        .ok_or_else(|| format!("URL 片段應為 #/send/{{id}}/{{金鑰}} 形態，got #{frag}"))?;
+    let (aid, seed) = rest
+        .split_once('/')
+        .ok_or("URL 片段缺金鑰段（#/send/{{id}}/{{金鑰}}）")?;
+    if aid.is_empty() {
+        return Err("URL 片段缺存取 id".into());
+    }
+    let raw = bw_crypto::b64url_decode(seed).map_err(|_| "金鑰片段不是合法 b64url")?;
+    let key = bw_crypto::SendKey::from_bytes(raw)
+        .map_err(|_| "金鑰片段長度不對（應為 16 bytes 的 b64url）")?;
+    Ok((base.to_owned(), aid.to_owned(), key))
+}
+
+/// 接收方全鏈：URL 片段 seed → 官方拉伸 → 存取端點四態 → 本地解密。
+/// 錯誤文案即使用者可觀察終態（需密碼／錯密碼／不可用／網路四態可懂）。
+/// `password` 為取用密碼明文（呼叫端自 stdin 讀入；哈希在本閉包後即棄）。
+async fn access_send(url: &str, password: Option<&str>) -> Result<Accessed, String> {
+    let (base, aid, key) = parse_send_url(url)?;
+    let pw_hash = password.map(|p| key.password_hash(p));
+    let client =
+        bw_server::Client::new(&base).map_err(|e| format!("分享 URL 的伺服器位址無效：{e}"))?;
+    let outcome = client
+        .send_access(&aid, pw_hash.as_deref())
+        .await
+        .map_err(|e| format!("網路錯誤：{e}"))?;
+    let send = match outcome {
+        bw_server::SendAccessOutcome::Send(v) => v,
+        bw_server::SendAccessOutcome::PasswordRequired => {
+            return Err("此 Send 設了取用密碼，請加 --password-stdin 提供".into());
+        }
+        bw_server::SendAccessOutcome::PasswordInvalid => return Err("取用密碼不正確".into()),
+        bw_server::SendAccessOutcome::Inaccessible => {
+            return Err("Send 不可用（已過期、存取次數耗盡或已被刪除）".into());
+        }
+    };
+    let ck = key.stretch();
+    let dec = |env: &str| -> Result<String, String> {
+        let raw = bw_crypto::decrypt_bytes_with_key(ck.as_slice(), env)
+            .map_err(|_| "解密失敗（金鑰片段與此 Send 不符）")?;
+        String::from_utf8(raw).map_err(|_| "Send 內容不是有效的文字（UTF-8）".into())
+    };
+    let name = send
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .map(dec)
+        .transpose()?
+        .unwrap_or_default();
+    if send.get("type").and_then(serde_json::Value::as_i64) == Some(1) {
+        let sid = parse_id(
+            send.get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("Send 回包缺 id")?,
+        )?;
+        let file_id = send
+            .pointer("/file/id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("Send 回包缺檔案 id（檔身可能未上傳完成）")?
+            .to_owned();
+        let file_name = send
+            .pointer("/file/fileName")
+            .and_then(serde_json::Value::as_str)
+            .map(dec)
+            .transpose()?
+            .unwrap_or_else(|| "send-file".into());
+        let raw = client
+            .send_file_download(sid, &file_id, pw_hash.as_deref())
+            .await
+            .map_err(|e| format!("網路錯誤：{e}"))?;
+        let env = String::from_utf8(raw).map_err(|_| "檔身不是信封字串".to_owned())?;
+        let bytes = bw_crypto::decrypt_bytes_with_key(ck.as_slice(), &env)
+            .map_err(|_| "解密失敗（金鑰片段與此 Send 不符）")?;
+        Ok(Accessed::File {
+            name,
+            file_name,
+            bytes,
+        })
+    } else {
+        let env = send
+            .pointer("/text/text")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("Send 回包缺文字欄")?;
+        Ok(Accessed::Text {
+            name,
+            text: dec(env)?,
+        })
+    }
+}
+
+/// 出口列印：文字→stdout（管線友善，逐字節不添換行）；檔案→落檔或
+/// `-`＝stdout；`--json` 出結構（名稱屬 Identity 級，本機接收方自用）。
+fn emit_accessed(accessed: Accessed, out: Option<&str>, json: bool) -> Result<(), String> {
+    use std::io::Write as _;
+    match accessed {
+        Accessed::Text { name, text } => {
+            if let Some(path) = out.filter(|p| *p != "-") {
+                std::fs::write(path, &text).map_err(|e| format!("寫檔失敗：{e}"))?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({"type":"text","name":name,"path":path})
+                    );
+                }
+            } else if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"type":"text","name":name,"text":text})
+                );
+            } else {
+                std::io::stdout()
+                    .write_all(text.as_bytes())
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        Accessed::File {
+            name,
+            file_name,
+            bytes,
+        } => {
+            let path = out.unwrap_or(&file_name).to_owned();
+            if path == "-" {
+                std::io::stdout().write_all(&bytes).map_err(|e| e.to_string())?;
+            } else {
+                std::fs::write(&path, &bytes).map_err(|e| format!("寫檔失敗：{e}"))?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({"type":"file","name":name,"file":file_name,
+                                            "path":path,"bytes":bytes.len()})
+                    );
+                } else {
+                    println!("已存 {path}（{} bytes）", bytes.len());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod access_tests {
+    use super::*;
+
+    /// 迴圈 mock server：依 request-line 包含的路由前綴回 canned 回應
+    /// （(status, body, content-type)）；未命中＝500。讀掉宣告的 body 後
+    /// 一連線一应答即關（reqwest 會重連，不談 keep-alive）。
+    fn mock_server(routes: Vec<(&'static str, u16, String, &'static str)>) -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let routes: Vec<(String, u16, String, String)> = routes
+            .into_iter()
+            .map(|(m, s, b, c)| (m.to_owned(), s, b, c.to_owned()))
+            .collect();
+        std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+            for stream in l.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let head_end = loop {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break None,
+                        Ok(n) => {
+                            buf.extend_from_slice(&chunk[..n]);
+                            if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                                break Some(p + 4);
+                            }
+                        }
+                    }
+                };
+                let Some(head_end) = head_end else { continue };
+                let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
+                let line = head.lines().next().unwrap_or("").to_owned();
+                let clen: usize = head
+                    .lines()
+                    .find_map(|h| {
+                        let (k, v) = h.split_once(':')?;
+                        k.eq_ignore_ascii_case("content-length")
+                            .then(|| v.trim().parse().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                while buf.len() - head_end < clen {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let (status, body, ctype) = routes
+                    .iter()
+                    .find(|(m, ..)| line.contains(m.as_str()))
+                    .map(|(_, s, b, c)| (*s, b.clone(), c.clone()))
+                    .unwrap_or((500, "no route".into(), "text/plain".into()));
+                let resp = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    fn seed_key() -> bw_crypto::SendKey {
+        bw_crypto::SendKey::from_bytes((0..16u8).collect()).unwrap()
+    }
+
+    fn enc(ck: &[u8], s: &str) -> String {
+        bw_crypto::encrypt_bytes_key(ck, s.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn url_parse_official_shape_and_errors() {
+        let seed = seed_key();
+        let url = format!("http://127.0.0.1:9/#/send/ACC-IDA/{}", bw_crypto::b64url(seed.as_bytes()));
+        let (base, aid, k) = parse_send_url(&url).unwrap();
+        assert_eq!(base, "http://127.0.0.1:9/");
+        assert_eq!(aid, "ACC-IDA");
+        assert_eq!(k.as_bytes(), seed.as_bytes());
+        assert!(parse_send_url("http://x/#/send/A/AAAAAAAAAAAAAAAAAAAA").unwrap_err().contains("16"));
+        assert!(parse_send_url("http://x/send/A/B").unwrap_err().contains("片段"));
+        assert!(parse_send_url("http://x/#/vault/AAECAwQFBgcICQoLDA0ODw").unwrap_err().contains("send"));
+    }
+
+    #[tokio::test]
+    async fn access_three_error_states_readable() {
+        let seed = seed_key();
+        let aid = "ACC-ERR";
+        let mk = |status: u16| {
+            let routes = vec![("/api/sends/access/ACC-ERR", status, "{}".to_string(), "application/json")];
+            mock_server(routes)
+        };
+        let url_for = |base: &str| format!("{base}/#/send/{aid}/{}", bw_crypto::b64url(seed.as_bytes()));
+        // 401 → 需密碼文案
+        let e = access_send(&url_for(&mk(401)), None).await.unwrap_err();
+        assert!(e.contains("取用密碼"), "{e}");
+        // 400 → 錯密碼文案
+        let e = access_send(&url_for(&mk(400)), Some("nope")).await.unwrap_err();
+        assert!(e.contains("不正確"), "{e}");
+        // 404 → 不可用文案（過期／耗盡／刪除合併態）
+        let e = access_send(&url_for(&mk(404)), None).await.unwrap_err();
+        assert!(e.contains("不可用"), "{e}");
+        // 網路死 → 連字符都不潑 raw
+        let e = access_send("http://127.0.0.1:1/#/send/A/AAECAwQFBgcICQoLDA0ODw", None)
+            .await
+            .unwrap_err();
+        assert!(e.starts_with("網路錯誤"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn access_text_roundtrip_against_mock() {
+        let seed = seed_key();
+        let ck = seed.stretch();
+        let body = serde_json::json!({
+            "id": "6fe8bae0-e019-48fb-a651-f9e3514d156e",
+            "type": 0,
+            "name": enc(ck.as_slice(), "分享標題"),
+            "text": {"text": enc(ck.as_slice(), "敏感文字 42"), "hidden": false},
+            "object": "send-access",
+        });
+        let base = mock_server(vec![
+            (
+                "/api/sends/access/ACC-OK",
+                200,
+                body.to_string(),
+                "application/json",
+            ),
+        ]);
+        let url = format!("{base}/#/send/ACC-OK/{}", bw_crypto::b64url(seed.as_bytes()));
+        match access_send(&url, None).await.unwrap() {
+            Accessed::Text { name, text } => {
+                assert_eq!(name, "分享標題");
+                assert_eq!(text, "敏感文字 42");
+            }
+            _ => panic!("應為文字態"),
+        }
+    }
+
+    #[tokio::test]
+    async fn access_file_roundtrip_sha256() {
+        let seed = seed_key();
+        let ck = seed.stretch();
+        let sid = "6fe8bae0-e019-48fb-a651-f9e3514d156e";
+        let payload: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+        let env = bw_crypto::encrypt_bytes_key(ck.as_slice(), &payload).unwrap();
+        let acc = serde_json::json!({
+            "id": sid,
+            "type": 1,
+            "name": enc(ck.as_slice(), "blob.bin"),
+            "file": {"id": "FID1", "size": env.len(), "sizeName": "1 KB",
+                     "fileName": enc(ck.as_slice(), "blob.bin")},
+            "object": "send-access",
+        });
+        let file_resp = "{\"url\":\"/blob/FID1\"}".to_owned(); // 相對路徑：absolute 補全
+        let base = mock_server(vec![
+            ("/api/sends/access/ACC-FILE", 200, acc.to_string(), "application/json"),
+            ("/access/file/FID1", 200, file_resp, "application/json"),
+            ("/blob/FID1", 200, env.clone(), "application/octet-stream"),
+        ]);
+        let url = format!("{base}/#/send/ACC-FILE/{}", bw_crypto::b64url(seed.as_bytes()));
+        match access_send(&url, None).await.unwrap() {
+            Accessed::File { file_name, bytes, .. } => {
+                assert_eq!(file_name, "blob.bin");
+                assert_eq!(bytes, payload, "解密位元組應逐字等於原檔");
+            }
+            _ => panic!("應為檔案態"),
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod sock_default_tests {
+    use super::pick_cli_sock;
+
+    fn tmpdir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("bw-clisock-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("bitward")).unwrap();
+        d
+    }
+
+    #[test]
+    fn xdg_main_path_when_present_or_absent() {
+        let rt = tmpdir("rt");
+        let dd = tmpdir("dd");
+        // 兩邊都沒 sock：照報主路徑（錯誤訊息指到正解，不誤導去 data_dir）。
+        assert_eq!(
+            pick_cli_sock(Some(rt.to_str().unwrap()), &dd),
+            rt.join("bitward").join("daemon.sock")
+        );
+        // 未設／空字串＝退 data_dir。
+        assert_eq!(pick_cli_sock(None, &dd), dd.join("daemon.sock"));
+        assert_eq!(pick_cli_sock(Some(""), &dd), dd.join("daemon.sock"));
+        std::fs::remove_dir_all(rt).ok();
+        std::fs::remove_dir_all(dd).ok();
+    }
+
+    #[test]
+    fn falls_back_only_when_main_absent_and_data_present() {
+        let rt = tmpdir("rt2");
+        let dd = tmpdir("dd2");
+        let main = rt.join("bitward").join("daemon.sock");
+        let fallback = dd.join("daemon.sock");
+        std::fs::write(&fallback, "").unwrap();
+        // 主路徑不存在＋退路在場（daemon 以 --sock 起於 data_dir）→ 退。
+        assert_eq!(pick_cli_sock(Some(rt.to_str().unwrap()), &dd), fallback);
+        // 主路徑也在場 → 主勝（同機兩態並存時按 Q3 口徑取主）。
+        std::fs::write(&main, "").unwrap();
+        assert_eq!(pick_cli_sock(Some(rt.to_str().unwrap()), &dd), main);
+        std::fs::remove_dir_all(rt).ok();
+        std::fs::remove_dir_all(dd).ok();
+    }
 }

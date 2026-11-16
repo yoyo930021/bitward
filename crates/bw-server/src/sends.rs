@@ -16,11 +16,15 @@
 //!   設/換＝`PUT /api/sends/{id}` 全量帶 `password`（伺服器只在欄位**有值**時
 //!   重哈希，null 不動既有哈希，见 `update_send_from_data`）；清＝
 //!   `PUT /api/sends/{id}/remove-password`（實錄 200 回完整 send）。
-//! - 接收方（無 bearer，本層不代辦、e2e 直接 curl）：
+//! - 接收方（無 bearer）：
 //!   `POST /api/sends/access/{accessId}` body `{password}` → send-access
 //!   （實錄 401 缺/password 未提供、400 錯密碼、404 耗盡或到期）；
 //!   檔案下載 URL＝`POST /api/sends/{id}/access/file/{fileId}` 同 body → `{url}`
 //!   （短效簽名，帶 bearer 亦通——本層給發送端自取用）。
+//!   兩端皆由 [`Client::send_access`]／[`Client::send_file_download`] 代辦
+//!   （PR2 接收端：CLI `send access` 與 daemon webui 代理共用；實測 VW 1.37.2
+//!   對任意 Origin **不給 `Access-Control-Allow-Origin`**，瀏覽器頁不得直打
+//!   server，必須經 daemon 代理——2026-11-16 CORS 表態記錄）。
 
 use serde_json::{Value, json};
 
@@ -28,6 +32,20 @@ use bw_proto::ItemId;
 
 use crate::json::{get_str, get};
 use crate::{Client, ServerError};
+
+/// 接收方存取的語意四態（[`Client::send_access`]；狀態碼→語意的集中映射，
+/// 呼叫端據此出可懂文案，不必再拆 HTTP 碼）。
+#[derive(Clone, Debug)]
+pub enum SendAccessOutcome {
+    /// 200：send-access 物件（含 id/type/name/text/file；欄位全信封）。
+    Send(Value),
+    /// 401：此 Send 設了取用密碼，請求未帶。
+    PasswordRequired,
+    /// 400：密碼哈希不符（實錄 VW 對照失敗回 400 非 401）。
+    PasswordInvalid,
+    /// 404：過期、次數耗盡、已刪除或檔身缺失（伺服器合併為「不可用」）。
+    Inaccessible,
+}
 
 /// 檔案 send v2 建立回包：上傳憑證（形態對齊 `AttachmentUpload`——
 /// 只給 URL 與元資料，實際位元組推送由呼叫端做）。
@@ -120,6 +138,85 @@ impl Client {
             ));
         }
         Ok(self.absolute(raw_url).await)
+    }
+
+    /// 接收方存取（**無 bearer**）：`POST /sends/access/{accessId}` body
+    /// `{password}`。四態按實錄分派（401 需密碼／400 錯密碼／404 不可用／
+    /// 200 send-access 物件）；不走 `send()` 收口——那裡的 401 是「token 遭拒
+    /// 該續期」，這裡的 401 是語意態（缺取用密碼），續期邏輯會誤讀。
+    pub async fn send_access(
+        &self,
+        access_id: &str,
+        password_hash: Option<&str>,
+    ) -> Result<SendAccessOutcome, ServerError> {
+        let url = format!("{}/sends/access/{access_id}", self.url("api").await);
+        let resp = self
+            .http
+            .post(&url)
+            .json(&json!({ "password": password_hash }))
+            .send()
+            .await?;
+        let status = u16::from(resp.status());
+        let body = resp.text().await?;
+        match status {
+            200 => serde_json::from_str(&body)
+                .map(SendAccessOutcome::Send)
+                .map_err(|e| ServerError::Malformed(format!("send-access body: {e}"))),
+            401 => Ok(SendAccessOutcome::PasswordRequired),
+            400 => Ok(SendAccessOutcome::PasswordInvalid),
+            404 => Ok(SendAccessOutcome::Inaccessible),
+            other => Err(ServerError::Http {
+                status: other,
+                detail: crate::error::ApiError::parse(other, &body).message,
+            }),
+        }
+    }
+
+    /// 接收方取檔（**無 bearer**）兩段：`POST /sends/{id}/access/file/{fid}`
+    /// body `{password}` → 短效簽名 URL（實錄相對路徑，`absolute` 補全）→
+    /// GET 原始位元組（檔身＝信封字串的位元組，解密屬呼叫端）。
+    pub async fn send_file_download(
+        &self,
+        id: ItemId,
+        file_id: &str,
+        password_hash: Option<&str>,
+    ) -> Result<Vec<u8>, ServerError> {
+        let url = format!(
+            "{}/sends/{id}/access/file/{file_id}",
+            self.url("api").await
+        );
+        let resp = self
+            .http
+            .post(&url)
+            .json(&json!({ "password": password_hash }))
+            .send()
+            .await?;
+        let status = u16::from(resp.status());
+        let body = resp.text().await?;
+        if status != 200 {
+            return Err(ServerError::Http {
+                status,
+                detail: crate::error::ApiError::parse(status, &body).message,
+            });
+        }
+        let raw: Value = serde_json::from_str(&body)
+            .map_err(|e| ServerError::Malformed(format!("file access body: {e}")))?;
+        let dl = get_str(&raw, &["url"]).unwrap_or_default();
+        if dl.is_empty() {
+            return Err(ServerError::Malformed(
+                "file access response has no url".to_owned(),
+            ));
+        }
+        let dl = self.absolute(dl).await;
+        let resp = self.http.get(&dl).send().await?;
+        let status = u16::from(resp.status());
+        if status != 200 {
+            return Err(ServerError::Http {
+                status,
+                detail: format!("blob download http {status}"),
+            });
+        }
+        Ok(resp.bytes().await?.to_vec())
     }
 
     /// `PUT /sends/{id}`：全量更新（官方語意：`password` 欄**有值才改哈希**、
