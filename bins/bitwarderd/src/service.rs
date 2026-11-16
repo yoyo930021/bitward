@@ -8,6 +8,12 @@
 //! `Contents/Library/LaunchAgents/` 那份是 SMAppService 時代殭屍拷貝（pkg 每輪
 //! staged 但無人讀）。`self_heal` 讓 daemon 每次啟動比對現存 plist 與模板，
 //! 不同即覆寫並重載——根治「裝了新 binary、註冊態卻停在舊模板」。
+//!
+//! 批次 16（PR6-E1）：Linux 等位實作＝systemd **user unit**（`render_unit`，
+//! 同為純函數真相源＋同構自癒合）。語意對映：KeepAlive+ThrottleInterval→
+//! Restart=always+RestartSec=1、RunAtLoad→WantedBy=default.target、
+//! StandardOutPath→journald、第四閘 launchd 直屬→INVOCATION_ID 環境標記
+//! （只有被 systemd --user 扶正的進程有此欄，terminal 手跑沒有）。
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -21,7 +27,9 @@ pub enum ServiceAction {
 
 // SMAppService 硬規定：agent Label 必須以 App bundle ID 開頭，否則 BTM
 // 「failed to construct an identifier」（EINVAL/EPERM），register 必敗。
+// Linux 側同值作 unit 檔名（io.bitward.dev.daemon.service）。
 const LABEL: &str = "io.bitward.dev.daemon";
+#[cfg(target_os = "macos")]
 const LEGACY_LABEL: &str = "io.bitward.daemon";
 /// 批次 14.5：註冊環境常數——Keychain 封存開關恆寫入（keychain.rs 對無生物
 /// 硬體本有 fallback，不需啟動偵測）。
@@ -35,6 +43,7 @@ fn service_label() -> String {
     std::env::var("BW_SERVICE_LABEL").unwrap_or_else(|_| LABEL.to_owned())
 }
 
+#[cfg(target_os = "macos")]
 fn retire_legacy_plist() {
     let Some(home) = dirs::home_dir() else { return };
     let old = home.join("Library/LaunchAgents").join(format!("{LEGACY_LABEL}.plist"));
@@ -42,6 +51,7 @@ fn retire_legacy_plist() {
     let _ = std::fs::remove_file(&old);
 }
 
+#[cfg(target_os = "macos")]
 fn plist_path() -> Option<PathBuf> {
     // 批次 14.7 老實：dirs::home_dir() 走 getpwuid、**不理 $HOME**——之前
     // service.sh 用 HOME=暫逃是假隔離（stage1-3 實測洩漏到真 home 致污染）。
@@ -59,6 +69,7 @@ fn uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
+#[cfg(target_os = "macos")]
 fn bootstrap_target() -> String {
     format!("gui/{}", uid())
 }
@@ -70,6 +81,7 @@ fn bootstrap_target() -> String {
 /// daemon 渲染出相同模板→自癒合判定穩定）；
 /// `data_dir_env`＝安裝者 `BITWARD_DATA_DIR`（demo/開發 vault），None＝走預設。
 /// EnvironmentVariables 恆含 `BW_KEYS_ENABLE_KEYCHAIN=1`，有 data_dir 時再加一筆。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // Linux 側保留給單測金標與文件
 pub fn render_plist(
     exe: &str,
     group: &str,
@@ -132,6 +144,79 @@ pub fn render_plist(
     )
 }
 
+/// Q3 裁決：Linux sock 主路徑＝`$XDG_RUNTIME_DIR/bitward/daemon.sock`；
+/// 環境缺席才退 `/run/user/<uid>`（user manager 拉起時恆有值，純防呆）。
+/// data_dir 退路屬連線端語意（見 `default_sock` 於 main.rs）。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // macOS 側保留單測金標
+pub fn linux_default_sock() -> PathBuf {
+    let base = match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(d) if !d.is_empty() => PathBuf::from(d),
+        _ => PathBuf::from(format!("/run/user/{}", uid())),
+    };
+    base.join("bitward").join("daemon.sock")
+}
+
+/// 渲染 systemd user unit（Linux 註冊真相源，純函數，單測點——仿 `render_plist`）。
+/// `exe`＝daemon 絕對路徑、`sock`＝BTP socket（默認 `linux_default_sock`，
+/// 一律寫入 ExecStart argv＝穩定契約，拉起端與安裝端渲染同文才成立）、
+/// `data_dir_env`＝安裝者 `BITWARD_DATA_DIR`，None＝走預設。
+/// 日誌走 journald（等效 StandardOutPath，`journalctl --user -u <label>` 可查）；
+/// e2e 白名單旗／label 覆寫同步入 Environment 讓拉起端渲染同模板（同 plist 紀律）。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // macOS 側保留單測金標
+pub fn render_unit(exe: &str, sock: &str, data_dir_env: Option<&str>) -> String {
+    let label = service_label();
+    let mut env_lines = String::new();
+    if let Some(d) = data_dir_env {
+        env_lines.push_str(&format!("Environment=BITWARD_DATA_DIR=\"{d}\"\n"));
+    }
+    if std::env::var("BW_SERVICE_ALLOW_DEV_HEAL").is_ok() {
+        env_lines.push_str("Environment=BW_SERVICE_ALLOW_DEV_HEAL=1\n");
+    }
+    if std::env::var("BW_SERVICE_LABEL").is_ok() {
+        env_lines.push_str(&format!("Environment=BW_SERVICE_LABEL={label}\n"));
+    }
+    format!(
+        r#"[Unit]
+Description=bitward hub daemon ({label})
+
+[Service]
+ExecStart="{exe}" --sock "{sock}"
+Restart=always
+RestartSec=1
+{env_lines}
+[Install]
+WantedBy=default.target
+"#
+    )
+}
+
+/// unit 檔落點：`$HOME/.config/systemd/user/<label>.service`（user 域，
+/// 不需 root）。顯式讀 HOME 優先（同 `plist_path` 的 14.7 老實教訓）。
+#[cfg(target_os = "linux")]
+fn unit_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)?;
+    Some(
+        home.join(".config/systemd/user")
+            .join(format!("{}.service", service_label())),
+    )
+}
+
+/// 組裝當前台應存在的 unit 內容（啟動與 Install 共用，單一真相源）。
+#[cfg(target_os = "linux")]
+fn desired_unit(exe: &Path, sock: Option<&str>) -> String {
+    let sock_path = match sock {
+        Some(s) => std::path::PathBuf::from(s),
+        None => linux_default_sock(),
+    };
+    render_unit(
+        &exe.display().to_string(),
+        &sock_path.display().to_string(),
+        std::env::var("BITWARD_DATA_DIR").ok().as_deref(),
+    )
+}
+
 /// 啟動自癒合判定（純函數，單測點）：現存內容與渲染模板**字串等值**才跳過；
 /// 未安裝（None）跳過（建立是 Install 的職責）；不同→觸發覆寫。不做 mtime。
 pub fn heal_needed(existing: Option<&str>, rendered: &str) -> bool {
@@ -142,6 +227,7 @@ pub fn heal_needed(existing: Option<&str>, rendered: &str) -> bool {
 /// 批次 14.7：全部輸入取自**啟動參數**（exe/group/sock/進程環境中的
 /// BITWARD_DATA_DIR），不讀 only-shell 變數——launchd 拉起端與安裝端
 /// 渲染同文才成立（env 會隨拉起者不同,argv 是穩定契約）。
+#[cfg(target_os = "macos")]
 fn desired_plist(exe: &Path, group: &str, sock: Option<&str>) -> String {
     let log = crate::default_data_dir().join("daemon.log");
     let sock = sock.unwrap_or(DEFAULT_SOCK);
@@ -160,27 +246,46 @@ fn desired_plist(exe: &Path, group: &str, sock: Option<&str>) -> String {
 /// 3. 本執行檔**不在 repo 構建目錄**（`/target/` 路徑＝開發二進位）——
 ///    批次 14.7 紀律：dev 實例絕不碰常駐註冊域（23:15 污染事故根因；
 ///    e2e 要測自癒合請用 BW_SERVICE_LABEL 獨立 label + 白名單旗）。
-/// 4. 本進程由 launchd 直屬（PPID==1）或持 dev 白名單旗——批次 14.9 實錄：
+/// 4. 本進程由服務管理器直屬扶正，或持 dev 白名單旗——批次 14.9 實錄：
 ///    從 terminal 手跑 `/Applications` 版帶自訂 `--sock /tmp/149e.sock`，
 ///    前兩條全過、把一次性探測參數當成真相源覆寫了註冊模板（幽靈參數
-///    頂掉常駐 13 分鐘）。只有「被 launchd 扶正的那個我」才有資格改註冊。
+///    頂掉常駐 13 分鐘）。只有「被管理器扶正的那個我」才有資格改註冊。
+///    macOS＝launchd 直屬（PPID==1）；Linux＝systemd user 拉起（環境帶
+///    `INVOCATION_ID`，terminal 手跑沒有——第四閘語意的等位對映）。
 pub fn should_self_heal(
     existing: Option<&str>,
     rendered: &str,
     exe: &str,
     allow_dev_binary: bool,
-    launched_by_launchd: bool,
+    launched_by_manager: bool,
 ) -> bool {
     let Some(e) = existing else { return false };
     heal_needed(Some(e), rendered)
         && e.contains(exe)
         && (allow_dev_binary || !exe.contains("/target/"))
-        && (allow_dev_binary || launched_by_launchd)
+        && (allow_dev_binary || launched_by_manager)
 }
 
-/// daemon 啟動自癒合（非 `service install` 路徑）：現存 plist 若與模板不符，
-/// 覆寫並派生重載子進程。回傳 Some(訊息) 表觸發。
+/// daemon 啟動自癒合（非 `service install` 路徑）：現存註冊檔（macOS plist／
+/// Linux systemd user unit）若與模板不符，覆寫並派生重載子進程。
+/// 回傳 Some(訊息) 表觸發。
 pub fn self_heal(group: Option<&str>, sock: Option<&str>) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    return self_heal_macos(group, sock);
+    #[cfg(target_os = "linux")]
+    {
+        let _ = group; // app-group 是 macOS 專有；Linux 註冊不含
+        self_heal_linux(sock)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (group, sock);
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn self_heal_macos(group: Option<&str>, sock: Option<&str>) -> Option<String> {
     let plist = plist_path()?;
     let existing = std::fs::read_to_string(&plist).ok()?; // 未安裝 → 跳過
     let exe = std::env::current_exe().ok()?;
@@ -212,11 +317,48 @@ pub fn self_heal(group: Option<&str>, sock: Option<&str>) -> Option<String> {
     ))
 }
 
+/// Linux 自癒合（同構合同：比對 unit 檔與模板、四閘判定、覆寫＋派重載子）。
+/// 第四閘輸入＝`INVOCATION_ID` 存在（只有被 systemd --user 扶正的進程有此欄，
+/// 語意對映 macOS 的 PPID==1；terminal 手跑一次性探測不得覆寫註冊）。
+#[cfg(target_os = "linux")]
+fn self_heal_linux(sock: Option<&str>) -> Option<String> {
+    let unit = unit_path()?;
+    let existing = std::fs::read_to_string(&unit).ok()?; // 未安裝 → 跳過
+    let exe = std::env::current_exe().ok()?;
+    let allow_dev = std::env::var("BW_SERVICE_ALLOW_DEV_HEAL").is_ok();
+    let under_manager = std::env::var_os("INVOCATION_ID").is_some();
+    let rendered = desired_unit(&exe, sock);
+    if !should_self_heal(
+        Some(&existing),
+        &rendered,
+        &exe.display().to_string(),
+        allow_dev,
+        under_manager,
+    ) {
+        return None;
+    }
+    std::fs::write(&unit, &rendered).ok()?;
+    let sentinel = crate::default_data_dir().join("self-heal.result");
+    let reloaded = if std::env::var("BW_SERVICE_NO_RELOAD").is_err() {
+        spawn_reload_linux(&sentinel);
+        "已覆寫並派生重載"
+    } else {
+        let _ = std::fs::write(&sentinel, "written-no-reload");
+        "已覆寫（NO_RELOAD:不派重載子）"
+    };
+    Some(format!(
+        "self-heal: {}.service 與模板不符，{reloaded}（結果哨兵：{}）",
+        service_label(),
+        sentinel.display()
+    ))
+}
+
 /// 派生重載子進程（批次 14.7 根治「bootout 殺父連坐、bootstrap 未落地」）：
 /// - `process_group(0)`：自立進程組，父被 bootout 群殺時不被連坐；
 /// - 睡 1 秒讓父完成啟動日誌；bootout（容忍未載入）；
 /// - bootstrap 失敗重試 3 次、間隔 2 秒（域拆除中的瞬時失敗可救回）；
 /// - 終態寫哨兵檔（ok/fail + launchctl print 覆核），供 e2e 與人工排障。
+#[cfg(target_os = "macos")]
 fn spawn_reload(plist: &Path, sentinel: &Path) {
     use std::os::unix::process::CommandExt;
     let target = bootstrap_target();
@@ -247,6 +389,27 @@ fi"#
 }
 
 pub fn run(
+    action: ServiceAction,
+    exe: PathBuf,
+    group: Option<&str>,
+    sock: Option<&str>,
+) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    return run_macos(action, exe, group, sock);
+    #[cfg(target_os = "linux")]
+    {
+        let _ = group; // app-group 是 macOS 專有
+        run_linux(action, exe, sock)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (action, exe, group, sock);
+        Err("service 自管僅支援 macOS（LaunchAgent）與 Linux（systemd user）".into())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos(
     action: ServiceAction,
     exe: PathBuf,
     group: Option<&str>,
@@ -295,6 +458,7 @@ pub fn run(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn launchctl(args: &[&str]) -> Result<(), String> {
     let out = Command::new("launchctl")
         .args(args)
@@ -305,6 +469,101 @@ fn launchctl(args: &[&str]) -> Result<(), String> {
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
+}
+
+/// systemd user 域包裝（等效 launchctl 對 gui/<uid> 的操作）。
+#[cfg(target_os = "linux")]
+fn systemctl(args: &[&str]) -> Result<(), String> {
+    let mut cmd = Command::new("systemctl");
+    cmd.arg("--user");
+    cmd.args(args);
+    let out = cmd.output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// Linux 註冊鏈：bootstrap/bootstrap 的等位＝write unit → daemon-reload →
+/// enable --now（RunAtLoad 語意在 `WantedBy=default.target`＋enable 符號連結）。
+/// 同吃 `BW_SERVICE_NO_BOOTSTRAP` e2e 出口（只驗渲染落檔、不碰真域）。
+#[cfg(target_os = "linux")]
+fn run_linux(action: ServiceAction, exe: PathBuf, sock: Option<&str>) -> Result<String, String> {
+    let unit = unit_path().ok_or("no home dir")?;
+    let label = service_label();
+    match action {
+        ServiceAction::Install => {
+            std::fs::create_dir_all(unit.parent().unwrap()).map_err(|e| e.to_string())?;
+            let text = desired_unit(&exe, sock);
+            std::fs::write(&unit, text).map_err(|e| e.to_string())?;
+            if std::env::var("BW_SERVICE_NO_BOOTSTRAP").is_ok() {
+                return Ok(format!(
+                    "installed {label} <- {} (no-bootstrap)",
+                    exe.display()
+                ));
+            }
+            // 重裝語意：先 disable --now（容忍未載入）再覆寫重載。
+            let _ = systemctl(&["disable", "--now", &label]);
+            systemctl(&["daemon-reload"])?;
+            systemctl(&["enable", "--now", &label])?;
+            Ok(format!("installed {label} <- {}", exe.display()))
+        }
+        ServiceAction::Uninstall => {
+            let _ = systemctl(&["disable", "--now", &label]);
+            let _ = std::fs::remove_file(&unit);
+            let _ = systemctl(&["daemon-reload"]);
+            Ok(format!("uninstalled {label}"))
+        }
+        ServiceAction::Status => {
+            let out = Command::new("systemctl")
+                .args(["--user", "is-active", &label])
+                .output()
+                .map_err(|e| e.to_string())?;
+            Ok(if out.status.success() {
+                "enabled"
+            } else {
+                "not-registered"
+            }
+            .into())
+        }
+    }
+}
+
+/// Linux 重載子：必經 `systemd-run --user` 把腳本搬到**本 unit cgroup 之外**
+/// （restart 掃 cgroup 時會連坐殺掉普通子進程，process_group 在此無效——
+/// 與 macOS 14.7 教訓同構但機制不同，哨兵必寫成才有 e2e 覆核點）。
+/// systemd-run 缺席（非 systemd 環境）退回直派 sh，哨兵可能隨掃蕩失落。
+#[cfg(target_os = "linux")]
+fn spawn_reload_linux(sentinel: &Path) {
+    let label = service_label();
+    let s = sentinel.display().to_string();
+    let script = format!(
+        r#"sleep 1
+systemctl --user daemon-reload
+systemctl --user restart {label}
+if systemctl --user is-active --quiet {label}; then
+    echo ok > "{s}"
+else
+    echo fail > "{s}"
+fi"#
+    );
+    let run = Command::new("systemd-run")
+        .args(["--user", "--collect", "--quiet", "/bin/sh", "-c", &script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    if run.is_ok() {
+        return;
+    }
+    let _ = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
 }
 
 #[cfg(test)]
@@ -331,6 +590,49 @@ mod tests {
         assert!(b.contains("<key>BITWARD_DATA_DIR</key>\n        <string>/tmp/vault</string>"));
         // 兩態都是合法可解析形態的骨架（含 Label/exe/group）。
         assert!(a.contains(EXE) && a.contains(GROUP) && a.contains(LABEL));
+    }
+
+    #[test]
+    fn render_unit_golden_and_heal_contract() {
+        // PR6-E1：systemd user unit 渲染金標＋自癒合比較（仿 plist 測）。
+        let exe = "/home/u/.local/bin/bitwarderd";
+        let sock = "/run/user/501/bitward/daemon.sock";
+        let a = render_unit(exe, sock, None);
+        let b = render_unit(exe, sock, None);
+        assert_eq!(a, b, "同輸入必字串等值（自癒合比較靠這）");
+        assert!(
+            a.contains(&format!("ExecStart=\"{exe}\" --sock \"{sock}\"")),
+            "sock 必入 ExecStart argv（穩定契約）：{a}"
+        );
+        assert!(a.contains("Restart=always") && a.contains("RestartSec=1"));
+        assert!(a.contains("WantedBy=default.target"));
+        assert!(a.contains(LABEL), "unit 內文含 label 供狀態判定");
+        assert!(
+            !a.contains("BW_KEYS_ENABLE_KEYCHAIN"),
+            "Keychain 開關是 macOS 專有，不入 unit"
+        );
+        let with_dd = render_unit(exe, sock, Some("/srv/vault"));
+        assert!(with_dd.contains("Environment=BITWARD_DATA_DIR=\"/srv/vault\""));
+        assert!(
+            !a.contains("BITWARD_DATA_DIR"),
+            "無 data_dir 環境不應寫入該鍵"
+        );
+        // 自癒合判定對 unit 同形：同文跳過、異文觸發、launchd 直屬對映 manager 旗。
+        assert!(!heal_needed(Some(&a), &render_unit(exe, sock, None)));
+        let stale = a.replace("RestartSec=1", "RestartSec=5");
+        assert!(heal_needed(Some(&stale), &a));
+        assert!(should_self_heal(Some(&stale), &a, exe, false, true));
+        assert!(!should_self_heal(Some(&stale), &a, exe, false, false));
+        // dev 二進位閘同構：/target/ 路徑預設跳過。
+        let dev = render_unit("/repo/target/debug/bitwarderd", sock, None);
+        let dev_stale = dev.replace("RestartSec=1", "RestartSec=5");
+        assert!(!should_self_heal(
+            Some(&dev_stale),
+            &dev,
+            "/repo/target/debug/bitwarderd",
+            false,
+            true
+        ));
     }
 
     #[test]

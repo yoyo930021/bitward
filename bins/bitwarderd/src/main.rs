@@ -34,7 +34,8 @@ struct Args {
     /// 資料目錄（vault.db、keys/、account.json）
     #[arg(long)]
     data_dir: Option<PathBuf>,
-    /// BTP unix socket 路徑（預設 <data_dir>/daemon.sock）
+    /// BTP unix socket 路徑（macOS 預設 <data_dir>/daemon.sock；Linux 預設
+    /// $XDG_RUNTIME_DIR/bitward/daemon.sock，Q3 裁決）
     #[arg(long)]
     sock: Option<PathBuf>,
     /// 跨機 BTP over TLS 監聽位址（self-signed，pin 由 pair start 顯示）
@@ -61,9 +62,21 @@ struct Args {
     /// macOS：在 app group 容器內多綁一個 BTP socket（provider extension 用）
     #[arg(long)]
     push_app_group: Option<String>,
-    /// macOS：LaunchAgent 自管（非沙盒進程才有權限寫 LaunchAgents + launchctl）
+    /// macOS：LaunchAgent 自管（非沙盒進程才有權限寫 LaunchAgents + launchctl）；
+    /// Linux：systemd user unit 自管（`~/.config/systemd/user` + systemctl --user）
     #[arg(long, value_enum)]
     service: Option<service::ServiceAction>,
+}
+
+/// 預設 BTP socket（Q3 裁決 2026-11-16：Linux＝`$XDG_RUNTIME_DIR/bitward/daemon.sock`
+/// 主、`<data_dir>/daemon.sock` 退（XDG 缺席時）；macOS 維持 data_dir 不動常駐域）。
+/// 純函數便單測；env 讀取在呼叫端。
+#[cfg(target_os = "linux")]
+fn pick_default_sock(xdg_runtime_dir: Option<&str>, data_dir: &std::path::Path) -> PathBuf {
+    match xdg_runtime_dir {
+        Some(d) if !d.is_empty() => std::path::Path::new(d).join("bitward").join("daemon.sock"),
+        _ => data_dir.join("daemon.sock"),
+    }
 }
 
 pub(crate) fn default_data_dir() -> PathBuf {
@@ -285,6 +298,11 @@ async fn main() -> Result<(), String> {
         tracing::warn!("{msg}");
     }
     let data_dir = args.data_dir.unwrap_or_else(default_data_dir);
+    #[cfg(target_os = "linux")]
+    let sock = args.sock.unwrap_or_else(|| {
+        pick_default_sock(std::env::var("XDG_RUNTIME_DIR").ok().as_deref(), &data_dir)
+    });
+    #[cfg(not(target_os = "linux"))]
     let sock = args.sock.unwrap_or_else(|| data_dir.join("daemon.sock"));
     std::fs::create_dir_all(data_dir.join("run")).map_err(|e| e.to_string())?;
     // APNs：四參齊備才啟用；給部分 → 警告降級 None（ntfy 通道不受影響）。
@@ -808,5 +826,20 @@ mod sock_tests {
         assert!(!super::sock_has_live_listener(std::path::Path::new(
             "/nonexistent-bw-probe/x.sock"
         )));
+    }
+
+    /// Q3 裁決（Linux）：XDG_RUNTIME_DIR 主、data_dir 退；macOS 走原路徑不測此函數。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn default_sock_prefers_xdg_runtime_dir() {
+        use super::pick_default_sock;
+        let dd = std::path::Path::new("/home/u/.local/share/bitward");
+        assert_eq!(
+            pick_default_sock(Some("/run/user/1000"), dd),
+            std::path::Path::new("/run/user/1000/bitward/daemon.sock")
+        );
+        // 未設或空字串＝退 data_dir（與既有 <data_dir>/daemon.sock 契約接軌）。
+        assert_eq!(pick_default_sock(None, dd), dd.join("daemon.sock"));
+        assert_eq!(pick_default_sock(Some(""), dd), dd.join("daemon.sock"));
     }
 }

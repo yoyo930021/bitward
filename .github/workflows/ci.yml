@@ -41,6 +41,18 @@ jobs:
           BITWARD_E2E_SERVER: http://localhost:8080
         run: cargo nextest run -p bw-server --features e2e
 
+  # PR6-E1：Linux 全 workspace（Q3/systemd 落地後，crates/bins 必須在 Linux 全綠；
+  # 之前 Linux 只驗 bw-server＋選定 e2e，bw-keys/bw-store/bw-agent 單測從未上過 Linux）。
+  linux-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo nextest run --workspace
+
   deny:
     runs-on: ubuntu-latest
     steps:

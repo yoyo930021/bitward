@@ -1,0 +1,18 @@
+# bitwarderd systemd user unit 參考模板（PR6-E1）。
+# 真相源是 `bins/bitwarderd/src/service.rs` 的 `render_unit`（純函數、單測釘選）；
+# 本檔供人讀與打包隨附，`bitwarderd --service install` 落檔時由渲染器生成，
+# 請勿手改常駐註冊（自癒合會覆寫回模板）。
+# 語意對映 macOS LaunchAgent：Restart=always+RestartSec=1 ⇔ KeepAlive+ThrottleInterval、
+# WantedBy=default.target ⇔ RunAtLoad、journald ⇔ StandardOutPath。
+# sock 默認按 Q3 裁決＝$XDG_RUNTIME_DIR/bitward/daemon.sock。
+
+[Unit]
+Description=bitward hub daemon (io.bitward.dev.daemon)
+
+[Service]
+ExecStart="/home/USER/.local/bin/bitwarderd" --sock "/run/user/UID/bitward/daemon.sock"
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=default.target

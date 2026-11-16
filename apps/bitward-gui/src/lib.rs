@@ -39,7 +39,8 @@ use bw_proto::UnlockStateView;
 use state::{AppCore, Cmd, FolderEntry, Phase, Route};
 
 /// 連線參數解析順序：`--sock <path>` > `BITWARD_GUI_SOCK` >
-/// `$BITWARD_DATA_DIR/daemon.sock` > 平台資料目錄（`<datadir>/bitward/daemon.sock`）。
+/// `$BITWARD_DATA_DIR/daemon.sock` > Linux 走 Q3 裁決（`$XDG_RUNTIME_DIR/bitward/daemon.sock`
+/// 主、不存在且平台資料目錄退路在場才退）> 平台資料目錄（`<datadir>/bitward/daemon.sock`）。
 pub fn sock_path() -> PathBuf {
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--sock")
@@ -53,7 +54,20 @@ pub fn sock_path() -> PathBuf {
     if let Ok(d) = std::env::var("BITWARD_DATA_DIR") {
         return PathBuf::from(d).join("daemon.sock");
     }
-    platform_data_dir().join("bitward").join("daemon.sock")
+    let fallback = platform_data_dir().join("bitward").join("daemon.sock");
+    #[cfg(target_os = "linux")]
+    if let Some(rt) = std::env::var_os("XDG_RUNTIME_DIR") {
+        if !rt.is_empty() {
+            let main = std::path::Path::new(&rt)
+                .join("bitward")
+                .join("daemon.sock");
+            if main.exists() || !fallback.exists() {
+                return main;
+            }
+            return fallback;
+        }
+    }
+    fallback
 }
 
 #[cfg(target_os = "macos")]
