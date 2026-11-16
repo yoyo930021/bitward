@@ -382,6 +382,9 @@ pub enum Auth {
     },
 }
 
+// 線型枚舉：變體尺寸差是協議形態本質（大載體變體 vs 空變體）；
+// 裝箱＝每幀多一次分配＋全庫 match 改寫，得不償失。lint 明拒。
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Call {
     Auth(AuthCall),
@@ -494,6 +497,9 @@ pub enum SortKey {
     Used,
 }
 
+// 線型枚舉：變體尺寸差是協議形態本質（大載體變體 vs 空變體）；
+// 裝箱＝每幀多一次分配＋全庫 match 改寫，得不償失。lint 明拒。
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum VaultCall {
     List {
@@ -1619,6 +1625,9 @@ pub enum AdminCall {
     SetSettings(Settings),
 }
 
+// 線型枚舉：變體尺寸差是協議形態本質（大載體變體 vs 空變體）；
+// 裝箱＝每幀多一次分配＋全庫 match 改寫，得不償失。lint 明拒。
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientMsg {
     Hello {

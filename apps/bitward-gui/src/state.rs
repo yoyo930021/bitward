@@ -4301,6 +4301,7 @@ pub fn form_is_dirty_sections(
 
 /// 不帶型別節的舊簽名（單測與非節表單路徑用；語意＝sections 恆 None）。
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)] // 僅單測消費（lib 面髒判定走 form_is_dirty_sections）；mac/linux 兩式 clippy 實錄。
 pub fn form_is_dirty(
     orig: Option<&FormOriginal>,
     name: &str,

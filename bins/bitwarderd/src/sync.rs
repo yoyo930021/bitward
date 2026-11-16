@@ -520,19 +520,19 @@ impl Hub {
                     && draft.kind == bw_proto::ItemKind::Card
                 {
                     c["card"] = json!({
-                        "cardholderName": card.cardholder_name.as_deref().filter(|s| !s.is_empty()).map(&enc),
-                        "brand": card.brand.as_deref().filter(|s| !s.is_empty()).map(&enc),
-                        "number": card.number.as_deref().filter(|s| !s.is_empty()).map(&enc),
-                        "expMonth": card.exp_month.as_deref().filter(|s| !s.is_empty()).map(&enc),
-                        "expYear": card.exp_year.as_deref().filter(|s| !s.is_empty()).map(&enc),
-                        "code": card.code.as_deref().filter(|s| !s.is_empty()).map(&enc),
+                        "cardholderName": card.cardholder_name.as_deref().filter(|s| !s.is_empty()).map(enc),
+                        "brand": card.brand.as_deref().filter(|s| !s.is_empty()).map(enc),
+                        "number": card.number.as_deref().filter(|s| !s.is_empty()).map(enc),
+                        "expMonth": card.exp_month.as_deref().filter(|s| !s.is_empty()).map(enc),
+                        "expYear": card.exp_year.as_deref().filter(|s| !s.is_empty()).map(enc),
+                        "code": card.code.as_deref().filter(|s| !s.is_empty()).map(enc),
                     });
                 }
                 if let Some(idn) = &draft.identity
                     && draft.kind == bw_proto::ItemKind::Identity
                 {
                     let f = |v: &Option<String>| {
-                        v.as_deref().filter(|s| !s.is_empty()).map(&enc)
+                        v.as_deref().filter(|s| !s.is_empty()).map(enc)
                     };
                     c["identity"] = json!({
                         "title": f(&idn.title),
