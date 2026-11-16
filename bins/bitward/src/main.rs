@@ -321,6 +321,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: PairCmd,
     },
+    /// 跨機 hub 編組（§1.1 thin 端視圖）：清單/健康/預設/failover
+    Hub {
+        #[command(subcommand)]
+        cmd: HubCmd,
+    },
     /// e2e/開發用：向（自架）server 註冊新帳號，不寫入 daemon 狀態
     #[command(hide = true)]
     DevRegister {
@@ -590,7 +595,8 @@ enum PairCmd {
     },
     /// thin 端：用配對碼換長期 device token
     Join {
-        /// https://host:port
+        /// 目標 host[:port]（`https://` 前綴可省、port 缺=8443；
+        /// tailnet 磁標由系統/MagicDNS 解析，E4）
         #[arg(long)]
         url: String,
         #[arg(long)]
@@ -609,6 +615,91 @@ enum PairCmd {
     Revoke {
         code: String,
     },
+}
+
+#[derive(Subcommand)]
+enum HubCmd {
+    /// 列已配對 hub（profile、url、預設標記、last_seen）；--probe 實測可達性
+    Ls {
+        #[arg(long)]
+        probe: bool,
+    },
+    /// 設預設 hub（本地 daemon 不可達時的 failover 目標；`none` 清除）
+    Default {
+        /// profile 名稱（`pair join --profile` 建立）或 `none`
+        profile: String,
+    },
+}
+
+/// 預設 hub 指標檔（remotes/ 下的 dotfile：不帶 .json 後綴，天然不進清單）。
+const DEFAULT_HUB_FILE: &str = ".default";
+
+fn read_default_hub(data_dir: &Path) -> Option<String> {
+    let s = std::fs::read_to_string(data_dir.join("remotes").join(DEFAULT_HUB_FILE)).ok()?;
+    let t = s.trim().to_owned();
+    (!t.is_empty()).then_some(t)
+}
+
+fn list_hub_profiles(data_dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(data_dir.join("remotes"))
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.strip_suffix(".json").map(str::to_owned)
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+fn hub_last_seen(data_dir: &Path, profile: &str) -> Option<u64> {
+    std::fs::read_to_string(data_dir.join(format!("remote_{profile}_last_ok")))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// failover 決策（純函數，單測點）：明示 --remote 直接走之；本地可達走本地；
+/// 本地不可達且有預設 hub→Failover；無預設→NoHub（原錯照報＝「明確指令提示」語意）。
+#[derive(Debug, PartialEq, Eq)]
+enum HubRoute {
+    Local,
+    Remote(String),
+    Failover(String),
+    NoHub,
+}
+
+fn route_hub(requested: Option<&str>, local_ok: bool, default_hub: Option<String>) -> HubRoute {
+    if let Some(p) = requested {
+        return HubRoute::Remote(p.to_owned());
+    }
+    if local_ok {
+        return HubRoute::Local;
+    }
+    match default_hub {
+        Some(d) => HubRoute::Failover(d),
+        None => HubRoute::NoHub,
+    }
+}
+
+/// 預設 hub 亦失聯時的換 hub 提示（純函數，單測點；Lane 5 的可懂終態）。
+fn failover_hint(default: &str, others: &[String]) -> String {
+    let rest: Vec<&str> = others
+        .iter()
+        .map(String::as_str)
+        .filter(|o| *o != default)
+        .collect();
+    if rest.is_empty() {
+        return "無其他已配對 hub（`bitward pair join` 建立，或 `bitward hub default none` 回本地）".into();
+    }
+    format!(
+        "其他可用 hub：{}（`bitward hub default <name>` 切預設、`--remote <name>` 單次指定）",
+        rest.join(", ")
+    )
 }
 
 #[derive(Subcommand)]
@@ -794,15 +885,32 @@ async fn run() -> Result<(), String> {
     {
         return pair_join(&args, &data_dir).await;
     }
+    if let Cmd::Hub { cmd } = &args.cmd {
+        return hub_cmd(cmd, &data_dir, args.json).await;
+    }
     let sock = args.sock.clone().unwrap_or_else(|| default_sock(&data_dir));
     let (mut rd, mut wr): (
         Box<dyn tokio::io::AsyncRead + Unpin + Send>,
         Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
     ) = match &args.remote {
-        None => {
-            let (r, w) = open_session(&sock, &data_dir).await?;
-            (Box::new(r), Box::new(w))
-        }
+        None => match open_session(&sock, &data_dir).await {
+            Ok((r, w)) => (Box::new(r), Box::new(w)),
+            Err(le) => {
+                // 編組 failover（§1.1）：本地中樞不可達且設了預設 hub→改用預設並
+                // 留可懂提示；預設也失聯→HubOffline＋換 hub 指引（Lane 5 終態）。
+                match route_hub(None, false, read_default_hub(&data_dir)) {
+                    HubRoute::Failover(d) => {
+                        eprintln!(
+                            "warning: 本地 daemon 不可達（{le}）；改用預設 hub「{d}」（bitward hub default none 關閉此行為）"
+                        );
+                        open_remote(&d, &data_dir).await.map_err(|e| {
+                            format!("{e}；{}", failover_hint(&d, &list_hub_profiles(&data_dir)))
+                        })?
+                    }
+                    _ => return Err(le),
+                }
+            }
+        },
         Some(profile) => open_remote(profile, &data_dir).await?,
     };
 
@@ -1008,18 +1116,60 @@ struct RemoteProfile {
     wake: Option<String>,
 }
 
+/// 配對目標默認 port（E4：tailnet 磁標只給 hostname 時用；daemon `--listen` 建議綁此）。
+const DEFAULT_PAIR_PORT: u16 = 8443;
+
+/// 目標解析（E4）：吃 `https://host:port`、`host:port`、裸 `host`（磁標→默認 port）。
+/// IPv6 字面量不支援（配對目標實務為 DNS/tailnet 名）；不引入新傳輸。
 fn split_url(url: &str) -> Result<(String, u16), String> {
-    let rest = url
-        .strip_prefix("https://")
-        .ok_or_else(|| "需要 https://".to_string())?;
-    let (host, port) = rest
-        .rsplit_once(':')
-        .ok_or_else(|| "需要 :port".to_string())?;
-    Ok((
-        host.to_string(),
-        port.parse::<u16>()
-            .map_err(|e: std::num::ParseIntError| e.to_string())?,
-    ))
+    let rest = url.strip_prefix("https://").unwrap_or(url);
+    if rest.is_empty() || rest.contains('/') {
+        return Err("目標形態應為 host[:port]（不含 path）".into());
+    }
+    match rest.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() => Ok((
+            h.to_owned(),
+            p.parse::<u16>()
+                .map_err(|e: std::num::ParseIntError| format!("port 非法：{e}"))?,
+        )),
+        Some(_) => Err("port 前缺 host".into()),
+        None => Ok((rest.to_owned(), DEFAULT_PAIR_PORT)),
+    }
+}
+
+/// 100.64.0.0/10＝Tailscale CGNAT 段（RFC 6598）：tailnet 磁標解析落此段即經隧道。
+fn is_tailscale_addr(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            o[0] == 100 && (o[1] & 0xC0) == 0x40
+        }
+        _ => false,
+    }
+}
+
+/// 配對目標 hostname→IP 注記（解析交系統/MagicDNS）；純診斷面，失敗不擋連線。
+async fn note_target(host: &str, port: u16) {
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return; // 已是數值位址，無需解析注記
+    }
+    match tokio::net::lookup_host((host, port)).await {
+        Ok(addrs) => {
+            let addrs: Vec<_> = addrs.collect();
+            match addrs.first() {
+                Some(sa) => {
+                    let tag = if is_tailscale_addr(&sa.ip()) {
+                        "（Tailscale）"
+                    } else {
+                        ""
+                    };
+                    eprintln!("note: {host} → {}{tag}", sa.ip());
+                }
+                None => eprintln!("note: {host} 無解析結果"),
+            }
+        }
+        Err(e) => eprintln!("note: {host} 解析失敗：{e}"),
+    }
 }
 
 async fn pair_join(args: &Args, data_dir: &Path) -> Result<(), String> {
@@ -1038,6 +1188,7 @@ async fn pair_join(args: &Args, data_dir: &Path) -> Result<(), String> {
         unreachable!()
     };
     let (host, port) = split_url(url)?;
+    note_target(&host, port).await;
     let stream = bw_btp::tls::connect(&host, port, pin)
         .await
         .map_err(|e| format!("TLS 連線失敗（pin 正確？）：{e}"))?;
@@ -1067,7 +1218,8 @@ async fn pair_join(args: &Args, data_dir: &Path) -> Result<(), String> {
     let dir = data_dir.join("remotes");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let prof = RemoteProfile {
-        url: url.clone(),
+        // 落檔一律正規形態（磁標/缺 port 輸入在連線端已解析）
+        url: format!("https://{host}:{port}"),
         pin: pin.clone(),
         token: fresh,
         wake: wake.clone(),
@@ -1080,6 +1232,118 @@ async fn pair_join(args: &Args, data_dir: &Path) -> Result<(), String> {
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
     println!("paired → --remote {profile} ({})", path.display());
+    Ok(())
+}
+
+async fn probe_tcp(url: &str) -> &'static str {
+    let Ok((host, port)) = split_url(url) else {
+        return "bad-url";
+    };
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(1000),
+        tokio::net::TcpStream::connect((host.as_str(), port)),
+    )
+    .await
+    {
+        Ok(Ok(_)) => "online",
+        Ok(Err(_)) => "offline",
+        Err(_) => "timeout",
+    }
+}
+
+async fn probe_local(sock: &Path) -> &'static str {
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        tokio::net::UnixStream::connect(sock),
+    )
+    .await
+    {
+        Ok(Ok(_)) => "online",
+        _ => "offline",
+    }
+}
+
+/// `hub ls`/`hub default`：純本機檔案操作（registry＝remotes/ 目錄＋.default 指標），
+/// 不連任何 daemon——本地中樞缺席時仍要能用來修 failover 設定。
+async fn hub_cmd(cmd: &HubCmd, data_dir: &Path, json: bool) -> Result<(), String> {
+    match cmd {
+        HubCmd::Ls { probe } => {
+            let default = read_default_hub(data_dir);
+            let mut rows = Vec::new();
+            let local_sock = default_sock(data_dir);
+            let local_health = if *probe {
+                probe_local(&local_sock).await
+            } else {
+                "-"
+            };
+            rows.push(serde_json::json!({
+                "name": "(local)", "url": local_sock.display().to_string(),
+                "default": false, "last_seen": null, "probe": local_health,
+            }));
+            for p in list_hub_profiles(data_dir) {
+                let path = data_dir.join("remotes").join(format!("{p}.json"));
+                let prof: RemoteProfile =
+                    serde_json::from_slice(&std::fs::read(&path).map_err(|e| format!("{p}: {e}"))?)
+                        .map_err(|e| format!("{p}.json 形態不合：{e}"))?;
+                let seen = hub_last_seen(data_dir, &p);
+                let health = if *probe {
+                    probe_tcp(&prof.url).await
+                } else {
+                    "-"
+                };
+                rows.push(serde_json::json!({
+                    "name": p, "url": prof.url,
+                    "default": default.as_deref() == Some(p.as_str()),
+                    "last_seen": seen, "probe": health,
+                }));
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rows).unwrap());
+                return Ok(());
+            }
+            for r in &rows {
+                let seen = match r["last_seen"].as_u64() {
+                    Some(ms) => format!("{}s ago", chrono_now_ms().saturating_sub(ms) / 1000),
+                    None => "never".into(),
+                };
+                let star = if r["default"].as_bool().unwrap_or(false) {
+                    "*"
+                } else {
+                    ""
+                };
+                println!(
+                    "{:<12} {:<44} {:<8} {:<14} {}",
+                    r["name"].as_str().unwrap_or("?"),
+                    r["url"].as_str().unwrap_or("?"),
+                    star,
+                    seen,
+                    r["probe"].as_str().unwrap_or("-")
+                );
+            }
+            if default.is_none() {
+                eprintln!(
+                    "hint: 未設預設 hub（`bitward hub default <name>` 開啟本地不可達時的 failover）"
+                );
+            }
+        }
+        HubCmd::Default { profile } => {
+            let f = data_dir.join("remotes").join(DEFAULT_HUB_FILE);
+            if profile == "none" {
+                let _ = std::fs::remove_file(&f);
+                println!("已清除預設 hub（failover 關閉，本地 daemon 不可達即報錯）");
+            } else {
+                if !list_hub_profiles(data_dir).iter().any(|p| p == profile) {
+                    return Err(format!(
+                        "沒有 hub profile「{profile}」（bitward hub ls 列清單；bitward pair join 建立）"
+                    ));
+                }
+                std::fs::write(&f, profile).map_err(|e| e.to_string())?;
+                println!(
+                    "預設 hub＝{profile}（本地 daemon 不可達時自動改用；bitward hub default none 清除）"
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1599,6 +1863,7 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             PairCmd::Revoke { code } => Call::Auth(AuthCall::PairRevoke { code: code.clone() }),
             PairCmd::Join { .. } => unreachable!("join 不經 daemon 分派"),
         },
+        Cmd::Hub { .. } => unreachable!("hub 純本機，run() 提前返回"),
         Cmd::SignOut => Call::Auth(AuthCall::SignOut),
         Cmd::Attach { cmd } => match cmd {
             AttachCmd::Add { item, path } => {
@@ -2630,5 +2895,106 @@ mod sock_default_tests {
         assert_eq!(pick_cli_sock(Some(rt.to_str().unwrap()), &dd), main);
         std::fs::remove_dir_all(rt).ok();
         std::fs::remove_dir_all(dd).ok();
+    }
+}
+
+#[cfg(test)]
+mod hub_tests {
+    use super::*;
+
+    fn tmpdd(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("bw-hub-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("remotes")).unwrap();
+        d
+    }
+
+    #[test]
+    fn route_hub_table() {
+        // 明示 --remote 永遠贏；本地可達走本地；不可達有預設→Failover；無預設→NoHub。
+        assert_eq!(
+            route_hub(Some("desk"), true, Some("home".into())),
+            HubRoute::Remote("desk".into())
+        );
+        assert_eq!(route_hub(None, true, Some("home".into())), HubRoute::Local);
+        assert_eq!(
+            route_hub(None, false, Some("home".into())),
+            HubRoute::Failover("home".into())
+        );
+        assert_eq!(route_hub(None, false, None), HubRoute::NoHub);
+    }
+
+    #[test]
+    fn failover_hint_lists_alternatives() {
+        let others: Vec<String> = ["home", "desk"].iter().map(|s| s.to_string()).collect();
+        let h = failover_hint("home", &others);
+        assert_eq!(
+            h,
+            "其他可用 hub：desk（`bitward hub default <name>` 切預設、`--remote <name>` 單次指定）"
+        );
+        assert!(failover_hint("home", &["home".to_string()]).contains("無其他已配對 hub"));
+    }
+
+    #[test]
+    fn default_file_roundtrip_and_list_excludes_it() {
+        let d = tmpdd("rt");
+        let prof = |name: &str| RemoteProfile {
+            url: format!("https://{name}:8443"),
+            pin: "AA".into(),
+            token: "t".into(),
+            wake: None,
+        };
+        for n in ["home", "desk"] {
+            std::fs::write(
+                d.join("remotes").join(format!("{n}.json")),
+                serde_json::to_vec(&prof(n)).unwrap(),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            list_hub_profiles(&d),
+            vec!["desk".to_string(), "home".to_string()]
+        );
+        assert_eq!(read_default_hub(&d), None);
+        std::fs::write(d.join("remotes").join(DEFAULT_HUB_FILE), "home\n").unwrap();
+        assert_eq!(read_default_hub(&d).as_deref(), Some("home"));
+        // dotfile 不入清單（profile 名與指標檔零撞名）
+        assert_eq!(list_hub_profiles(&d).len(), 2);
+        // 空指標＝None（清除語意的落盤態）
+        std::fs::write(d.join("remotes").join(DEFAULT_HUB_FILE), "").unwrap();
+        assert_eq!(read_default_hub(&d), None);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn split_url_forms_golden() {
+        // E4：三形態＋錯誤路徑。
+        assert_eq!(
+            split_url("https://hub.tailnet:8443").unwrap(),
+            ("hub.tailnet".into(), 8443)
+        );
+        assert_eq!(
+            split_url("hub.tailnet:9000").unwrap(),
+            ("hub.tailnet".into(), 9000)
+        );
+        assert_eq!(
+            split_url("hub.tailnet").unwrap(),
+            ("hub.tailnet".into(), DEFAULT_PAIR_PORT)
+        );
+        assert!(split_url("").is_err());
+        assert!(split_url("https://").is_err());
+        assert!(split_url("hub.tailnet:port").is_err());
+        assert!(split_url("hub.tailnet:8443/pair").is_err());
+    }
+
+    #[test]
+    fn tailscale_cgnat_range_classify() {
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        assert!(is_tailscale_addr(&ip("100.64.0.1")));
+        assert!(is_tailscale_addr(&ip("100.127.255.255")));
+        assert!(!is_tailscale_addr(&ip("100.128.0.0")));
+        assert!(!is_tailscale_addr(&ip("10.0.0.1")));
+        assert!(!is_tailscale_addr(&ip("127.0.0.1")));
+        assert!(!is_tailscale_addr(&ip("fd7a:115c:a1e0::1")));
     }
 }
