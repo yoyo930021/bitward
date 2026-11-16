@@ -347,9 +347,11 @@ impl Store {
     pub fn send(&self, id: ItemId) -> StoreResult<Option<Value>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let raw = conn
-            .query_row("SELECT raw FROM sends WHERE id = ?1", [id.to_string()], |r| {
-                r.get::<_, Vec<u8>>(0)
-            })
+            .query_row(
+                "SELECT raw FROM sends WHERE id = ?1",
+                [id.to_string()],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
             .optional()?;
         raw.map(|b| serde_json::from_slice(&b).map_err(Into::into))
             .transpose()
@@ -586,7 +588,10 @@ fn write_cipher_collections(conn: &rusqlite::Connection, id: ItemId, c: &Value) 
 /// 先刪該 cipher 的舊列再依伺服器原樣插入。官方形態是 map（key=id）；
 /// 寬容 array 形態（部分 server 變體）。欄位值一律原樣存（信封/明文不判斷）。
 fn write_cipher_attachments(conn: &rusqlite::Connection, id: ItemId, c: &Value) -> StoreResult<()> {
-    conn.execute("DELETE FROM attachments WHERE cipher = ?1", [id.to_string()])?;
+    conn.execute(
+        "DELETE FROM attachments WHERE cipher = ?1",
+        [id.to_string()],
+    )?;
     let empty = Vec::new();
     let list: Vec<&Value> = match c.get("attachments") {
         Some(Value::Object(m)) => m.values().collect(),

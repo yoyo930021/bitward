@@ -81,7 +81,10 @@ impl Mock {
                     && status == 200
                     && auths != ["bearer new.token".to_owned()]
                 {
-                    (401, "{\"message\":\"stale or duplicated bearer\"}".to_owned())
+                    (
+                        401,
+                        "{\"message\":\"stale or duplicated bearer\"}".to_owned(),
+                    )
                 } else {
                     (status, resp_body)
                 };
@@ -112,20 +115,19 @@ impl Mock {
 
 const OK_SYNC: &str =
     "{\"profile\":{},\"ciphers\":[],\"folders\":[],\"collections\":[],\"organizations\":[]}";
-const TOKEN_NEW: &str =
-    "{\"access_token\":\"NEW.TOKEN\",\"refresh_token\":\"R2\",\"expires_in\":7200,\"token_type\":\"Bearer\"}";
+const TOKEN_NEW: &str = "{\"access_token\":\"NEW.TOKEN\",\"refresh_token\":\"R2\",\"expires_in\":7200,\"token_type\":\"Bearer\"}";
 
 #[tokio::test]
 async fn forty_one_renews_once_and_retries() {
     let mock = Mock::spawn(vec![
         (
             "/api/sync",
-            vec![(401, "{\"message\":\"expired\"}".into()), (200, OK_SYNC.into())],
+            vec![
+                (401, "{\"message\":\"expired\"}".into()),
+                (200, OK_SYNC.into()),
+            ],
         ),
-        (
-            "/identity/connect/token",
-            vec![(200, TOKEN_NEW.into())],
-        ),
+        ("/identity/connect/token", vec![(200, TOKEN_NEW.into())]),
     ]);
     let client = Client::new(&mock.base()).unwrap();
     client.set_access_token("OLD.TOKEN").await;
@@ -133,7 +135,10 @@ async fn forty_one_renews_once_and_retries() {
     let seen = Arc::new(Mutex::new(Vec::<(String, Option<String>)>::new()));
     let seen2 = seen.clone();
     client.set_token_sink(Arc::new(move |a, r| {
-        seen2.lock().unwrap().push((a.to_owned(), r.map(str::to_owned)));
+        seen2
+            .lock()
+            .unwrap()
+            .push((a.to_owned(), r.map(str::to_owned)));
     }));
 
     let sync = client.sync().await;
@@ -187,10 +192,7 @@ async fn concurrent_forty_ones_share_single_refresh() {
                 (200, OK_SYNC.into()),
             ],
         ),
-        (
-            "/identity/connect/token",
-            vec![(200, TOKEN_NEW.into())],
-        ),
+        ("/identity/connect/token", vec![(200, TOKEN_NEW.into())]),
     ]);
     let client = Arc::new(Client::new(&mock.base()).unwrap());
     client.set_access_token("OLD").await;

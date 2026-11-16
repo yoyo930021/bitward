@@ -138,7 +138,8 @@ impl Store {
     /// 全部註冊 token（(token, platform)，按註冊時間升序）；副發與清單出口共用。
     pub fn push_token_list(&self) -> StoreResult<Vec<(String, String)>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
-        let mut stmt = conn.prepare("SELECT token, platform FROM push_tokens ORDER BY registered_at")?;
+        let mut stmt =
+            conn.prepare("SELECT token, platform FROM push_tokens ORDER BY registered_at")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }

@@ -150,7 +150,12 @@ fn fts_search_after_plain_index() {
         .unwrap();
     // 未回填明文前，加密態名稱不可搜（只搜得到鏡像欄位 token）
     store
-        .set_plain_meta(gh, Some("GitHub"), &["https://github.com/login".into()], &[])
+        .set_plain_meta(
+            gh,
+            Some("GitHub"),
+            &["https://github.com/login".into()],
+            &[],
+        )
         .unwrap();
     store
         .set_plain_meta(gl, Some("GitLab"), &["https://gitlab.com".into()], &[])
@@ -618,10 +623,20 @@ fn query_uri_host_anchoring() {
         }))
         .unwrap();
     store
-        .set_plain_meta(gh, Some("GitHub"), &["https://github.com/login".into()], &[])
+        .set_plain_meta(
+            gh,
+            Some("GitHub"),
+            &["https://github.com/login".into()],
+            &[],
+        )
         .unwrap();
     store
-        .set_plain_meta(sub, Some("Gist"), &["https://gist.github.com/x".into()], &[])
+        .set_plain_meta(
+            sub,
+            Some("Gist"),
+            &["https://gist.github.com/x".into()],
+            &[],
+        )
         .unwrap();
     store
         .set_plain_meta(evil, Some("Evil"), &["https://notgithub.com".into()], &[])
@@ -940,7 +955,11 @@ fn apply_sync_lands_folders_and_folder_filter() {
     let folders = store.folder_list().unwrap();
     assert_eq!(folders.len(), 1);
     assert_eq!(folders[0].id.to_string(), folder);
-    assert_eq!(folders[0].name.as_deref(), Some("2.f|f|f"), "名稱鏡像存信封原樣");
+    assert_eq!(
+        folders[0].name.as_deref(),
+        Some("2.f|f|f"),
+        "名稱鏡像存信封原樣"
+    );
 
     let hits = store
         .query(&Query {
@@ -1087,8 +1106,18 @@ fn trash_tristate_and_purge() {
         .unwrap();
     let n = store.purge(Uuid::parse_str(&gone).unwrap()).unwrap();
     assert_eq!(n, 1);
-    assert!(store.item(Uuid::parse_str(&gone).unwrap()).unwrap().is_none());
-    assert!(store.meta(Uuid::parse_str(&gone).unwrap()).unwrap().is_none());
+    assert!(
+        store
+            .item(Uuid::parse_str(&gone).unwrap())
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .meta(Uuid::parse_str(&gone).unwrap())
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         store
             .query(&Query {
@@ -1219,9 +1248,7 @@ fn archived_tristate_projection_and_filter() {
     let c1 = cipher(&live, "live", "2026-11-01T00:00:00.000Z", false);
     let mut c2 = cipher(&archived, "arch", "2026-11-01T00:00:00.000Z", false);
     c2["archivedDate"] = json!("2026-11-10T00:00:00.000000Z");
-    store
-        .apply_sync(&json!({ "ciphers": [c1, c2] }))
-        .unwrap();
+    store.apply_sync(&json!({ "ciphers": [c1, c2] })).unwrap();
     // 預設與 Some(false)：主列表排除已封存（使用者實錄缺陷的正解）
     for archived_q in [None, Some(false)] {
         let hits = store

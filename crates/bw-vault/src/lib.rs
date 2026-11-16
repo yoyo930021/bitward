@@ -190,10 +190,7 @@ pub fn flatten(cipher: &serde_json::Value, dec: &dyn Fn(&str) -> Option<String>)
                 f.get("value").and_then(serde_json::Value::as_str),
             );
             if let Some(t) = f.get("type").and_then(serde_json::Value::as_i64) {
-                type_keys.push((
-                    format!("field.{i}.type"),
-                    type_word(t).map(str::to_owned),
-                ));
+                type_keys.push((format!("field.{i}.type"), type_word(t).map(str::to_owned)));
             }
         }
         for (k, v) in type_keys {
@@ -230,14 +227,8 @@ pub struct PlainIndex {
 /// 鏡像密文 → 明文索引欄。`dec` 形態同 [`flatten`]（信封字串 → 明文；
 /// None＝讀不到，容忍跳過）。daemon `Hub::reindex_many` 與 Android
 /// `Hub::reindex_plain` 共用這裡，欄位路徑只寫一份。
-pub fn plain_index(
-    cipher: &serde_json::Value,
-    dec: &dyn Fn(&str) -> Option<String>,
-) -> PlainIndex {
-    let field = |v: Option<&serde_json::Value>| {
-        v.and_then(serde_json::Value::as_str)
-            .and_then(dec)
-    };
+pub fn plain_index(cipher: &serde_json::Value, dec: &dyn Fn(&str) -> Option<String>) -> PlainIndex {
+    let field = |v: Option<&serde_json::Value>| v.and_then(serde_json::Value::as_str).and_then(dec);
     let login = cipher.get("login");
     let uris = login
         .and_then(|l| l.get("uris"))
@@ -313,8 +304,10 @@ pub fn apply_merged(
                         if !uris.is_array() {
                             *uris = serde_json::json!([]);
                         }
-                        if let Some(entry) =
-                            uris.as_array_mut().expect("uris must be array").get_mut(idx)
+                        if let Some(entry) = uris
+                            .as_array_mut()
+                            .expect("uris must be array")
+                            .get_mut(idx)
                             && let Some(e) = entry.as_object_mut()
                         {
                             let v = match value {
@@ -377,10 +370,7 @@ pub fn apply_merged(
                         if leaf == "type" {
                             // 明文詞 → 線格式整數；未知詞/清空不動現態
                             // （type 無「空」語意，None 收斂為 text）。
-                            let wire = value
-                                .as_deref()
-                                .and_then(wire_of_type_word)
-                                .unwrap_or(0);
+                            let wire = value.as_deref().and_then(wire_of_type_word).unwrap_or(0);
                             entry.insert(leaf.into(), serde_json::json!(wire));
                         } else {
                             match value {
@@ -544,9 +534,18 @@ mod tests {
     #[test]
     fn uri_match_paths_merge_and_clash() {
         // uri.<n>.match 明文欄進座標系後：不相交自動合併、同列相撞進收件匣。
-        let base = map(&[("uri.0", Some("https://a.test")), ("uri.0.match", Some("0"))]);
-        let ours = map(&[("uri.0", Some("https://a.test")), ("uri.0.match", Some("3"))]);
-        let theirs = map(&[("uri.0", Some("https://b.test")), ("uri.0.match", Some("0"))]);
+        let base = map(&[
+            ("uri.0", Some("https://a.test")),
+            ("uri.0.match", Some("0")),
+        ]);
+        let ours = map(&[
+            ("uri.0", Some("https://a.test")),
+            ("uri.0.match", Some("3")),
+        ]);
+        let theirs = map(&[
+            ("uri.0", Some("https://b.test")),
+            ("uri.0.match", Some("0")),
+        ]);
         match three_way(&base, &ours, &theirs) {
             Merge::Push(push) => {
                 assert_eq!(push.get("uri.0.match").unwrap().as_deref(), Some("3"));
@@ -554,7 +553,10 @@ mod tests {
             }
             other => panic!("expect Push, got {other:?}"),
         }
-        let theirs2 = map(&[("uri.0", Some("https://a.test")), ("uri.0.match", Some("1"))]);
+        let theirs2 = map(&[
+            ("uri.0", Some("https://a.test")),
+            ("uri.0.match", Some("1")),
+        ]);
         match three_way(&base, &ours, &theirs2) {
             Merge::Conflict { fields } => assert_eq!(fields, vec!["uri.0.match".to_string()]),
             other => panic!("expect Conflict, got {other:?}"),

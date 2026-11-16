@@ -94,10 +94,7 @@ impl SendKey {
     }
 
     /// 以 user key 包 seed（wire `key` 欄；反向操作見 [`unwrap_seed`]）。
-    pub fn wrap_with_user_key(
-        &self,
-        user_key: &crate::UserKey,
-    ) -> Result<String, CryptoError> {
+    pub fn wrap_with_user_key(&self, user_key: &crate::UserKey) -> Result<String, CryptoError> {
         envelope::encrypt_bytes_key(user_key.as_bytes(), &self.0)
     }
 }
@@ -120,12 +117,8 @@ mod tests {
     fn stretch_kat_against_official_derivation() {
         // 独立實作（python hmac/hashlib）算出的期望值，釘選與官方同形：
         // seed=001122…ff → PRK=HMAC("bitwarden-send",seed) → HKDF-Expand(info="send",64)
-        let key = SendKey::from_bytes(
-            (0..16u8)
-                .flat_map(|i| [i * 0x11])
-                .collect::<Vec<u8>>(),
-        )
-        .unwrap();
+        let key =
+            SendKey::from_bytes((0..16u8).flat_map(|i| [i * 0x11]).collect::<Vec<u8>>()).unwrap();
         assert_eq!(
             hex(key.stretch().as_slice()),
             "9f48c08ee2b16be3db943552165b1f2f646000c481ffbdc2ffd09ddaa169fbee\
@@ -135,10 +128,8 @@ mod tests {
 
     #[test]
     fn password_hash_kat() {
-        let key = SendKey::from_bytes(
-            (0..16u8).flat_map(|i| [i * 0x11]).collect::<Vec<u8>>(),
-        )
-        .unwrap();
+        let key =
+            SendKey::from_bytes((0..16u8).flat_map(|i| [i * 0x11]).collect::<Vec<u8>>()).unwrap();
         assert_eq!(
             key.password_hash("hunter2"),
             "IUfRQWngrzaQ9yDeP5jdidY+TbsIpwLrvaezPw/pemk="
@@ -160,10 +151,7 @@ mod tests {
         let uk2 = UserKey::from_bytes(vec![8u8; 64]).unwrap();
         assert!(unwrap_seed(&uk2, &wrapped).is_err());
         // seed 穩定：改密重算的 password_hash 與拉伸金鑰都不變（接收方舊連結可用）
-        assert_eq!(
-            hex(back.stretch().as_slice()),
-            hex(k.stretch().as_slice())
-        );
+        assert_eq!(hex(back.stretch().as_slice()), hex(k.stretch().as_slice()));
     }
 
     #[test]

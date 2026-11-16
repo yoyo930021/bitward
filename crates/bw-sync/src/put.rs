@@ -200,7 +200,9 @@ pub fn build_put_body(
                     None => id.parse::<usize>().ok().and_then(|n| arr.get_mut(n)),
                 }
                 .ok_or_else(|| {
-                    json_err(format!("field.{id}: no field with id/index {id:?} in theirs"))
+                    json_err(format!(
+                        "field.{id}: no field with id/index {id:?} in theirs"
+                    ))
                 })?;
                 let e = entry
                     .as_object_mut()
@@ -477,7 +479,10 @@ mod tests {
         });
         let m = merged(&[("field.1.value", Some("secret"))]);
         let out = build_put_body(&idless, &m).unwrap();
-        assert_eq!(out["fields"][1]["value"], json!(placeholder_for("field.1.value")));
+        assert_eq!(
+            out["fields"][1]["value"],
+            json!(placeholder_for("field.1.value"))
+        );
         assert_eq!(out["fields"][0]["value"], "2.b|b|b", "只動 index 1");
         assert_eq!(out["fields"][1]["type"], json!(1), "type/linkedId 不被碰");
         // 越界回錯（同 uri.<n>：增刪欄位是整陣列替換）
@@ -485,7 +490,10 @@ mod tests {
         // id 比對優先於索引：混形態鏡像以 id 命中為準
         let m = merged(&[("field.0.name", Some("renamed"))]);
         let out = build_put_body(&theirs(), &m).unwrap();
-        assert_eq!(out["fields"][0]["name"], json!(placeholder_for("field.0.name")));
+        assert_eq!(
+            out["fields"][0]["name"],
+            json!(placeholder_for("field.0.name"))
+        );
     }
 
     #[test]
