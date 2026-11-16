@@ -454,14 +454,6 @@ pub fn script_duo(dir: PathBuf, core: AppCore) {
     at(6200, move || {
         assert!(c.login.duo_open.get(), "Duo 模態應已開啟");
         capture(&d, if redirect { "shot-63-duo-redirect.png" } else { "shot-62-duo-iframe.png" });
-        capture(
-            &d,
-            if redirect {
-                "shot-63-duo-redirect.png"
-            } else {
-                "shot-62-duo-iframe.png"
-            },
-        );
     });
     let c = core.clone();
     at(6800, move || {
@@ -1311,11 +1303,6 @@ fn poll_attachment_row(dir: PathBuf, core: AppCore, ms: u64) {
         at(ms + 16300, move || c.send(Cmd::ShowSendsTab(SendTab::Create)));
         let c = core.clone();
         at(ms + 16700, move || c.send_form.text.set("E2E 接收頁範例".into()));
-        let c = core.clone();
-        at(ms + 17100, move || c.send(Cmd::SubmitSend));
-        at(ms + 16700, move || {
-            c.send_form.text.set("E2E 接收頁範例".into())
-        });
         let c = core.clone();
         at(ms + 17100, move || c.send(Cmd::SubmitSend));
         let c = core.clone();
