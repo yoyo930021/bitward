@@ -26,6 +26,7 @@ mod state;
 mod theme;
 mod twofa;
 mod ui;
+#[cfg(target_os = "macos")]
 mod webauthn;
 
 use std::cell::RefCell;
