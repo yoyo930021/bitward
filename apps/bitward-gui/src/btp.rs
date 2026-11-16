@@ -12,8 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bw_proto::{
-    Auth, Call, ClientMsg, EventTopic, PROTO_VERSION, ProtoVersion, Response, ServerMsg,
-    UnlockStateView, WtpError,
+    Auth, Call, ClientMsg, EventPayload, EventTopic, PROTO_VERSION, ProtoVersion, Response,
+    ServerMsg, UnlockStateView, WtpError,
     wire::{self, WireFormat},
 };
 
@@ -153,14 +153,14 @@ impl Session {
     pub fn listen(
         &self,
         wants: &[EventTopic],
-        mut on_event: impl FnMut(EventTopic),
+        mut on_event: impl FnMut(EventTopic, EventPayload),
     ) -> Result<(), BtpError> {
         let mut conn = Conn::open_with(&self.path, wants.to_vec(), None)?;
         loop {
             match wire::read_frame::<_, ServerMsg>(&mut conn.stream, conn.fmt)
                 .map_err(|e| BtpError::Transport(e.to_string()))?
             {
-                ServerMsg::Event { topic, .. } => on_event(topic),
+                ServerMsg::Event { topic, payload, .. } => on_event(topic, payload),
                 other => {
                     return Err(BtpError::Transport(format!(
                         "監聽連線收到非事件幀：{other:?}"
@@ -366,7 +366,7 @@ mod tests {
                 &ServerMsg::Event {
                     topic: EventTopic::OutboxDrained,
                     seq: 1,
-                    payload: serde_json::json!({}),
+                    payload: bw_proto::EventPayload::OutboxDrained { pushed: 2 },
                 },
             )
             .unwrap();
@@ -374,9 +374,16 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(300));
         });
         let session = Session::new(&path);
-        let mut topics = Vec::new();
-        let _ = session.listen(&[EventTopic::OutboxDrained], |t| topics.push(t));
-        assert_eq!(topics, vec![EventTopic::OutboxDrained]);
+        let mut got = Vec::new();
+        let _ = session.listen(&[EventTopic::OutboxDrained], |t, p| got.push((t, p)));
+        // 載荷必須原樣送到訂閱端（不是只給 topic）：pushed 值是 GUI 分岔的依據。
+        assert_eq!(
+            got,
+            vec![(
+                EventTopic::OutboxDrained,
+                bw_proto::EventPayload::OutboxDrained { pushed: 2 }
+            )]
+        );
         server.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }

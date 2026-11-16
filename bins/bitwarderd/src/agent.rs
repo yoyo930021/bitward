@@ -11,8 +11,8 @@ use bw_agent::{
     parse_grants, parse_ref,
 };
 use bw_proto::{
-    AgentCall, ApprovalId, AuthCall, Call, EaCall, EventTopic, PasskeyCall, PushCall, Response,
-    RunPlan, SessionId, SyncCall, TwoFactorCall, UseCall, VaultCall, View, WtpError,
+    AgentCall, ApprovalId, AuthCall, Call, EaCall, PasskeyCall, PushCall, Response, RunPlan,
+    SessionId, SyncCall, TwoFactorCall, UseCall, VaultCall, View, WtpError,
 };
 use bw_store::{SessionRow, SessionState};
 
@@ -158,10 +158,10 @@ impl Hub {
                 tx,
             },
         );
-        self.emit(
-            EventTopic::ApprovalRequired,
-            json!({"id": id.0.to_string(), "summary": summarize(call)}),
-        );
+        self.emit(bw_proto::EventPayload::ApprovalRequired {
+            approval: id.0.to_string(),
+            summary: summarize(call),
+        });
         self.publish_signal(&format!("bitward: approval {} {}", id.0, summarize(call)));
         let waited = tokio::time::timeout(std::time::Duration::from_secs(120), rx).await;
         self.pending.lock().unwrap().remove(&id);

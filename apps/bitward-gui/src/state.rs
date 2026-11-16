@@ -15,9 +15,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use bw_proto::{
-    AdminCall, AgentCall, AttachmentOp, AuthCall, Call, CipherDraft, CipherFieldKind, EventTopic,
-    FieldEdit, ItemId, ItemKind, ItemView, OverlayOpWire, PasskeyCall, Query, Response, SortKey,
-    SyncCall, UnlockStateView, UseCall, VaultCall, View,
+    AdminCall, AgentCall, AttachmentOp, AuthCall, Call, CipherDraft, CipherFieldKind,
+    ConflictReason, EventPayload, EventTopic, FieldEdit, ItemId, ItemKind, ItemView, OverlayOpWire,
+    PasskeyCall, Query, Response, SortKey, SyncCall, UnlockStateView, UseCall, VaultCall, View,
 };
 use nsh_core::prelude::*;
 
@@ -622,6 +622,10 @@ pub enum Cmd {
     WebauthnDone(Result<String, String>),
     /// 空作（背景路徑無情報可落地時佔位）。
     Nop,
+    /// 事件載荷指名的項目變更（PR5 D4）：只在詳情/編輯頁就是那一筆時重拉詳情。
+    EventItemChanged(ItemId),
+    /// 衝突入匣的可懂提示（PR5 D4 載荷文案）。
+    ConflictNotice(String),
     // ── 緊急存取（PR4 GUI 面）────────────────────────────────
     /// 進入緊急联系人頁（工具組；右欄視角）。
     OpenEmergency,
@@ -1643,17 +1647,32 @@ impl AppCore {
                         EventTopic::VaultChanged,
                         EventTopic::ApprovalRequired,
                         EventTopic::LockStateChanged,
+                        EventTopic::ConflictDetected,
                     ],
-                    move |topic| {
-                        match topic {
-                            EventTopic::ApprovalRequired => {
+                    move |topic, payload| {
+                        match (topic, payload) {
+                            (EventTopic::ApprovalRequired, _) => {
                                 let _ = tx2.send(Cmd::FetchPending);
                             }
                             // 自動鎖定/解鎖沒有人按的呼叫：靠事件刷新鎖態視角
-                            EventTopic::LockStateChanged => {
+                            (EventTopic::LockStateChanged, EventPayload::LockState { .. }) => {
                                 let _ = tx2.send(Cmd::RefreshStatus);
                             }
-                            EventTopic::OutboxDrained | EventTopic::VaultChanged => {
+                            // PR5 D4 首次真消費：載荷帶 item id，詳情頁正是被改那筆
+                            // 才重拉詳情，其餘只重掃列表（旧行為無資訊可分岔＝全量重拉）。
+                            (EventTopic::VaultChanged, EventPayload::ItemChanged { id, .. }) => {
+                                let _ = tx2.send(Cmd::EventItemChanged(id));
+                            }
+                            // 衝突入匣：載荷給出原因，直接落一條可懂的橫條
+                            (
+                                EventTopic::ConflictDetected,
+                                EventPayload::ConflictQueued { reason, .. },
+                            ) => {
+                                let _ = tx2.send(Cmd::ConflictNotice(conflict_why(&reason)));
+                            }
+                            (EventTopic::OutboxDrained, _)
+                            | (EventTopic::VaultChanged, _)
+                            | (EventTopic::ConflictDetected, _) => {
                                 let _ = tx2.send(Cmd::EventsRefresh);
                             }
                             _ => {}
@@ -2935,6 +2954,20 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 Err(e) => core.error_text.set(Some(e)),
             }
         }
+        Cmd::EventItemChanged(changed) => {
+            let open_detail =
+                matches!(core.route.get(), Route::Detail(id) | Route::Edit(id) if id == changed);
+            if open_detail {
+                core.send(Cmd::EventsRefresh);
+            } else {
+                fetch_list(core);
+                core.settle();
+            }
+        }
+        Cmd::ConflictNotice(why) => {
+            core.error_text.set(Some(format!("同步衝突待裁決：{why}")));
+            core.send(Cmd::EventsRefresh);
+        }
         Cmd::EventsRefresh => {
             fetch_list(core);
             if let Route::Detail(id) = core.route.get() {
@@ -4066,6 +4099,14 @@ pub fn parse_folders(v: &serde_json::Value) -> Vec<FolderEntry> {
         .unwrap_or_default()
 }
 
+/// 衝突原因（型別化事件載荷）→ 橫條文案。純函數可單測。
+pub fn conflict_why(reason: &ConflictReason) -> String {
+    match reason {
+        ConflictReason::DeletedRemotely => "伺服器端已被他端刪除".to_owned(),
+        ConflictReason::FieldClash(fields) => format!("欄位相撞：{}", fields.join("、")),
+    }
+}
+
 /// `Response::PendingApprovals`（型別化行，PR5 D3）→ 佇列列。
 /// `requested_at_ms` 在型別上是必填欄位，UI 仍按 Option 處理（欄位缺席的
 /// 舊語意保留給渲染層：0 不顯示時間）。
@@ -5145,6 +5186,22 @@ mod tests {
         assert_eq!(rows[0].name.as_deref(), Some("工作"));
         assert_eq!(rows[1].name, None);
         assert!(parse_folders(&serde_json::json!({"not": "array"})).is_empty());
+    }
+
+    /// PR5 D4：衝突事件載荷 → 橫條文案（兩態都可懂，欄位列舉不截斷）。
+    #[test]
+    fn conflict_why_covers_both_reasons() {
+        assert_eq!(
+            conflict_why(&ConflictReason::DeletedRemotely),
+            "伺服器端已被他端刪除"
+        );
+        assert_eq!(
+            conflict_why(&ConflictReason::FieldClash(vec![
+                "password".into(),
+                "card.number".into()
+            ])),
+            "欄位相撞：password、card.number"
+        );
     }
 
     #[test]

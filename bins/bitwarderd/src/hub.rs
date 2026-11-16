@@ -64,7 +64,7 @@ pub struct Hub {
     /// drain 單飛：併發觸發只跑一轮實際推送（§3.5 trigger 去重語意）
     pub drain_lock: tokio::sync::Mutex<()>,
     /// BTP 事件匯流（EventTopic, payload ≤ Identity 級）
-    pub events: tokio::sync::broadcast::Sender<(bw_proto::EventTopic, Value)>,
+    pub events: tokio::sync::broadcast::Sender<bw_proto::EventPayload>,
     /// 上次全量 sync 的 unix ms；通知是 fire-and-forget，半開連線期間的事件會永久錯過，
     /// 由 30 秒週期 sync 兜底（官方客戶端同為 notifications+定期 sync 雙軌）。
     pub last_sync_ms: std::sync::atomic::AtomicU64,

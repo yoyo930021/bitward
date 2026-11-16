@@ -204,10 +204,10 @@ impl Hub {
             .map_err(crate::hub::map_server_err)?;
         let _ = self.store.put_mirror(item_id, &updated);
         let _ = self.reindex_one(item_id);
-        self.emit(
-            bw_proto::EventTopic::VaultChanged,
-            json!({"id": item_id.to_string(), "op": "attach-delete"}),
-        );
+        self.emit(bw_proto::EventPayload::ItemChanged {
+            id: item_id,
+            op: bw_proto::ItemChangeOp::AttachmentDeleted,
+        });
         Ok(Response::Ok)
     }
 

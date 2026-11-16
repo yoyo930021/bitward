@@ -2227,6 +2227,107 @@ pub struct PairedCode {
     pub expires_at_ms: u64,
 }
 
+/// 鏡像項目變更的動作（PR5 D4：原 `Event.payload` 的 `{"op":...}` 字串鍵）。
+/// 名稱對齊 outbox payload 的 op 詞（`sync.rs` 模組頭契約），差別在這裡是**已收斂**
+/// 的結算通知，不是待推的意圖。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ItemChangeOp {
+    /// 新建項目推送成功（伺服器回的新 id 已落鏡像）
+    Created,
+    /// 本地欄位級變更在伺服器結算
+    Applied,
+    /// 軟刪
+    Deleted,
+    /// 從垃圾桶還原
+    Restored,
+    /// 封存／解除封存
+    Archived,
+    /// 歸屬改寫（move/unshare）
+    Moved,
+    /// 硬刪（鏡像行永久摘除）
+    Purged,
+    /// 附件刪除
+    AttachmentDeleted,
+    /// 他端變更拉回落鏡像（notifications 路徑）
+    Remote,
+}
+
+/// 衝突入匣的原因（兩種實測形態：伺服器已刪該筆、欄位級合併判不攏）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConflictReason {
+    /// 本端要改的項目已被他端刪除
+    DeletedRemotely,
+    /// 欄位級相撞（`fields`＝相撞的欄位路徑，值不外洩）
+    FieldClash(Vec<String>),
+}
+
+impl ItemChangeOp {
+    /// outbox mutation payload 的 `op` 詞（`sync.rs` 模組頭契約）→ 事件動作。
+    /// create/patch 不在此列：它們的結算走 `Applied`/`Created` 專用發射點。
+    /// 未知詞回 None（呼叫端不發事件，不虛構動作）。
+    #[must_use]
+    pub fn from_outbox_op(op: &str) -> Option<Self> {
+        Some(match op {
+            "delete" => Self::Deleted,
+            "restore" => Self::Restored,
+            "archive" => Self::Archived,
+            "move" => Self::Moved,
+            _ => return None,
+        })
+    }
+}
+
+/// BTP 事件載荷（PR5 D4：原 `serde_json::Value`，thin 端今日忽略）。
+///
+/// 變體即語意：`topic` 仍是訂閱鍵（`Hello::wants`），但載荷不再靠字串鍵約定，
+/// 兩者的對應由 [`EventPayload::topic`] 單源推導，生產點不可能發出 topic 與
+/// 內文不一致的事件。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum EventPayload {
+    /// 鏡像項目變更（VaultChanged）
+    ItemChanged { id: ItemId, op: ItemChangeOp },
+    /// 資料夾刪除（VaultChanged；資料夾不是 item，id 屬 FolderId 空間）
+    FolderDeleted { id: FolderId },
+    /// 推送佇列收斂清空（OutboxDrained）；`pushed`＝本輪實際推掉的筆數
+    OutboxDrained { pushed: u32 },
+    /// 合併結果與伺服器一致，無需上線（OutboxDrained 的 noop 結算）
+    OutboxNoop { mutation: MutationId },
+    /// 某筆 mutation 已在伺服器結算，但回包不帶可辨識的 item id（VaultChanged）
+    MutationApplied { mutation: MutationId },
+    /// 衝突入匣（ConflictDetected）
+    ConflictQueued {
+        mutation: MutationId,
+        item: ItemId,
+        reason: ConflictReason,
+    },
+    /// 衝突已人工裁決（ConflictDetected 的結算側）
+    ConflictResolved {
+        mutation: MutationId,
+        pick: Resolution,
+    },
+    /// 需要人工核准（ApprovalRequired）；`approval` 是 ApprovalId 的字串形態
+    ApprovalRequired { approval: String, summary: String },
+    /// 鎖態轉換廣播（LockStateChanged）：載荷即新鎖態，訂閱端可免再查詢
+    LockState { state: UnlockStateView, epoch: u64 },
+}
+
+impl EventPayload {
+    /// 該載荷所屬訂閱主題（topic 與內文的唯一對應點）。
+    #[must_use]
+    pub fn topic(&self) -> EventTopic {
+        match self {
+            Self::ItemChanged { .. } | Self::FolderDeleted { .. } => EventTopic::VaultChanged,
+            Self::MutationApplied { .. } => EventTopic::VaultChanged,
+            Self::OutboxDrained { .. } | Self::OutboxNoop { .. } => EventTopic::OutboxDrained,
+            Self::ConflictQueued { .. } | Self::ConflictResolved { .. } => {
+                EventTopic::ConflictDetected
+            }
+            Self::ApprovalRequired { .. } => EventTopic::ApprovalRequired,
+            Self::LockState { .. } => EventTopic::LockStateChanged,
+        }
+    }
+}
+
 /// 全型別化回應：這是 P2 切 postcard 主線的前置（`Value` 的 f64 postcard 不支援）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StatusInfo {
@@ -2350,11 +2451,12 @@ pub enum ServerMsg {
         rid: u64,
         outcome: Result<Response, WtpError>,
     },
-    /// payload 只有 Opaque/Identity 級（協定紀律）
+    /// 事件廣播：`topic` 是訂閱鍵、`payload` 帶語意載荷（`EventPayload::topic`
+    /// 單源對應）。載荷只含 Opaque/Identity 級值（協定紀律）。
     Event {
         topic: EventTopic,
         seq: u64,
-        payload: serde_json::Value,
+        payload: EventPayload,
     },
     NeedApproval {
         id: ApprovalId,

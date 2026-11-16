@@ -429,10 +429,7 @@ impl Hub {
             Err(e) => return Err(crate::hub::map_server_err(e)),
         }
         self.store.folder_remove(id).map_err(denied)?;
-        self.emit(
-            bw_proto::EventTopic::VaultChanged,
-            json!({"folder": id.to_string(), "op": "folder-delete"}),
-        );
+        self.emit(bw_proto::EventPayload::FolderDeleted { id });
         Ok(Response::Ok)
     }
 
@@ -453,10 +450,10 @@ impl Hub {
             Err(e) => return Err(crate::hub::map_server_err(e)),
         }
         let n = self.store.purge(id).map_err(denied)?;
-        self.emit(
-            bw_proto::EventTopic::VaultChanged,
-            json!({"id": id.to_string(), "op": "purge"}),
-        );
+        self.emit(bw_proto::EventPayload::ItemChanged {
+            id,
+            op: bw_proto::ItemChangeOp::Purged,
+        });
         typed_json(&bw_proto::PurgeReport { id, mirror_rows: n })
     }
 

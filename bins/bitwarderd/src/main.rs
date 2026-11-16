@@ -27,7 +27,7 @@ use uuid::Uuid;
 use bw_btp::{read_client, write_server};
 use bw_keys::UnlockEvent;
 use bw_proto::wire::{WireFormat, select_format};
-use bw_proto::{Auth, ClientMsg, EventTopic, PROTO_VERSION, Response, ServerMsg, WtpError};
+use bw_proto::{Auth, ClientMsg, PROTO_VERSION, Response, ServerMsg, WtpError};
 use hub::Hub;
 mod service;
 
@@ -534,13 +534,10 @@ async fn main() -> Result<(), String> {
                     // LockStateChanged 即時刷新——自動鎖定（閒置心跳）不是
                     // 使用者按出来的，沒有這條事件界面會停在過期鎖態。
                     UnlockEvent::State { view, epoch } => {
-                        hub.emit(
-                            EventTopic::LockStateChanged,
-                            serde_json::json!({
-                                "state": serde_json::to_value(view).unwrap_or_default(),
-                                "epoch": epoch.0,
-                            }),
-                        );
+                        hub.emit(bw_proto::EventPayload::LockState {
+                            state: view.clone(),
+                            epoch: epoch.0,
+                        });
                     }
                     _ => {}
                 }
@@ -787,8 +784,9 @@ where
                     None => std::future::pending::<Option<_>>().await,
                 }
             } => {
-                if let Some((topic, payload)) = ev {
+                if let Some(payload) = ev {
                     let seq = hub.store.cursor().unwrap_or(0);
+                    let topic = payload.topic();
                     if write_server(
                         &mut wr,
                         fmt,

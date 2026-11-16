@@ -20,8 +20,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use bw_proto::{
-    CipherDraft, ConflictEntry, EventTopic, FieldEdit, ItemId, MutationId, Resolution, Response,
-    WtpError,
+    CipherDraft, ConflictEntry, FieldEdit, ItemId, MutationId, Resolution, Response, WtpError,
 };
 use bw_server::DeleteKind;
 use bw_store::{MutState, Mutation, MutationDraft};
@@ -63,8 +62,8 @@ impl Hub {
         let _ = self.drain_tx.send(());
     }
 
-    pub fn emit(&self, topic: EventTopic, payload: Value) {
-        let _ = self.events.send((topic, payload));
+    pub fn emit(&self, payload: bw_proto::EventPayload) {
+        let _ = self.events.send(payload);
     }
 
     pub(crate) fn require_unlocked(&self) -> Result<(), WtpError> {
@@ -627,10 +626,7 @@ impl Hub {
         // 空轉 drain 不常發事件；衝突/死信屬人工介入態、非收斂，不發。
         // 訂閱端據此刷新「待推送」徽章投影。
         if pushed > 0 && self.outbox_pushable().unwrap_or(1) == 0 {
-            self.emit(
-                EventTopic::OutboxDrained,
-                json!({"pending": 0, "pushed": pushed}),
-            );
+            self.emit(bw_proto::EventPayload::OutboxDrained { pushed });
         }
     }
 
@@ -729,11 +725,8 @@ impl Hub {
                 // in_flight，租約到期反覆重推（writepath 未斷言收斂計數、
                 // vaulttypes.sh 實測抓出）。
                 let _ = self.store.settle(m.id, MutState::Applied);
-                if op != "create" && op != "patch" {
-                    self.emit(
-                        EventTopic::VaultChanged,
-                        json!({"id": m.item.to_string(), "op": op}),
-                    );
+                if let Some(op) = bw_proto::ItemChangeOp::from_outbox_op(op) {
+                    self.emit(bw_proto::EventPayload::ItemChanged { id: m.item, op });
                 }
                 Ok(())
             }
@@ -777,10 +770,10 @@ impl Hub {
         self.store
             .settle(m.id, MutState::Applied)
             .map_err(|_| (bw_server::ServerError::Rejected("settle".into()), true))?;
-        self.emit(
-            EventTopic::VaultChanged,
-            json!({"id": new_id.to_string(), "op": "create"}),
-        );
+        self.emit(bw_proto::EventPayload::ItemChanged {
+            id: new_id,
+            op: bw_proto::ItemChangeOp::Created,
+        });
         Ok(())
     }
 
@@ -794,10 +787,11 @@ impl Hub {
             Err(e) if is_not_found(&e) => {
                 // 本端要改的項目已被他端刪除 → 衝突收件匣
                 let _ = self.store.settle(m.id, MutState::Conflict);
-                self.emit(
-                    EventTopic::ConflictDetected,
-                    json!({"id": m.id.0, "item": m.item.to_string(), "why": "deleted-remotely"}),
-                );
+                self.emit(bw_proto::EventPayload::ConflictQueued {
+                    mutation: m.id,
+                    item: m.item,
+                    reason: bw_proto::ConflictReason::DeletedRemotely,
+                });
                 return Err((e, true));
             }
             Err(e) => return Err((e, false)),
@@ -881,18 +875,16 @@ impl Hub {
                 let _ = self.store.put_mirror(m.item, &theirs);
                 let _ = self.reindex_one(m.item);
                 let _ = self.store.settle(m.id, MutState::Applied);
-                self.emit(
-                    EventTopic::OutboxDrained,
-                    json!({"id": m.id.0, "noop": true}),
-                );
+                self.emit(bw_proto::EventPayload::OutboxNoop { mutation: m.id });
                 Ok(())
             }
             Err(fields) => {
                 let _ = self.store.settle(m.id, MutState::Conflict);
-                self.emit(
-                    EventTopic::ConflictDetected,
-                    json!({"id": m.id.0, "item": m.item.to_string(), "fields": fields}),
-                );
+                self.emit(bw_proto::EventPayload::ConflictQueued {
+                    mutation: m.id,
+                    item: m.item,
+                    reason: bw_proto::ConflictReason::FieldClash(fields.clone()),
+                });
                 Err((bw_server::ServerError::Rejected("conflict".into()), true))
             }
         }
@@ -980,17 +972,23 @@ impl Hub {
         id: MutationId,
         resp: &Value,
     ) -> Result<(), (bw_server::ServerError, bool)> {
-        if let Some(nid) = cipher_id(resp) {
+        let applied = cipher_id(resp);
+        if let Some(nid) = applied {
             let _ = self.store.put_mirror(nid, resp);
             let _ = self.reindex_one(nid);
         }
         self.store
             .settle(id, MutState::Applied)
             .map_err(|_| (bw_server::ServerError::Rejected("settle".into()), true))?;
-        self.emit(
-            EventTopic::VaultChanged,
-            json!({"id": id.0, "op": "applied"}),
-        );
+        // 回包帶 item id 時發項目視角事件（訂閱端要刷的是那一筆）；
+        // 帶不到就退 mutation 視角，不虛構 id。
+        self.emit(match applied {
+            Some(item) => bw_proto::EventPayload::ItemChanged {
+                id: item,
+                op: bw_proto::ItemChangeOp::Applied,
+            },
+            None => bw_proto::EventPayload::MutationApplied { mutation: id },
+        });
         Ok(())
     }
 
@@ -1013,10 +1011,10 @@ impl Hub {
             Ok(theirs) => {
                 let _ = self.store.put_mirror(id, &theirs);
                 let _ = self.reindex_one(id);
-                self.emit(
-                    EventTopic::VaultChanged,
-                    json!({"id": id.to_string(), "op": "remote"}),
-                );
+                self.emit(bw_proto::EventPayload::ItemChanged {
+                    id,
+                    op: bw_proto::ItemChangeOp::Remote,
+                });
             }
             Err(e) => tracing::warn!(err = %e, %id, "targeted pull failed"),
         }
@@ -1176,10 +1174,7 @@ impl Hub {
             }
         }
         self.store.settle(id, MutState::Applied).map_err(denied)?;
-        self.emit(
-            EventTopic::ConflictDetected,
-            json!({"id": id.0, "resolved": format!("{pick:?}")}),
-        );
+        self.emit(bw_proto::EventPayload::ConflictResolved { mutation: id, pick });
         Ok(Response::Ok)
     }
 }
