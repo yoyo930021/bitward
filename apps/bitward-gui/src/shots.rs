@@ -1372,10 +1372,7 @@ fn poll_attachment_row(dir: PathBuf, core: AppCore, ms: u64) {
                     c.send_form.error.get()
                 )
             });
-            let w = created
-                .get("webUrl")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
+            let w = created.web_url.clone().unwrap_or_default();
             assert!(
                 w.starts_with("http://127.0.0.1:"),
                 "webUrl 應指向 loopback 收件頁，實際：{w}"

@@ -226,8 +226,8 @@ pub fn run(session: &Session, text: &str) -> Result<ImportOutcome, String> {
         items,
         format: false,
     })) {
-        Ok(Response::Json(v)) => Ok(ImportOutcome {
-            created: v.get("imported").and_then(|n| n.as_u64()).unwrap_or(0) as usize,
+        Ok(Response::Imported(v)) => Ok(ImportOutcome {
+            created: v.imported,
             failed: 0,
             skipped,
             reason: None,

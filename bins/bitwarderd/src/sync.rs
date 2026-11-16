@@ -2051,18 +2051,18 @@ mod tests {
             },
         ];
         let resp = hub.write_import("s", &items, false).await.unwrap();
-        let Response::Json(v) = resp else {
-            panic!("Import 應回 Json，got {resp:?}")
+        let Response::Imported(v) = resp else {
+            panic!("Import 應回 Imported，got {resp:?}")
         };
-        assert_eq!(v["imported"], json!(2));
+        assert_eq!(v.imported, 2);
         assert_eq!(hub.store.query(&Query::default()).unwrap().len(), 2);
         assert_eq!(hub.store.depth().unwrap().queued, 2);
-        let id0 = Uuid::parse_str(v["ids"][0].as_str().unwrap()).unwrap();
+        let id0 = v.ids[0];
         assert_eq!(
             hub.store.overlay_get(id0).unwrap().tags,
             vec!["t".to_string()]
         );
-        let id1 = Uuid::parse_str(v["ids"][1].as_str().unwrap()).unwrap();
+        let id1 = v.ids[1];
         let note1 = hub.store.item(id1).unwrap().unwrap().enc_cipher;
         assert_eq!(note1["type"], json!(2), "SecureNote 走官方線格式");
         assert!(note1.get("secureNote").is_some());

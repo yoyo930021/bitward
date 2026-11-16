@@ -447,23 +447,23 @@ mod tests {
                 "deletionDate": "2026-11-17T00:00:00Z", "object": "send",
             }))
             .unwrap();
-        let Response::Json(v) = hub.send_op(&SendOp::List).await.unwrap() else {
-            panic!("expect Json");
+        let Response::Sends(v) = hub.send_op(&SendOp::List).await.unwrap() else {
+            panic!("expect Sends");
         };
         assert_eq!(
-            v["items"][0]["webUrl"].as_str().unwrap(),
+            v.items[0].web_url.as_deref().unwrap(),
             format!("http://127.0.0.1:{port}/#/send/ACC-IDA/AAECAwQFBgcICQoLDA0ODw")
         );
         // 官方 URL 照在（兩態並存，接收端選路是使用者的事）
         assert_eq!(
-            v["items"][0]["url"].as_str().unwrap(),
+            v.items[0].url.as_deref().unwrap(),
             "http://127.0.0.1:9/#/send/ACC-IDA/AAECAwQFBgcICQoLDA0ODw"
         );
         // Get 同欄
-        let Response::Json(g) = hub.send_op(&SendOp::Get { id }).await.unwrap() else {
-            panic!("expect Json");
+        let Response::SendUrl(g) = hub.send_op(&SendOp::Get { id }).await.unwrap() else {
+            panic!("expect SendUrl");
         };
-        assert!(g["webUrl"].as_str().unwrap().contains(&port.to_string()));
+        assert!(g.web_url.unwrap().contains(&port.to_string()));
     }
 
     #[tokio::test]

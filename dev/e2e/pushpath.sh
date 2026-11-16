@@ -155,9 +155,9 @@ W() { python3 "$D/wtp.py" "$PWD/$D/s" "$@"; }
 OUT=$(W reg "$GOOD" ios); jq -e '.Ok == "Ok"' <<<"$OUT" >/dev/null || fail "RegisterPush GOOD: $OUT"
 OUT=$(W reg "$DEAD" watchos); jq -e '.Ok == "Ok"' <<<"$OUT" >/dev/null || fail "RegisterPush DEAD: $OUT"
 LIST=$(W list)
-[[ "$(jq '.Ok.Json | length' <<<"$LIST")" == 2 ]] || fail "ListPush 應 2 筆: $LIST"
+[[ "$(jq '.Ok.PushTokens | length' <<<"$LIST")" == 2 ]] || fail "ListPush 應 2 筆: $LIST"
 grep -q "$GOOD" <<<"$LIST" && fail "ListPush 外洩完整 token"
-jq -e --arg g "${GOOD:0:8}" '.Ok.Json | any(.token | startswith($g)) and any(.platform == "watchos")' \
+jq -e --arg g "${GOOD:0:8}" '.Ok.PushTokens | any(.token | startswith($g)) and any(.platform == "watchos")' \
   <<<"$LIST" >/dev/null || fail "ListPush 去敏形態不對: $LIST"
 pass "RegisterPush×2、ListPush 去敏（前 8 碼＋hash，無全 token）"
 
@@ -178,7 +178,7 @@ APID=$(jq -r '(.Ok.PendingApprovals[0].id // "null")' <<<"$PEND")
 W approve "$APID" | jq -e '.Ok' >/dev/null || fail "approve 失敗"
 wait $DEVPID || fail "device 呼叫非零退出"
 # 批准後放行即可；筆數不在此斷言（410 清理可能先跑完，確切 2 筆 POST 問 mock log）
-jq -e '.Ok.Json | length >= 1' "$D/device.out" >/dev/null \
+jq -e '.Ok.PushTokens | length >= 1' "$D/device.out" >/dev/null \
   || fail "device 批准後 ListPush 未放行: $(cat "$D/device.out")"
 pass "gated Device ListPush → NeedApproval（信令已副發）→ approve 放行"
 
@@ -199,17 +199,17 @@ pass "APNs 副發 2 POST：path=/3/device/<token>、bearer 三段 JWT、apns-top
 LIST=""
 for _ in $(seq 1 40); do
   LIST=$(W list)
-  [[ "$(jq '.Ok.Json | length' <<<"$LIST" 2>/dev/null || echo 2)" == 1 ]] && break
+  [[ "$(jq '.Ok.PushTokens | length' <<<"$LIST" 2>/dev/null || echo 2)" == 1 ]] && break
   sleep 0.25
 done
-[[ "$(jq '.Ok.Json | length' <<<"$LIST")" == 1 ]] || fail "410 token 未清理: $LIST"
-jq -e --arg g "${GOOD:0:8}" '.Ok.Json[0].token | startswith($g)' <<<"$LIST" >/dev/null \
+[[ "$(jq '.Ok.PushTokens | length' <<<"$LIST")" == 1 ]] || fail "410 token 未清理: $LIST"
+jq -e --arg g "${GOOD:0:8}" '.Ok.PushTokens[0].token | startswith($g)' <<<"$LIST" >/dev/null \
   || fail "清理後留下的不是 GOOD: $LIST"
 pass "410（DEADBEEF）token 已由 daemon 清理"
 
 W unreg "$GOOD" >/dev/null
 LIST=$(W list)
-[[ "$(jq '.Ok.Json | length' <<<"$LIST")" == 0 ]] || fail "UnregisterPush 後仍有殘留: $LIST"
+[[ "$(jq '.Ok.PushTokens | length' <<<"$LIST")" == 0 ]] || fail "UnregisterPush 後仍有殘留: $LIST"
 pass "UnregisterPush 收斂至空帳"
 
 echo "PUSH E2E: ALL PASS"

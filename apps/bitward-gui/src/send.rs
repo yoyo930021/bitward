@@ -12,7 +12,6 @@ use std::sync::Arc;
 
 use bw_proto::ItemId;
 use nsh_core::prelude::*;
-use serde_json::Value;
 
 use crate::state::{AppCore, Cmd, SendKind, SendTab};
 use crate::theme;
@@ -34,33 +33,25 @@ pub struct SendRow {
     pub viewed: bool,
 }
 
-/// `{"items":[...]}` → 列（id 解析失敗跳列：幽靈列不如不顯示）。
-pub fn send_rows(v: &Value) -> Vec<SendRow> {
-    v.get("items")
-        .and_then(|i| i.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|r| {
-                    let id = ItemId::parse_str(r.get("id")?.as_str()?).ok()?;
-                    Some(SendRow {
-                        id,
-                        is_file: r.get("type").and_then(Value::as_i64) == Some(1),
-                        name: r.get("name").and_then(Value::as_str).map(str::to_owned),
-                        url: r.get("url").and_then(Value::as_str).map(str::to_owned),
-                        web_url: r.get("webUrl").and_then(Value::as_str).map(str::to_owned),
-                        deletion_date: r
-                            .get("deletionDate")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_owned(),
-                        access_count: r.get("accessCount").and_then(Value::as_i64).unwrap_or(0),
-                        max_access: r.get("maxAccessCount").and_then(Value::as_i64),
-                        viewed: r.get("viewed").and_then(Value::as_bool).unwrap_or(false),
-                    })
-                })
-                .collect()
+/// `Response::Sends` → 列（PR5 D5 型別化：缺 id 的行不進渲染，幽靈列不如不顯示）。
+pub fn send_rows(list: &bw_proto::SendList) -> Vec<SendRow> {
+    list.items
+        .iter()
+        .filter_map(|r| {
+            let id = ItemId::parse_str(r.id.as_deref()?).ok()?;
+            Some(SendRow {
+                id,
+                is_file: r.send_type == Some(1),
+                name: r.name.clone(),
+                url: r.url.clone(),
+                web_url: r.web_url.clone(),
+                deletion_date: r.deletion_date.clone().unwrap_or_default(),
+                access_count: r.access_count.map_or(0, |v| v as i64),
+                max_access: r.max_access_count.map(|v| v as i64),
+                viewed: r.viewed,
+            })
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 /// ISO `2026-11-11T14:23:53…Z` → `11-11 14:23`（UTC；解析失敗原樣截斷，
@@ -377,20 +368,12 @@ fn form_view(core: AppCore) -> View {
 }
 
 /// 成功卡：URL＋複製鈕（官方 send-success 流）。
-fn created_view(core: AppCore, created: Arc<Value>) -> View {
-    let url = created
-        .get("url")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
+fn created_view(core: AppCore, created: Arc<bw_proto::SendCreated>) -> View {
+    let url = created.url.clone();
     let done_core = core.clone();
     let again_core = core.clone();
     let copied: Signal<Option<&'static str>> = signal(None);
-    let name = created
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or("Send")
-        .to_owned();
+    let name = created.name.clone();
     view()
         .flex_col()
         .gap_4()
@@ -426,7 +409,7 @@ fn created_view(core: AppCore, created: Arc<Value>) -> View {
                     core.settings,
                 )),
         )
-        .child(match created.get("webUrl").and_then(Value::as_str) {
+        .child(match created.web_url.as_deref() {
             Some(w) => {
                 let w = w.to_owned();
                 view().flex_row().gap_3().child(ui::button(
@@ -466,15 +449,31 @@ fn row_note(msg: impl Into<String>) -> View {
 mod tests {
     use super::*;
 
+    fn wire_row(id: Option<&str>, f: bool) -> bw_proto::SendRow {
+        bw_proto::SendRow {
+            id: id.map(str::to_owned),
+            send_type: Some(if f { 1 } else { 0 }),
+            name: None,
+            url: None,
+            web_url: None,
+            deletion_date: Some("2026-11-17T13:49:27.000000Z".into()),
+            expiration_date: None,
+            max_access_count: None,
+            access_count: Some(3),
+            viewed: true,
+            hide_email: None,
+            has_password: false,
+            file_size: None,
+        }
+    }
+
     #[test]
     fn rows_parse_tolerantly() {
-        let v = serde_json::json!({"items": [
-            {"id": "6fe8bae0-e019-48fb-a651-f9e3514d156e", "type": 1, "name": null,
-             "url": null, "webUrl": "http://127.0.0.1:51234/#/send/A/seed",
-             "deletionDate": "2026-11-17T13:49:27.000000Z",
-             "accessCount": 3, "maxAccessCount": null, "viewed": true},
-            {"id": "not-a-uuid", "type": 0},
-        ]});
+        let mut with_web = wire_row(Some("6fe8bae0-e019-48fb-a651-f9e3514d156e"), true);
+        with_web.web_url = Some("http://127.0.0.1:51234/#/send/A/seed".into());
+        let v = bw_proto::SendList {
+            items: vec![with_web, wire_row(Some("not-a-uuid"), false)],
+        };
         let rows = send_rows(&v);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].is_file);
@@ -487,11 +486,11 @@ mod tests {
             rows[0].web_url.as_deref(),
             Some("http://127.0.0.1:51234/#/send/A/seed")
         );
-        let no_web = serde_json::json!({"items": [
-            {"id": "6fe8bae0-e019-48fb-a651-f9e3514d156e", "type": 0},
-        ]});
+        let no_web = bw_proto::SendList {
+            items: vec![wire_row(Some("6fe8bae0-e019-48fb-a651-f9e3514d156e"), false)],
+        };
         assert_eq!(send_rows(&no_web)[0].web_url, None);
-        assert!(send_rows(&serde_json::json!({})).is_empty());
+        assert!(send_rows(&bw_proto::SendList { items: Vec::new() }).is_empty());
     }
 
     #[test]

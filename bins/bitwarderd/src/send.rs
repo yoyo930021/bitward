@@ -18,7 +18,7 @@ use bw_crypto::{SendKey, b64url, unwrap_seed};
 use bw_proto::{ItemId, Response, SendContent, SendOp, WtpError};
 use bw_server::ServerError;
 
-use crate::hub::{DispatchResult, Hub, denied, drift, map_server_err, typed_json};
+use crate::hub::{DispatchResult, Hub, denied, drift, map_server_err};
 
 /// 檔案 Send 上限：借附件 32 MiB 紀律（同一條 BTP 幀容量推導，
 /// 見 `crate::attach::MAX_ATTACHMENT_BYTES`）。
@@ -185,7 +185,7 @@ impl Hub {
         let web_url = self
             .webui_base()
             .and_then(|b| compose_send_url_from(&resp, &b, &seed_b64));
-        typed_json(&bw_proto::SendCreated {
+        Ok(Response::SendCreated(bw_proto::SendCreated {
             id: resp.get("id").and_then(Value::as_str).map(str::to_owned),
             url,
             web_url,
@@ -194,7 +194,7 @@ impl Hub {
                 .get("deletionDate")
                 .and_then(Value::as_str)
                 .map_or_else(|| deletion_date.clone(), str::to_owned),
-        })
+        }))
     }
 
     /// 清單：連網時先以 `GET /sends` 全量刷新鏡像（伺服器是真相源），
@@ -250,7 +250,7 @@ impl Hub {
                 }
             })
             .collect();
-        typed_json(&bw_proto::SendList { items })
+        Ok(Response::Sends(bw_proto::SendList { items }))
     }
 
     /// 分享 URL（Get）：鏡像 seed ＋帳號 server 值組裝；不需連網
@@ -279,11 +279,11 @@ impl Hub {
         let web_url = self
             .webui_base()
             .and_then(|b| compose_send_url_from(&s, &b, &seed_b64));
-        typed_json(&bw_proto::SendUrl {
+        Ok(Response::SendUrl(bw_proto::SendUrl {
             id: id.to_string(),
             url,
             web_url,
-        })
+        }))
     }
 
     /// 刪除：需連網；伺服器 404＝已不存在（過期自清是常態），
@@ -332,10 +332,10 @@ impl Hub {
                 .await
                 .map_err(map_server_err)?;
             let _ = self.store.send_put(&updated);
-            return typed_json(&bw_proto::SendPasswordState {
+            return Ok(Response::SendPasswordState(bw_proto::SendPasswordState {
                 id: id.to_string(),
                 has_password: false,
-            });
+            }));
         }
         let key_env = s
             .get("key")
@@ -376,10 +376,10 @@ impl Hub {
         }
         let updated = client.send_put(id, &body).await.map_err(map_server_err)?;
         let _ = self.store.send_put(&updated);
-        typed_json(&bw_proto::SendPasswordState {
+        Ok(Response::SendPasswordState(bw_proto::SendPasswordState {
             id: id.to_string(),
             has_password: true,
-        })
+        }))
     }
 
     /// 本機接收頁前綴（PR2）：webui 監聽在場才給；分享 URL 的 loopback 同形
@@ -565,51 +565,51 @@ mod tests {
         let id = Uuid::new_v4();
         hub.store.send_put(&mirror_send(id, true)).unwrap();
         // List：離線照回鏡像、名稱解密、viewed 由 accessCount 推
-        let Response::Json(v) = hub.send_op(&SendOp::List).await.unwrap() else {
-            panic!("expect Json");
+        let Response::Sends(list) = hub.send_op(&SendOp::List).await.unwrap() else {
+            panic!("expect Sends");
         };
-        let items = v["items"].as_array().unwrap();
+        let items = &list.items;
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0]["name"], "帳單分享");
-        assert_eq!(items[0]["viewed"], true);
-        assert_eq!(items[0]["hasPassword"], true);
+        assert_eq!(items[0].name.as_deref(), Some("帳單分享"));
+        assert!(items[0].viewed);
+        assert!(items[0].has_password);
         // 解鎖態清單直接帶可複製的分享 URL（GUI 列內複製鈕零跳）
         assert_eq!(
-            items[0]["url"],
-            "http://127.0.0.1:9/#/send/ACC-IDA/AAECAwQFBgcICQoLDA0ODw"
+            items[0].url.as_deref(),
+            Some("http://127.0.0.1:9/#/send/ACC-IDA/AAECAwQFBgcICQoLDA0ODw")
         );
         // webui 未綁（測試 hub 無 loopback 監聽）→ webUrl 缺席，GUI 鈕不出來
-        assert_eq!(items[0]["webUrl"], Value::Null);
+        assert_eq!(items[0].web_url, None);
         // URL：帳號 server 值 + accessId（伺服器給的為準）
-        let Response::Json(u) = hub.send_op(&SendOp::Get { id }).await.unwrap() else {
-            panic!("expect Json");
+        let Response::SendUrl(u) = hub.send_op(&SendOp::Get { id }).await.unwrap() else {
+            panic!("expect SendUrl");
         };
         assert_eq!(
-            u["url"].as_str().unwrap(),
+            u.url,
             "http://127.0.0.1:9/#/send/ACC-IDA/AAECAwQFBgcICQoLDA0ODw"
         );
         // 缺 accessId 欄：按官方演算法自算 b64url(uuid bytes)
         let id2 = Uuid::new_v4();
         hub.store.send_put(&mirror_send(id2, false)).unwrap();
-        let Response::Json(u2) = hub.send_op(&SendOp::Get { id: id2 }).await.unwrap() else {
-            panic!("expect Json");
+        let Response::SendUrl(u2) = hub.send_op(&SendOp::Get { id: id2 }).await.unwrap() else {
+            panic!("expect SendUrl");
         };
         let expect = format!(
             "http://127.0.0.1:9/#/send/{}/AAECAwQFBgcICQoLDA0ODw",
             b64url(id2.as_bytes())
         );
-        assert_eq!(u2["url"].as_str().unwrap(), expect);
+        assert_eq!(u2.url, expect);
         // 鎖態：URL 取用需 seed（金鑰材料）→ Locked；清單照回但 name=null
         hub.machine.lock(bw_keys::LockReason::User);
         assert!(matches!(
             hub.send_op(&SendOp::Get { id }).await,
             Err(WtpError::Locked)
         ));
-        let Response::Json(v) = hub.send_op(&SendOp::List).await.unwrap() else {
-            panic!("expect Json");
+        let Response::Sends(list) = hub.send_op(&SendOp::List).await.unwrap() else {
+            panic!("expect Sends");
         };
-        assert_eq!(v["items"][0]["name"], Value::Null);
-        assert_eq!(v["items"][0]["url"], Value::Null);
+        assert_eq!(list.items[0].name, None);
+        assert_eq!(list.items[0].url, None);
     }
 
     #[tokio::test]

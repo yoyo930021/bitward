@@ -1057,8 +1057,11 @@ async fn run() -> Result<(), String> {
                         cmd: SendCmd::Url { .. } | SendCmd::Text { .. } | SendCmd::File { .. }
                     }
                 )
-                && let Response::Json(v) = &resp
-                && let Some(u) = v.get("url").and_then(|x| x.as_str())
+                && let Some(u) = match &resp {
+                    Response::SendCreated(c) => Some(c.url.as_str()),
+                    Response::SendUrl(u) => Some(u.url.as_str()),
+                    _ => None,
+                }
             {
                 // 單一 URL 列：管線友善（$(bitward send url …)）；--json 才出整包
                 println!("{u}");
@@ -2515,8 +2518,21 @@ fn print_response(resp: &Response, json: bool) {
         Response::Audit(rows) => {
             println!("{}", serde_json::to_string_pretty(rows).unwrap());
         }
-        // AutoType 等計數類結果：扁平 JSON，無外殼（jq 直接命中 .typed）
-        Response::Json(v) => println!("{}", serde_json::to_string_pretty(v).unwrap()),
+        // PR5 D5 型別化回包：扁平 JSON、無外殼（jq 路徑直擊欄位，同舊 Json 契約）
+        Response::WeakPasswords(r) => println!("{}", serde_json::to_string_pretty(&r).unwrap()),
+        Response::CipherHistory(r) => println!("{}", serde_json::to_string_pretty(&r).unwrap()),
+        Response::Folder(f) => println!("{}", serde_json::to_string_pretty(&f).unwrap()),
+        Response::Folders(f) => println!("{}", serde_json::to_string_pretty(&f).unwrap()),
+        Response::Purged(p) => println!("{}", serde_json::to_string_pretty(&p).unwrap()),
+        Response::Imported(i) => println!("{}", serde_json::to_string_pretty(&i).unwrap()),
+        Response::PushTokens(t) => println!("{}", serde_json::to_string_pretty(&t).unwrap()),
+        Response::AutoType(a) => println!("{}", serde_json::to_string_pretty(&a).unwrap()),
+        Response::SendCreated(c) => println!("{}", serde_json::to_string_pretty(&c).unwrap()),
+        Response::Sends(s) => println!("{}", serde_json::to_string_pretty(&s).unwrap()),
+        Response::SendUrl(u) => println!("{}", serde_json::to_string_pretty(&u).unwrap()),
+        Response::SendPasswordState(p) => {
+            println!("{}", serde_json::to_string_pretty(&p).unwrap());
+        }
         // 附件位元組直出口（attach get 在 run() 已攔截寫檔；這裡是旁路觀測形態）
         Response::AttachmentBytes(v) => {
             println!("{}", json!({"bytes": v.len()}))

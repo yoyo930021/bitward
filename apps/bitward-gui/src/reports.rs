@@ -216,27 +216,14 @@ fn weak_list(core: AppCore) -> View {
         )
 }
 
-/// 歷史回包的 `versions` 陣形（不支援態恆空；詳情頁渲染閘與列構造共用）。
-pub fn history_versions(v: &serde_json::Value) -> Vec<serde_json::Value> {
-    v.get("versions")
-        .and_then(|a| a.as_array())
-        .cloned()
-        .unwrap_or_default()
+/// 歷史回包的版本列（不支援態恆空；詳情頁渲染閘與列構造共用）。
+pub fn history_versions(r: &bw_proto::CipherHistoryReport) -> Vec<bw_proto::CipherHistoryVersion> {
+    r.versions.clone()
 }
 
-/// `{"items":[{"id","name","score"}]}` → (id, score) 對（id 解析失敗跳列）。
-pub fn weak_score_items(v: &serde_json::Value) -> Vec<(ItemId, i64)> {
-    v.get("items")
-        .and_then(|i| i.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|r| {
-                    let id = ItemId::parse_str(r.get("id")?.as_str()?).ok()?;
-                    Some((id, r.get("score")?.as_i64()?))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+/// 弱碼報告 → (id, score) 對（PR5 D5 型別化：不再 runtime 讀鍵名）。
+pub fn weak_score_items(r: &bw_proto::WeakPasswordReport) -> Vec<(ItemId, i64)> {
+    r.items.iter().map(|e| (e.id, e.score as i64)).collect()
 }
 
 /// 分級色點顏色（0/1 紅、2 橘、其餘綠）——詳情頁歷史節共用。
@@ -314,15 +301,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn weak_items_parse_tolerant() {
-        let v = serde_json::json!({"threshold": 3, "items": [
-            {"id": "6fe8bae0-e019-48fb-a651-f9e3514d156e", "name": "weakone", "score": 0},
-            {"id": "not-a-uuid", "name": "ghost", "score": 1},
-        ]});
-        let rows = weak_score_items(&v);
+    fn weak_items_map_report_rows() {
+        let r = bw_proto::WeakPasswordReport {
+            threshold: 3,
+            items: vec![bw_proto::WeakPasswordEntry {
+                id: ItemId::parse_str("6fe8bae0-e019-48fb-a651-f9e3514d156e").unwrap(),
+                name: Some("weakone".into()),
+                score: 0,
+            }],
+        };
+        let rows = weak_score_items(&r);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].1, 0);
-        assert!(weak_score_items(&serde_json::json!({})).is_empty());
+        assert!(
+            weak_score_items(&bw_proto::WeakPasswordReport {
+                threshold: 3,
+                items: Vec::new(),
+            })
+            .is_empty()
+        );
     }
 
     #[test]

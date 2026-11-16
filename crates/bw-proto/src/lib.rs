@@ -546,7 +546,7 @@ pub enum VaultCall {
     CreateFolder {
         name: String,
     },
-    /// 資料夾清單；回應 `Response::Json`（[{"id","name"}]，鎖定態 name 為 null——
+    /// 資料夾清單；回應 `Response::Folders`（`FolderInfo` 清單，鎖定態 name 為 null——
     /// 名稱是信封字串，金鑰不在時不猜）。
     ListFolders,
     /// 刪除資料夾：先將夾內項目 `folderId` 清 NULL（逐筆入 outbox patch），
@@ -599,7 +599,7 @@ pub enum VaultCall {
     },
     /// 置尾（同上紀律）：**報告儀表板**三操作（子孫見 `Reports`）。回包全部
     /// 去敏——重用只回 id 群集（`Response::DupGroups`）、弱密碼只回分數
-    /// （`Response::Json`，明文只在 daemon 打分閉包內存活、不落盤）、
+    /// （`Response::WeakPasswords`，明文只在 daemon 打分閉包內存活、不落盤）、
     /// 歷史只回日期＋解密名稱＋uri 數（名稱出口屬 Identity 級，同列表鏡像）。
     Reports {
         sub: Reports,
@@ -623,7 +623,7 @@ pub enum Reports {
     /// 資料源同一條（`Response::DupGroups`），不另起掃描。
     PasswordReuse,
     /// 弱密碼報告：鏡像全量解密打分（需解鎖態；未解鎖回 `Locked`），
-    /// `bw_crypto::password_score` < 3 列管。回應 `Response::Json`
+    /// `bw_crypto::password_score` < 3 列管。回應 `Response::WeakPasswords`
     /// （{"threshold":3,"items":[{"id","name","score"}]}，分數升序）。
     WeakPasswords,
     /// 項目版本歷史：代理伺服器 `GET /api/ciphers/{id}/history`（官方舊版線格式，
@@ -644,7 +644,7 @@ pub enum SendOp {
     /// `deletion_hours`：到期刪除（官方選單 1/7/30 天＝24/168/720；
     /// 伺服器硬上限 31 天，VW `create_send` 實錄 400）。
     /// `max_access`：存取上限（None＝不限；0 拒收）。
-    /// 成功回 `Response::Json`（{"id","url","webUrl","name","deletionDate"}——
+    /// 成功回 `Response::SendCreated`（id/url/webUrl/name/deletionDate——
     /// `url` 帶 seed 片段，屬 Secret 級出口；`webUrl`＝本機接收頁同形變體，
     /// daemon webui 未起時為 null）。
     Create {
@@ -656,7 +656,7 @@ pub enum SendOp {
         hide_email: bool,
     },
     /// 鏡像清單（`/sync` 的 `sends[]` 與線上 `GET /sends` 刷新落庫；
-    /// 離線照回鏡像）。回應 `Response::Json`（{"items":[{"id","type",
+    /// 離線照回鏡像）。回應 `Response::Sends`（`SendList.items`，每列含 id/type,
     /// "name","url","webUrl","deletionDate","expirationDate","maxAccessCount","accessCount",
     /// "viewed","hideEmail","hasPassword"}]}，deletionDate 升序；`webUrl`＝
     /// 本機接收頁變體（webui 未起或鎖態為 null）；
@@ -665,7 +665,7 @@ pub enum SendOp {
     List,
     /// 分享 URL：`{帳號 server 值}/#/send/{accessId}/{b64url(seed)}`
     /// （官方 web vault 同形：`getSendUrl()+accessId+"/"+urlB64Key`）。
-    /// 需解鎖態（seed 從鏡像 `key` 信封解出）；回應 `Response::Json`
+    /// 需解鎖態（seed 從鏡像 `key` 信封解出）；回應 `Response::SendUrl`
     /// （{"id","url","webUrl"}，webUrl＝本機接收頁變體）。審計只記動作與 id，
     /// **不落片段**（A11 延伸）。
     Get { id: ItemId },
@@ -673,7 +673,7 @@ pub enum SendOp {
     Remove { id: ItemId },
     /// 取用密碼：`Some`＝設/換（`PUT /sends/{id}` 帶新哈希，seed 不變＝
     /// 既有連結的解密密鑰不受影響）；`None`＝清除（`remove-password`）。
-    /// 需解鎖態＋連網；回應 `Response::Json`（{"id","hasPassword"}）。
+    /// 需解鎖態＋連網；回應 `Response::SendPasswordState`（id/hasPassword）。
     Password {
         id: ItemId,
         password: Option<String>,
@@ -799,9 +799,8 @@ pub enum PasskeyCall {
 }
 
 /// APNs 推播 token 管理（§1.2 推播路徑正式分發形態）：iOS 端上報 device token，
-/// daemon 於 ntfy 同源時機把同一條不透明信令逐 token 副發。回應重用 Ok 與
-/// Json（陣列 of {"token","platform"}），不加 Response 變體——置尾紀律只約束
-/// 必要新增；Json 值限字串（postcard-safe，見 Audit 註解）。
+/// daemon 於 ntfy 同源時機把同一條不透明信令逐 token 副發。回應為 `Response::Ok`
+/// 與 `Response::PushTokens`（PR5 D5 型別化；token 已去敏，見 `PushTokenInfo`）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum PushCall {
     /// `platform` 是用戶端來源標記（"ios"|"watchos"…），daemon 不解釋、原樣存。
@@ -1722,8 +1721,6 @@ pub enum Response {
     PairInfo(PairInfo),
     /// 去重報告：同 (domain, username) 叢集，只回 id 不回明文
     DupGroups(Vec<DupGroup>),
-    /// 自構 JSON 結果（如 AutoType 計數）。值限字串/整數，無 f64——postcard-safe，見 Audit。
-    Json(serde_json::Value),
     Ok,
     // —— passkey（macOS autofill 契約 §1；置尾保 postcard 變體索引）——
     Passkeys(Vec<PasskeyEntry>),
@@ -1787,6 +1784,32 @@ pub enum Response {
     /// `EmergencyAccess:View` 回包（PR4 C2）：grantor 項目的唯讀投影
     /// （Reveal 級欄位齊全；水印與只讀語意在 GUI 面）。
     EaView(Vec<ItemView>),
+    // —— PR5 D5：原 `Response::Json` 的 13 個生產點型別化後直發（置尾追加，
+    //    postcard variant 索引不動既有變體；`Json` 變體在此批退役）——
+    /// `Reports:WeakPasswords` 回包。
+    WeakPasswords(WeakPasswordReport),
+    /// `Reports:CipherHistory` 回包。
+    CipherHistory(CipherHistoryReport),
+    /// `Vault:CreateFolder` 回包（新建的那一夾）。
+    Folder(FolderInfo),
+    /// `Vault:ListFolders` 回包。
+    Folders(Vec<FolderInfo>),
+    /// `Vault:Purge` 回包。
+    Purged(PurgeReport),
+    /// `Vault:Import` 回包。
+    Imported(ImportReport),
+    /// `Push:ListPush` 回包（去敏 token 帳）。
+    PushTokens(Vec<PushTokenInfo>),
+    /// `Fill:AutoType` 回包（只計數，明文不回傳）。
+    AutoType(AutoTypeStats),
+    /// `Send:Create` 回包。
+    SendCreated(SendCreated),
+    /// `Send:List` 回包。
+    Sends(SendList),
+    /// `Send:Url` 回包。
+    SendUrl(SendUrl),
+    /// `Send:Password` 回包。
+    SendPasswordState(SendPasswordState),
 }
 
 /// 伺服器宣告的可用第二因子（daemon 由 `bw-server` 挑戰映射而來的輕量形態）。
@@ -1796,7 +1819,7 @@ pub enum Response {
 /// Authenticator 為 None），不含秘密值。
 /// `details`（PR3 置尾欄）是該因子交涉所需的伺服器材料，daemon 已在邊界解析成
 /// 型別形態（[`TwoFactorDetails`]）——不在線上帶 `serde_json::Value`：postcard 解
-/// `Value` 是 `WontImplement`（既有 `Response::Json` 債即此，PR5 處理）。
+/// `Value` 是 `WontImplement`（`Response::Json` 即此債，PR5 已隨變體退役清掉）。
 /// 舊幀缺欄＝None（語意＝呼叫端只能走純欄位因子）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TwoFactorProviderInfo {
@@ -3180,19 +3203,20 @@ mod tests {
             let b = postcard::to_allocvec(&msg).unwrap();
             assert_eq!(postcard::from_bytes::<ClientMsg>(&b).unwrap().rid(), 11);
         }
-        // ListPush 出口形態：Json 重用，值限字串（postcard-safe，見 Audit）。
-        // 紀律同 Audit：postcard 只保證編碼可發（Value 反序列化需 self-describing，
-        // 見 P1 線格式註解）；JSON 才是可回讀的往返。
-        let resp = Response::Json(serde_json::json!([
-            {"token": "a1b2c3d4…0123456789ab", "platform": "ios"}
-        ]));
-        assert!(postcard::to_allocvec(&resp).is_ok());
+        // PR5 D5：ListPush 出口從 `Response::Json` 換成 `PushTokens` 後，
+        // 這條不再是「只驗編碼可發」的欠帳——postcard **往返含反序列化**，
+        // 兩格式都回讀（舊註解承認 Value 需 self-describing，該債已隨變體退役清掉）。
+        let resp = Response::PushTokens(vec![PushTokenInfo {
+            token: "a1b2c3d4…0123456789ab".into(),
+            platform: "ios".into(),
+        }]);
+        let b = postcard::to_allocvec(&resp).unwrap();
+        assert_eq!(postcard::from_bytes::<Response>(&b).unwrap().push_tokens_len(), Some(1));
         let j = serde_json::to_string(&resp).unwrap();
-        let back = serde_json::from_str::<Response>(&j).unwrap();
-        match back {
-            Response::Json(v) => assert_eq!(v.as_array().map(Vec::len), Some(1)),
-            other => panic!("expect Json, got {other:?}"),
-        }
+        assert_eq!(
+            serde_json::from_str::<Response>(&j).unwrap().push_tokens_len(),
+            Some(1)
+        );
     }
 
     #[test]
@@ -3837,6 +3861,16 @@ mod tests {
         pc(&list);
         pc(&url);
         pc(&pw);
+    }
+
+    impl Response {
+        /// 測試視角：ListPush 回包的 token 列長度（非協定欄位，不進 lib）。
+        fn push_tokens_len(&self) -> Option<usize> {
+            match self {
+                Self::PushTokens(v) => Some(v.len()),
+                _ => None,
+            }
+        }
     }
 
     impl ClientMsg {

@@ -459,21 +459,21 @@ pub enum Cmd {
     FetchReuse,
     FetchWeak,
     ReuseLoaded(Arc<Vec<bw_proto::DupGroup>>),
-    WeakLoaded(Arc<serde_json::Value>),
+    WeakLoaded(Arc<bw_proto::WeakPasswordReport>),
     FetchHistory(ItemId),
     HistoryLoaded {
         item: ItemId,
-        report: Arc<serde_json::Value>,
+        report: Arc<bw_proto::CipherHistoryReport>,
     },
     /// Send 加密分享（路線 5）：清單視角、新增表單、刪除確認。
     OpenSend,
     ShowSendsTab(SendTab),
     FetchSends,
-    SendsLoaded(Arc<serde_json::Value>),
+    SendsLoaded(Arc<bw_proto::SendList>),
     SendsFailed(String),
     /// 表單送出：讀訊號→驗證→`VaultCall:Send{Create}`（成功回包含 URL）。
     SubmitSend,
-    SendCreated(Result<Arc<serde_json::Value>, String>),
+    SendCreated(Result<Arc<bw_proto::SendCreated>, String>),
     AskDeleteSend {
         id: ItemId,
         name: String,
@@ -1427,14 +1427,14 @@ pub struct AppCore {
     /// 產生器頁現值（進頁/重新產生時由 daemon 現算）。
     pub gen_tool_pw: Signal<Option<String>>,
     pub reports_reuse: Signal<Arc<Vec<bw_proto::DupGroup>>>,
-    pub reports_weak: Signal<Arc<serde_json::Value>>,
+    pub reports_weak: Signal<Arc<bw_proto::WeakPasswordReport>>,
     /// 詳情頁歷史節（Reports:CipherHistory 回包鏡；離開詳情即清，有才渲染）。
-    pub history: Signal<Arc<serde_json::Value>>,
+    pub history: Signal<Arc<bw_proto::CipherHistoryReport>>,
     /// Send 視角（路線 5）：tab 兩態＋鏡像清單＋新增表單＋成功回包（含 URL）。
     pub send_tab: Signal<SendTab>,
-    pub sends: Signal<Arc<serde_json::Value>>,
+    pub sends: Signal<Arc<bw_proto::SendList>>,
     pub send_form: SendFormFields,
-    pub send_created: Signal<Option<Arc<serde_json::Value>>>,
+    pub send_created: Signal<Option<Arc<bw_proto::SendCreated>>>,
     /// 緊急联系人頁（PR4）：兩側清單鏡＋邀請表單草稿。
     /// 清單是 Identity 級（名稱/email/狀態），鎖態不必清；
     /// 明文視圖（`ea_view_*`，C2）進鎖態即清——epoch 語意見 reducer。
@@ -1543,14 +1543,13 @@ impl AppCore {
             gen_tool: signal(crate::passgen::GenState::default()),
             gen_tool_pw: signal(None),
             reports_reuse: signal(Arc::new(Vec::new())),
-            reports_weak: signal(Arc::new(
-                serde_json::json!({"threshold": bw_proto::WEAK_PASSWORD_THRESHOLD, "items": []}),
-            )),
-            history: signal(Arc::new(
-                serde_json::json!({"supported": false, "versions": []}),
-            )),
+            reports_weak: signal(Arc::new(bw_proto::WeakPasswordReport {
+                threshold: bw_proto::WEAK_PASSWORD_THRESHOLD,
+                items: Vec::new(),
+            })),
+            history: signal(Arc::new(empty_history())),
             send_tab: signal(SendTab::List),
-            sends: signal(Arc::new(serde_json::json!({"items": []}))),
+            sends: signal(Arc::new(bw_proto::SendList { items: Vec::new() })),
             send_form: SendFormFields {
                 kind: signal(SendKind::default()),
                 text: signal(String::new()),
@@ -1697,9 +1696,7 @@ impl AppCore {
         self.att_upload_path.set(String::new());
         self.att_upload_open.set(false);
         self.passkeys.set(Arc::new(Vec::new()));
-        self.history.set(Arc::new(
-            serde_json::json!({"supported": false, "versions": []}),
-        ));
+        self.history.set(Arc::new(empty_history()));
         // Send 表單明文（文字/密碼）不跨視角常駐；成功卡連同 URL 一起丟
         self.send_form.reset();
         self.send_created.set(None);
@@ -2701,7 +2698,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         }
         Cmd::FetchFolders => {
             core.ipc(|s| match s.call(&Call::Vault(VaultCall::ListFolders)) {
-                Ok(Response::Json(v)) => Cmd::FoldersLoaded(Arc::new(parse_folders(&v))),
+                Ok(Response::Folders(rows)) => Cmd::FoldersLoaded(Arc::new(folder_entries(rows))),
                 Ok(other) => Cmd::Failed {
                     err: format!("ListFolders 回應形態不符：{other:?}"),
                 },
@@ -3087,10 +3084,11 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 match s.call(&Call::Vault(VaultCall::Reports {
                     sub: bw_proto::Reports::WeakPasswords,
                 })) {
-                    Ok(Response::Json(v)) => Cmd::WeakLoaded(Arc::new(v)),
-                    _ => Cmd::WeakLoaded(Arc::new(serde_json::json!({
-                        "threshold": bw_proto::WEAK_PASSWORD_THRESHOLD, "items": []
-                    }))),
+                    Ok(Response::WeakPasswords(r)) => Cmd::WeakLoaded(Arc::new(r)),
+                    _ => Cmd::WeakLoaded(Arc::new(bw_proto::WeakPasswordReport {
+                        threshold: bw_proto::WEAK_PASSWORD_THRESHOLD,
+                        items: Vec::new(),
+                    })),
                 }
             });
         }
@@ -3109,13 +3107,13 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 match s.call(&Call::Vault(VaultCall::Reports {
                     sub: bw_proto::Reports::CipherHistory { id },
                 })) {
-                    Ok(Response::Json(v)) => Cmd::HistoryLoaded {
+                    Ok(Response::CipherHistory(r)) => Cmd::HistoryLoaded {
                         item: id,
-                        report: Arc::new(v),
+                        report: Arc::new(r),
                     },
                     _ => Cmd::HistoryLoaded {
                         item: id,
-                        report: Arc::new(serde_json::json!({"supported": false, "versions": []})),
+                        report: Arc::new(empty_history()),
                     },
                 }
             });
@@ -3147,7 +3145,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 match s.call(&Call::Vault(VaultCall::Send {
                     sub: bw_proto::SendOp::List,
                 })) {
-                    Ok(Response::Json(v)) => Cmd::SendsLoaded(Arc::new(v)),
+                    Ok(Response::Sends(list)) => Cmd::SendsLoaded(Arc::new(list)),
                     Ok(other) => Cmd::SendsFailed(format!("Send.List 回應形態不符：{other:?}")),
                     Err(e) => Cmd::SendsFailed(e.display()),
                 }
@@ -3432,7 +3430,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                         hide_email: hide,
                     },
                 })) {
-                    Ok(Response::Json(v)) => Cmd::SendCreated(Ok(Arc::new(v))),
+                    Ok(Response::SendCreated(c)) => Cmd::SendCreated(Ok(Arc::new(c))),
                     Ok(other) => {
                         Cmd::SendCreated(Err(format!("Send.Create 回應形態不符：{other:?}")))
                     }
@@ -4083,20 +4081,24 @@ pub fn nonblank(s: &str) -> Option<String> {
     (!t.is_empty()).then(|| t.to_owned())
 }
 
-/// ListFolders 的 `Response::Json` 陣列 → 鏡像列（缺 id 的列跳過；
-/// name null＝鎖定態信封解不了，呼叫端決定隱藏節點）。純函數可單測。
-pub fn parse_folders(v: &serde_json::Value) -> Vec<FolderEntry> {
-    v.as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|row| {
-                    let id = row.get("id").and_then(|i| i.as_str())?.to_owned();
-                    let name = row.get("name").and_then(|n| n.as_str()).map(str::to_owned);
-                    Some(FolderEntry { id, name })
-                })
-                .collect()
+/// `Response::Folders`（型別化行，PR5 D5）→ 側欄鏡像列。
+/// name None＝鎖定態信封解不了，呼叫端決定隱藏節點（不再 runtime 讀鍵名）。
+pub fn folder_entries(rows: Vec<bw_proto::FolderInfo>) -> Vec<FolderEntry> {
+    rows.into_iter()
+        .map(|r| FolderEntry {
+            id: r.id,
+            name: r.name,
         })
-        .unwrap_or_default()
+        .collect()
+}
+
+/// 歷史節的空白形態（未取、離線、不支援三態共用的佔位）。
+pub fn empty_history() -> bw_proto::CipherHistoryReport {
+    bw_proto::CipherHistoryReport {
+        supported: false,
+        restore_supported: false,
+        versions: Vec::new(),
+    }
 }
 
 /// 衝突原因（型別化事件載荷）→ 橫條文案。純函數可單測。
@@ -5175,17 +5177,21 @@ mod tests {
     }
 
     #[test]
-    fn parse_folders_maps_json_rows_and_skips_bad() {
-        let v = serde_json::json!([
-            {"id": "a", "name": "工作"},
-            {"id": "b", "name": null},
-            {"name": "缺id"},
+    fn folder_entries_map_typed_rows() {
+        let rows = folder_entries(vec![
+            bw_proto::FolderInfo {
+                id: "a".into(),
+                name: Some("工作".into()),
+            },
+            bw_proto::FolderInfo {
+                id: "b".into(),
+                name: None,
+            },
         ]);
-        let rows = parse_folders(&v);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].name.as_deref(), Some("工作"));
         assert_eq!(rows[1].name, None);
-        assert!(parse_folders(&serde_json::json!({"not": "array"})).is_empty());
+        assert!(folder_entries(Vec::new()).is_empty());
     }
 
     /// PR5 D4：衝突事件載荷 → 橫條文案（兩態都可懂，欄位列舉不截斷）。

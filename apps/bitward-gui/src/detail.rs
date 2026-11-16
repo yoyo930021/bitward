@@ -938,20 +938,18 @@ fn history_rows(core: AppCore) -> Vec<View> {
     let mut rows: Vec<View> = crate::reports::history_versions(&report)
         .into_iter()
         .map(|e| {
-            let date = e
-                .get("creationDate")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            let date: String = date.replacen('T', " ", 1).chars().take(16).collect();
-            let name = e
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                .filter(|s| !s.is_empty())
-                .unwrap_or("（無法解密）");
-            let uris = e
-                .get("uriCount")
-                .and_then(serde_json::Value::as_i64)
-                .unwrap_or_default();
+            let date: String = e
+                .creation_date
+                .replacen('T', " ", 1)
+                .chars()
+                .take(16)
+                .collect();
+            let name = if e.name.is_empty() {
+                "（無法解密）"
+            } else {
+                &e.name
+            };
+            let uris = e.uri_count;
             view()
                 .flex_col()
                 .gap_1()
@@ -973,11 +971,7 @@ fn history_rows(core: AppCore) -> Vec<View> {
                 )
         })
         .collect();
-    if report
-        .get("restoreSupported")
-        .and_then(serde_json::Value::as_bool)
-        != Some(true)
-    {
+    if !report.restore_supported {
         rows.push(
             view().child(
                 text("版本還原：此伺服器不提供還原端點，歷史為唯讀")
