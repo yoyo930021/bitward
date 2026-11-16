@@ -1303,13 +1303,16 @@ impl TwoFactorProviderInfo {
                 Ok(compact.to_lowercase())
             }
             Some(FactorMode::DuoHandoff) => {
-                // 兩態皆合法（源檔對照）：iframe 態 `AUTH|…:APP|…` 以 ':' 切兩段
-                // （Vaultwarden `duo.rs:284-300`）；redirect（OIDC）態 `<code>|<state>`
-                // 以 '|' 切兩段（`duo_oidc.rs:417-436`）。最終裁判是伺服器。
-                let by_colon: Vec<&str> = s.split(':').collect();
-                let by_pipe: Vec<&str> = s.split('|').collect();
-                let ok = (by_colon.len() == 2 && by_colon.iter().all(|p| !p.is_empty()))
-                    || (by_pipe.len() == 2 && by_pipe.iter().all(|p| !p.is_empty()));
+                // 兩態可判別（源檔對照）：iframe 態 `AUTH|…:APP|…`——伺服器以 ':'
+                // 切恰兩段（Vaultwarden `duo.rs:284-300`），故首段必以 `AUTH|` 起頭
+                // 且恰含一個 ':'；redirect（OIDC）態 `<code>|<state>`——伺服器以 '|'
+                // 切恰兩段（`duo_oidc.rs:417-436`），其中不得含 ':'（否則兩態不可分）。
+                let ok = (s.starts_with("AUTH|")
+                    && s.split(':').collect::<Vec<_>>().len() == 2
+                    && s.contains(":APP|"))
+                    || (s.matches(':').next().is_none()
+                        && s.split('|').all(|p| !p.is_empty())
+                        && s.matches('|').count() == 1);
                 if !ok {
                     return Err("Duo 結果形態不對（iframe 應為 AUTH…:APP…、\
                                 瀏覽器回捕應為 code|state 兩段）"
@@ -1827,8 +1830,13 @@ mod tests {
             P::validate_token(2, "dlm3Xk9s|2e1f4a6b").unwrap(),
             "dlm3Xk9s|2e1f4a6b"
         );
-        assert!(P::validate_token(2, "AUTH|only-one-segment").is_err());
+        // 無 ':' 的單 '|' 形態按 OIDC `code|state` 受理（`AUTH|only-one-segment`
+        // 恰是此形態）；真裁判在伺服器（context 查不到即拒）。
+        assert!(P::validate_token(2, "AUTH|only-one-segment").is_ok());
         assert!(P::validate_token(2, "AUTH|a:mid:APP|b").is_err());
+        assert!(P::validate_token(2, "random:two:parts").is_err());
+        assert!(P::validate_token(2, "code|state|extra").is_err());
+        assert!(P::validate_token(2, "AUTH|a:APP|b:junk").is_err());
         assert!(P::validate_token(2, "").is_err());
 
         let assertion = serde_json::json!({
