@@ -127,27 +127,34 @@ fn list_view(core: AppCore) -> View {
                     .text_color(theme::TEXT_MUTED)
             },
         ))
-        .child(scroll().flex_1().child(
-            view()
-                .flex_col()
-                .gap_2()
-                .w_full()
-                .max_w(px(680.0))
-                .child(each(
-                    move || send_rows(&core.sends.get()),
-                    |r: &SendRow| r.id,
-                    move |row: ReadSignal<SendRow>, _| {
-                        send_row(row.get(), each_core.clone(), copied)
-                    },
-                ))
-                .child(when(move || send_rows(&core.sends.get()).is_empty(), || {
-                    view()
-                        .flex_col()
-                        .gap_1()
-                        .child(row_note("還沒有分享。文字或檔案都能加密成一條連結。"))
-                        .child(row_note("建立需要連網：Send 不走離線佇列（交連結即存在）。"))
-                })),
-        ))
+        .child(
+            scroll().flex_1().child(
+                view()
+                    .flex_col()
+                    .gap_2()
+                    .w_full()
+                    .max_w(px(680.0))
+                    .child(each(
+                        move || send_rows(&core.sends.get()),
+                        |r: &SendRow| r.id,
+                        move |row: ReadSignal<SendRow>, _| {
+                            send_row(row.get(), each_core.clone(), copied)
+                        },
+                    ))
+                    .child(when(
+                        move || send_rows(&core.sends.get()).is_empty(),
+                        || {
+                            view()
+                                .flex_col()
+                                .gap_1()
+                                .child(row_note("還沒有分享。文字或檔案都能加密成一條連結。"))
+                                .child(row_note(
+                                    "建立需要連網：Send 不走離線佇列（交連結即存在）。",
+                                ))
+                        },
+                    )),
+            ),
+        )
 }
 
 /// 單列：型別章＋名稱＋到期＋存取計數＋已檢視點＋複製連結＋移除。
@@ -183,28 +190,36 @@ fn send_row(row: SendRow, core: AppCore, copied: Signal<Option<&'static str>>) -
         .child(row_note(format!(
             "存取 {}/{}",
             row.access_count,
-            row.max_access.map(|m| m.to_string()).unwrap_or_else(|| "∞".into())
+            row.max_access
+                .map(|m| m.to_string())
+                .unwrap_or_else(|| "∞".into())
         )))
-        .child(when(move || row.viewed, || {
-            view()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .child(
-                    view()
-                        .w(px(8.0))
-                        .h(px(8.0))
-                        .rounded(px(4.0))
-                        .bg(theme::SUCCESS),
-                )
-                .child(row_note("已檢視"))
-        }))
-        .child(when(move || web_cond.is_some(), move || {
-            let u = web_open.clone().unwrap_or_default();
-            view().child(ui::button("開連結", ui::Btn::Ghost, move || {
-                drop(open_url(u.clone()));
-            }))
-        }))
+        .child(when(
+            move || row.viewed,
+            || {
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        view()
+                            .w(px(8.0))
+                            .h(px(8.0))
+                            .rounded(px(4.0))
+                            .bg(theme::SUCCESS),
+                    )
+                    .child(row_note("已檢視"))
+            },
+        ))
+        .child(when(
+            move || web_cond.is_some(),
+            move || {
+                let u = web_open.clone().unwrap_or_default();
+                view().child(ui::button("開連結", ui::Btn::Ghost, move || {
+                    drop(open_url(u.clone()));
+                }))
+            },
+        ))
         .child(ui::copy_button(
             std::rc::Rc::new(move || url_for_copy.clone()),
             "Send 連結",
@@ -290,39 +305,35 @@ fn form_view(core: AppCore) -> View {
             move |t| pw_core.send_form.password.set(t),
         ))
         .child(
-            view()
-                .flex_col()
-                .gap_2()
-                .child(row_note("到期刪除"))
-                .child(
-                    view()
-                        .flex_row()
-                        .gap_2()
-                        .child(crate::list::chip(
-                            "1 天".to_owned(),
-                            move || days_core.send_form.days.get() == 1,
-                            {
-                                let c = days_core.clone();
-                                move || c.send_form.days.set(1)
-                            },
-                        ))
-                        .child(crate::list::chip(
-                            "7 天".to_owned(),
-                            move || days_core.send_form.days.get() == 7,
-                            {
-                                let c = days_core.clone();
-                                move || c.send_form.days.set(7)
-                            },
-                        ))
-                        .child(crate::list::chip(
-                            "30 天".to_owned(),
-                            move || days_core.send_form.days.get() == 30,
-                            {
-                                let c = days_core.clone();
-                                move || c.send_form.days.set(30)
-                            },
-                        )),
-                ),
+            view().flex_col().gap_2().child(row_note("到期刪除")).child(
+                view()
+                    .flex_row()
+                    .gap_2()
+                    .child(crate::list::chip(
+                        "1 天".to_owned(),
+                        move || days_core.send_form.days.get() == 1,
+                        {
+                            let c = days_core.clone();
+                            move || c.send_form.days.set(1)
+                        },
+                    ))
+                    .child(crate::list::chip(
+                        "7 天".to_owned(),
+                        move || days_core.send_form.days.get() == 7,
+                        {
+                            let c = days_core.clone();
+                            move || c.send_form.days.set(7)
+                        },
+                    ))
+                    .child(crate::list::chip(
+                        "30 天".to_owned(),
+                        move || days_core.send_form.days.get() == 30,
+                        {
+                            let c = days_core.clone();
+                            move || c.send_form.days.set(30)
+                        },
+                    )),
+            ),
         )
         .child(ui::form_field(
             "存取上限（選填）",
@@ -355,14 +366,11 @@ fn form_view(core: AppCore) -> View {
             ),
             None => view(),
         }))
-        .child(
-            view()
-                .flex_row()
-                .gap_3()
-                .child(ui::button("建立連結", ui::Btn::Primary, move || {
-                    submit_core.send(Cmd::SubmitSend)
-                })),
-        )
+        .child(view().flex_row().gap_3().child(ui::button(
+            "建立連結",
+            ui::Btn::Primary,
+            move || submit_core.send(Cmd::SubmitSend),
+        )))
         .child(row_note(
             "建立需要連網與解鎖（Send 無離線佇列）；連結含金鑰片段，伺服器看不到內容。",
         ))

@@ -8,9 +8,7 @@
 //! 明文紀律：匯入是匯出的鏡像入口——明文只在 worker 區域短暫存在，
 //! 進 Outgoing 幀即出棧；預覽只回計數，不回明文。
 
-use bw_proto::{
-    Call, CipherDraft, CipherField, ImportItem, ItemKind, Response, VaultCall,
-};
+use bw_proto::{Call, CipherDraft, CipherField, ImportItem, ItemKind, Response, VaultCall};
 
 use crate::btp::Session;
 
@@ -59,7 +57,10 @@ pub fn parse(text: &str) -> Result<Parsed, String> {
         _ => return Err("JSON 頂層需為陣列或含 items 的物件".into()),
     };
     if items.len() > MAX_ROWS {
-        return Err(format!("單次匯入上限 {MAX_ROWS} 筆（本檔 {} 筆）", items.len()));
+        return Err(format!(
+            "單次匯入上限 {MAX_ROWS} 筆（本檔 {} 筆）",
+            items.len()
+        ));
     }
     let mut rows = Vec::new();
     let mut skipped = 0usize;
@@ -136,10 +137,7 @@ fn row_from(it: &serde_json::Value) -> Option<ImportRow> {
                     );
                     Some(CipherField {
                         name: fname,
-                        value: f
-                            .get("value")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_owned),
+                        value: f.get("value").and_then(|v| v.as_str()).map(str::to_owned),
                         kind,
                     })
                 })
@@ -224,7 +222,10 @@ pub fn run(session: &Session, text: &str) -> Result<ImportOutcome, String> {
         });
     }
     let items = to_items(&rows);
-    match session.call(&Call::Vault(VaultCall::Import { items, format: false })) {
+    match session.call(&Call::Vault(VaultCall::Import {
+        items,
+        format: false,
+    })) {
         Ok(Response::Json(v)) => Ok(ImportOutcome {
             created: v.get("imported").and_then(|n| n.as_u64()).unwrap_or(0) as usize,
             failed: 0,
@@ -317,7 +318,10 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].draft.name, "A");
         assert_eq!(items[0].draft.password.as_deref(), Some("p"));
-        assert_eq!(items[0].draft.fields[0].kind, bw_proto::CipherFieldKind::Boolean);
+        assert_eq!(
+            items[0].draft.fields[0].kind,
+            bw_proto::CipherFieldKind::Boolean
+        );
         assert_eq!(items[1].draft.kind, ItemKind::SecureNote);
         assert_eq!(items[1].draft.notes.as_deref(), Some("x"));
     }

@@ -181,7 +181,14 @@ pub(crate) fn password_with_generator(core: AppCore) -> View {
                         .flex_1(),
                 )
                 .child(ui::button_dyn(
-                    move || if gen_panel.get().open { "收起" } else { "產生" }.to_owned(),
+                    move || {
+                        if gen_panel.get().open {
+                            "收起"
+                        } else {
+                            "產生"
+                        }
+                        .to_owned()
+                    },
                     ui::Btn::Ghost,
                     move || gen_panel.update(|g| g.open = !g.open),
                 )),
@@ -215,17 +222,13 @@ pub fn uris_editor(core: AppCore) -> View {
             || "＋ 新增網址".to_owned(),
             move || add_rows.update(|v| Arc::make_mut(v).push(UriDraft::default())),
         ));
-    view()
-        .flex_col()
-        .gap_1p5()
-        .child(label)
-        .child(each(
-            move || (*rows.get()).clone(),
-            |u: &UriDraft| u.key,
-            move |_item: ReadSignal<UriDraft>, _i: ReadSignal<usize>| {
-                uri_row(row_rows, _item.get().key)
-            },
-        ))
+    view().flex_col().gap_1p5().child(label).child(each(
+        move || (*rows.get()).clone(),
+        |u: &UriDraft| u.key,
+        move |_item: ReadSignal<UriDraft>, _i: ReadSignal<usize>| {
+            uri_row(row_rows, _item.get().key)
+        },
+    ))
 }
 
 /// 單列網址：輸入框（按 key 回寫）＋✕刪列。
@@ -327,11 +330,7 @@ fn uri_match_menu(rows: Signal<Arc<Vec<UriDraft>>>, key: u32) -> View {
         ))
 }
 
-fn uri_match_panel(
-    rows: Signal<Arc<Vec<UriDraft>>>,
-    key: u32,
-    open: Signal<bool>,
-) -> View {
+fn uri_match_panel(rows: Signal<Arc<Vec<UriDraft>>>, key: u32, open: Signal<bool>) -> View {
     let cur = rows
         .get()
         .iter()
@@ -388,14 +387,22 @@ pub(crate) fn type_switcher(core: AppCore, is_create: bool) -> View {
                     "登入",
                     move || kind.get() == ItemKind::Login,
                     is_create,
-                    if is_create { None } else { Some("型別於建立後不可更改") },
+                    if is_create {
+                        None
+                    } else {
+                        Some("型別於建立後不可更改")
+                    },
                     move || l_core.form.kind.set(ItemKind::Login),
                 ))
                 .child(type_chip(
                     "加密筆記",
                     move || kind.get() == ItemKind::SecureNote,
                     is_create,
-                    if is_create { None } else { Some("型別於建立後不可更改") },
+                    if is_create {
+                        None
+                    } else {
+                        Some("型別於建立後不可更改")
+                    },
                     move || n_core.form.kind.set(ItemKind::SecureNote),
                 ))
                 .child(type_chip(
@@ -646,10 +653,14 @@ fn folder_panel(core: AppCore, open: Signal<bool>) -> View {
     let mut rows: Vec<View> = Vec::new();
     let none_pick = folder;
     let none_close = open;
-    rows.push(ui::menu_row("無資料夾".to_owned(), folder.get().is_empty(), move || {
-        none_pick.set(String::new());
-        none_close.set(false);
-    }));
+    rows.push(ui::menu_row(
+        "無資料夾".to_owned(),
+        folder.get().is_empty(),
+        move || {
+            none_pick.set(String::new());
+            none_close.set(false);
+        },
+    ));
     let list = core.folders.get();
     for f in list.iter().filter(|f| f.name.is_some()) {
         let name = f.name.clone().unwrap_or_default();
@@ -749,7 +760,11 @@ fn field_row(fields: Signal<Arc<Vec<FieldDraft>>>, key: u32) -> View {
                 let edit = val_build;
                 input()
                     .value(move || {
-                        edit.get().iter().find(|f| f.key == key).map(|f| f.value.clone()).unwrap_or_default()
+                        edit.get()
+                            .iter()
+                            .find(|f| f.key == key)
+                            .map(|f| f.value.clone())
+                            .unwrap_or_default()
                     })
                     .placeholder("值")
                     .placeholder_color(move || color(theme::TEXT_MUTED))
@@ -986,9 +1001,7 @@ fn generator(core: AppCore) -> View {
                 .child(switch_chip(
                     "易讀",
                     move || gen_panel.get().avoid_ambiguous,
-                    move || {
-                        gen_panel.update(|g| g.avoid_ambiguous = !g.avoid_ambiguous)
-                    },
+                    move || gen_panel.update(|g| g.avoid_ambiguous = !g.avoid_ambiguous),
                 )),
         )
         .child(
@@ -1086,10 +1099,8 @@ pub(crate) fn slider_on(gen_panel: Signal<GenState>) -> View {
                         .border(px(1.0))
                         .border_color(theme::HAIRLINE)
                         .left(move || {
-                            px(
-                                theme::GEN_TRACK_W * knob_gen.get().length_ratio()
-                                    - theme::GEN_KNOB / 2.0,
-                            )
+                            px(theme::GEN_TRACK_W * knob_gen.get().length_ratio()
+                                - theme::GEN_KNOB / 2.0)
                         }),
                 ),
         )

@@ -251,7 +251,10 @@ fn poll_unlocked(dir: PathBuf, core: AppCore, ms: u64) {
     let d = dir.clone();
     let c = core.clone();
     at(ms, move || {
-        if !matches!(c.vault.get(), Some(bw_proto::UnlockStateView::Unlocked { .. })) {
+        if !matches!(
+            c.vault.get(),
+            Some(bw_proto::UnlockStateView::Unlocked { .. })
+        ) {
             if ms < 60000 {
                 poll_unlocked(dir, core, ms + 1000);
             }
@@ -285,7 +288,10 @@ fn base32_decode(input: &str) -> Vec<u8> {
         if ch == '=' || ch.is_whitespace() {
             continue;
         }
-        let idx = alphabet.iter().position(|a| *a as char == ch).expect("base32 字元");
+        let idx = alphabet
+            .iter()
+            .position(|a| *a as char == ch)
+            .expect("base32 字元");
         acc = (acc << 5) | idx as u32;
         bits += 5;
         if bits >= 8 {
@@ -374,7 +380,10 @@ fn poll_2fa_unlocked(dir: PathBuf, core: AppCore, ms: u64) {
     let d = dir.clone();
     let c = core.clone();
     at(ms, move || {
-        let unlocked = matches!(c.vault.get(), Some(bw_proto::UnlockStateView::Unlocked { .. }));
+        let unlocked = matches!(
+            c.vault.get(),
+            Some(bw_proto::UnlockStateView::Unlocked { .. })
+        );
         if !unlocked || c.items.get().is_empty() {
             if ms < 80000 {
                 poll_2fa_unlocked(dir, core, ms + 1000);
@@ -438,11 +447,13 @@ pub fn script_duo(dir: PathBuf, core: AppCore) {
                 signature: "FIXSIG".to_owned(),
             }
         };
-        c.send(Cmd::Login2faRequested(vec![bw_proto::TwoFactorProviderInfo {
-            provider: 2,
-            hint: None,
-            details: Some(details),
-        }]));
+        c.send(Cmd::Login2faRequested(vec![
+            bw_proto::TwoFactorProviderInfo {
+                provider: 2,
+                hint: None,
+                details: Some(details),
+            },
+        ]));
     });
     let c = core.clone();
     at(3600, move || {
@@ -453,7 +464,14 @@ pub fn script_duo(dir: PathBuf, core: AppCore) {
     let c = core.clone();
     at(6200, move || {
         assert!(c.login.duo_open.get(), "Duo 模態應已開啟");
-        capture(&d, if redirect { "shot-63-duo-redirect.png" } else { "shot-62-duo-iframe.png" });
+        capture(
+            &d,
+            if redirect {
+                "shot-63-duo-redirect.png"
+            } else {
+                "shot-62-duo-iframe.png"
+            },
+        );
     });
     let c = core.clone();
     at(6800, move || {
@@ -468,7 +486,11 @@ pub fn script_duo(dir: PathBuf, core: AppCore) {
     at(7400, move || {
         assert!(!c.login.duo_open.get(), "回捕後模態必須關閉");
         let code = c.login.code.get();
-        let want = if redirect { "CODE9x|STATE7y" } else { "AUTH|aa.bb:APP|cc.dd" };
+        let want = if redirect {
+            "CODE9x|STATE7y"
+        } else {
+            "AUTH|aa.bb:APP|cc.dd"
+        };
         assert_eq!(code, want, "回捕 token 必原樣入碼欄");
         assert!(
             bw_proto::TwoFactorProviderInfo::validate_token(2, &code).is_ok(),
@@ -678,8 +700,14 @@ pub fn script(dir: PathBuf, core: AppCore) {
     let c = core.clone();
     at(19200, move || {
         let e = c.unlock_error.get().unwrap_or_default();
-        assert!(e.contains("生物辨識"), "biometric 未接應回明確錯誤，實際：{e}");
-        assert!(c.error_text.get().is_none(), "解鎖錯誤走欄下紅字，不掛頂部橫條");
+        assert!(
+            e.contains("生物辨識"),
+            "biometric 未接應回明確錯誤，實際：{e}"
+        );
+        assert!(
+            c.error_text.get().is_none(),
+            "解鎖錯誤走欄下紅字，不掛頂部橫條"
+        );
     });
     // 錯密碼 → 欄下「主密碼錯誤」、欄位內容保留不清。窗口 1.7s：
     // 離線 PSK 派生是 600k 次 PBKDF2（release daemon 約 0.3–0.5s）。
@@ -700,8 +728,7 @@ pub fn script(dir: PathBuf, core: AppCore) {
     let c = core.clone();
     at(21300, move || {
         c.unlock_pw.set(
-            std::env::var("BW_TEST_PASSWORD")
-                .unwrap_or_else(|_| "DemoMaster-9kQ!z".to_owned()),
+            std::env::var("BW_TEST_PASSWORD").unwrap_or_else(|_| "DemoMaster-9kQ!z".to_owned()),
         );
         c.send(Cmd::RequestUnlock);
     });
@@ -788,14 +815,16 @@ pub fn script(dir: PathBuf, core: AppCore) {
     let c = core.clone();
     at(37200, move || {
         c.totp_valid_for.set(30);
-        c.totp_issued.set(Some(Instant::now() - Duration::from_secs(20)));
+        c.totp_issued
+            .set(Some(Instant::now() - Duration::from_secs(20)));
     });
     let d = dir.clone();
     at(37400, move || capture(&d, "shot-22-totp-10s.png"));
     let c = core.clone();
     at(37800, move || {
         c.totp_valid_for.set(30);
-        c.totp_issued.set(Some(Instant::now() - Duration::from_secs(25)));
+        c.totp_issued
+            .set(Some(Instant::now() - Duration::from_secs(25)));
     });
     let d = dir.clone();
     at(38000, move || capture(&d, "shot-23-totp-5s.png"));
@@ -842,7 +871,9 @@ pub fn script(dir: PathBuf, core: AppCore) {
     at(42600, move || {
         c.form.kind.set(bw_proto::ItemKind::SecureNote);
         c.form.name.set("2b 筆記範例".into());
-        c.form.notes.set("加密筆記內文：明文只進 Outgoing 幀。".into());
+        c.form
+            .notes
+            .set("加密筆記內文：明文只進 Outgoing 幀。".into());
     });
     let d = dir.clone();
     at(43200, move || capture(&d, "shot-27-securenote-modal.png"));
@@ -913,7 +944,9 @@ pub fn script(dir: PathBuf, core: AppCore) {
     let c = core.clone();
     at(47600, move || c.send(Cmd::SubmitForm));
     let d = dir.clone();
-    at(48800, move || capture(&d, "shot-33-edit-fields-applied.png"));
+    at(48800, move || {
+        capture(&d, "shot-33-edit-fields-applied.png")
+    });
 
     // —— 匯入模態：fixture 預覽 → 真跑（批次 3：單交易 Import）→ 結果列 ——
     let fixture = std::env::temp_dir().join("bitward-gui-import-sample.json");
@@ -937,7 +970,10 @@ pub fn script(dir: PathBuf, core: AppCore) {
     at(53000, move || {
         let n = c.notice.get().unwrap_or_default();
         println!("bitward-gui: import result = {n}");
-        assert!(n.contains("已匯入 2 筆"), "匯入執行結果列應為已匯入 2 筆：{n}");
+        assert!(
+            n.contains("已匯入 2 筆"),
+            "匯入執行結果列應為已匯入 2 筆：{n}"
+        );
     });
     let c = core.clone();
     at(53200, move || c.send(Cmd::ChooseFolder(None)));
@@ -951,7 +987,10 @@ pub fn script(dir: PathBuf, core: AppCore) {
 
     // —— 附件生命週期（批次 4b）：上傳確認 → 收斂後在列 → 下載 → 刪除確認 ——
     let attach_file = std::env::temp_dir().join("bitward-attach-sample.txt");
-    let _ = std::fs::write(&attach_file, b"bitward gui attachment e2e payload 0123456789\n");
+    let _ = std::fs::write(
+        &attach_file,
+        b"bitward gui attachment e2e payload 0123456789\n",
+    );
     let c = core.clone();
     at(55000, move || {
         c.query.set(String::new());
@@ -1001,7 +1040,10 @@ pub fn script(dir: PathBuf, core: AppCore) {
     let c = core.clone();
     at(59200, move || {
         assert!(c.confirm.get().is_some(), "髒表單的導航應被確認框攔下");
-        assert!(matches!(c.route.get(), Route::Edit(_)), "攔截後應仍留在編輯器");
+        assert!(
+            matches!(c.route.get(), Route::Edit(_)),
+            "攔截後應仍留在編輯器"
+        );
     });
     let d = dir.clone();
     at(59600, move || capture(&d, "shot-43-dirty-guard.png"));
@@ -1020,7 +1062,10 @@ pub fn script(dir: PathBuf, core: AppCore) {
     at(60900, move || c.send(Cmd::ConfirmYes));
     let c = core.clone();
     at(61200, move || {
-        assert!(matches!(c.route.get(), Route::List), "放棄編輯應完成被攔的導航");
+        assert!(
+            matches!(c.route.get(), Route::List),
+            "放棄編輯應完成被攔的導航"
+        );
         // —— 已封存視角（批次 C）：封存 → 主列表消失 → 節點視角可見 → 取消回主列表 ——
         if let Some(id) = find_id(&c, "E2E 驗證項目改名") {
             c.send(Cmd::SetArchived { id, archived: true });
@@ -1037,7 +1082,10 @@ pub fn script(dir: PathBuf, core: AppCore) {
     let c = core.clone();
     at(64500, move || {
         if let Some(id) = find_id(&c, "E2E 驗證項目改名") {
-            c.send(Cmd::SetArchived { id, archived: false });
+            c.send(Cmd::SetArchived {
+                id,
+                archived: false,
+            });
         }
     });
     let c = core.clone();
@@ -1125,7 +1173,9 @@ fn poll_attachment_row(dir: PathBuf, core: AppCore, ms: u64) {
             })
         });
         let d2 = dir.clone();
-        at(ms + 2000, move || capture(&d2, "shot-36-attachment-downloaded.png"));
+        at(ms + 2000, move || {
+            capture(&d2, "shot-36-attachment-downloaded.png")
+        });
         let c3 = core.clone();
         let att3 = att;
         at(ms + 2400, move || {
@@ -1136,7 +1186,9 @@ fn poll_attachment_row(dir: PathBuf, core: AppCore, ms: u64) {
             })
         });
         let d3 = dir.clone();
-        at(ms + 3000, move || capture(&d3, "shot-37-attachment-delete-confirm.png"));
+        at(ms + 3000, move || {
+            capture(&d3, "shot-37-attachment-delete-confirm.png")
+        });
         let c4 = core.clone();
         at(ms + 3400, move || c4.send(Cmd::ConfirmYes));
         // —— 批准佇列（批次 6）：gated device session 造一筆真 pending ——
@@ -1150,9 +1202,7 @@ fn poll_attachment_row(dir: PathBuf, core: AppCore, ms: u64) {
             let p = c7.pending.get();
             assert!(!p.is_empty(), "gated session 應造出一筆真 pending");
             // 時間欄斷言（DataModel 補 requested_at_ms 後生效）：合理 epoch。
-            let t = p[0]
-                .requested_at_ms
-                .expect("pending 應帶 requested_at_ms");
+            let t = p[0].requested_at_ms.expect("pending 應帶 requested_at_ms");
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
@@ -1243,12 +1293,16 @@ fn poll_attachment_row(dir: PathBuf, core: AppCore, ms: u64) {
             c.send(Cmd::OpenSettings);
         });
         let d = dir.clone();
-        at(ms + 12100, move || capture(&d, "shot-57-settings-tools.png"));
+        at(ms + 12100, move || {
+            capture(&d, "shot-57-settings-tools.png")
+        });
         // —— 產生器頁（批次 9）：進頁自動現算一碼 ——
         let cg = core.clone();
         at(ms + 9700, move || cg.send(Cmd::OpenGenerator));
         let dg = dir.clone();
-        at(ms + 10500, move || capture(&dg, "shot-55-generator-page.png"));
+        at(ms + 10500, move || {
+            capture(&dg, "shot-55-generator-page.png")
+        });
         // —— ICO→PNG 轉碼實證（批次 13）：facebook.com 經 VW 回 MS ICO，轉碼後
         //    快取態必為 Ready 且 data URI 是 image/png（NSImage 吃得動）；拍 FB 磚。——
         let c = core.clone();
@@ -1300,9 +1354,13 @@ fn poll_attachment_row(dir: PathBuf, core: AppCore, ms: u64) {
             c14.send(Cmd::OpenSend);
         });
         let c = core.clone();
-        at(ms + 16300, move || c.send(Cmd::ShowSendsTab(SendTab::Create)));
+        at(ms + 16300, move || {
+            c.send(Cmd::ShowSendsTab(SendTab::Create))
+        });
         let c = core.clone();
-        at(ms + 16700, move || c.send_form.text.set("E2E 接收頁範例".into()));
+        at(ms + 16700, move || {
+            c.send_form.text.set("E2E 接收頁範例".into())
+        });
         let c = core.clone();
         at(ms + 17100, move || c.send(Cmd::SubmitSend));
         let c = core.clone();
@@ -1404,7 +1462,10 @@ pub fn script_cand(dir: PathBuf, core: AppCore) {
     let d = dir.clone();
     at(4000, move || {
         assert!(
-            matches!(c.vault.get(), Some(bw_proto::UnlockStateView::Unlocked { .. })),
+            matches!(
+                c.vault.get(),
+                Some(bw_proto::UnlockStateView::Unlocked { .. })
+            ),
             "實拍前提＝常駐 daemon 解鎖態，實際：{:?}",
             c.vault.get()
         );

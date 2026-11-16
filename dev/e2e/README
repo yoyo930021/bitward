@@ -1,0 +1,31 @@
+# e2e 與收案閘
+
+真相源紀律：各腳本頭註解是该車道的斷言清單；本檔只定收案閘，不重複腳本內容。
+
+## 收案閘（每批 code-ready 前必跑，兩 workspace 都算）
+
+root workspace（repo 根）：
+
+    cargo fmt --check
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo test --workspace
+
+GUI workspace（`apps/bitward-gui`，獨立 workspace，root 命令不覆蓋它）：
+
+    cd apps/bitward-gui
+    cargo fmt --check
+    cargo check --all-targets
+    cargo test --lib
+
+教訓（2026-11-17）：GUI crate 曾在 HEAD 帶括號破口（`cargo check` rc=1）數發 commit
+無人擋，因 CI 當時只驗 root workspace 的 fmt/clippy/nextest。CI 現已補 `gui` job
+（macos：fmt/check/test --lib）與 `linux-gui` job（ubuntu：clippy/test）；本地收案
+仍以本節兩段命令為準，CI 是網不是替身。
+
+## e2e 跑法
+
+- 依賴：docker（Vaultwarden 1.37.2 釘版）、python3、jq；orgpath 另需 python cryptography。
+- 全部腳本自建獨立 data-dir/sock/容器名，可重複跑；release 二進位需求見各腳本頭註（PBKDF2 教訓）。
+- daemon 重啟段的就緒判定一律「連得通」輪詢（`<helper> status`），不用 `-S` 檔檢查或固定 sleep：
+  kill 後殭屍 sock 檔會假通過，ubuntu 冷啟綁定慢於 mac（autodrain/orgpath 兩度 CI 實錄）。
+- GUI 截圖流：`nsh run --target macos`（README 跑法段）；Linux 面見 docs/research/nsh-linux.md。

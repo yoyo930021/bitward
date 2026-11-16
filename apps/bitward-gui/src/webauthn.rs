@@ -23,19 +23,19 @@ use std::cell::RefCell;
 use nsh_platform_macos::objc2::rc::{Allocated, Retained, Weak};
 use nsh_platform_macos::objc2::runtime::{AnyObject, Bool, NSObject, ProtocolObject};
 use nsh_platform_macos::objc2::{
-    class, define_class, extern_protocol, msg_send, DefinedClass, MainThreadOnly,
+    DefinedClass, MainThreadOnly, class, define_class, extern_protocol, msg_send,
 };
 use nsh_platform_macos::objc2_app_kit::NSWindow;
-use nsh_platform_macos::objc2_foundation::{
-    NSArray, NSData, NSError, NSObjectProtocol, NSString,
-};
+use nsh_platform_macos::objc2_foundation::{NSArray, NSData, NSError, NSObjectProtocol, NSString};
 
 unsafe extern "C" {
     /// 本 app 未連結 AuthenticationServices（框架走 NSBundle 動態載入）,
     /// 符號改向全程序要：`dlsym(RTLD_DEFAULT, …)`（libSystem 恆有 dlsym,
     /// TwoFA 紀律「libc 未再匯出 dlopen」的替代路）。
-    fn dlsym(handle: *mut std::ffi::c_void, symbol: *const std::ffi::c_char)
-    -> *mut std::ffi::c_void;
+    fn dlsym(
+        handle: *mut std::ffi::c_void,
+        symbol: *const std::ffi::c_char,
+    ) -> *mut std::ffi::c_void;
 }
 
 /// macOS `RTLD_DEFAULT`＝((void*)-2)。
@@ -146,7 +146,9 @@ extern_protocol!(
     /// # Safety
     /// 鏡像 Apple 標頭：回傳承載彈窗的 NSWindow（ASPresentationAnchor 別名）。
     #[allow(clippy::missing_safety_doc)]
-    unsafe trait ASAuthorizationControllerPresentationContextProviding: NSObjectProtocol {
+    unsafe trait ASAuthorizationControllerPresentationContextProviding:
+        NSObjectProtocol
+    {
         #[allow(deprecated)]
         #[unsafe(method_id(presentationAnchorForAuthorizationController:))]
         fn presentation_anchor(&self, controller: &AnyObject) -> Retained<NSWindow>;
@@ -265,8 +267,7 @@ thread_local! {
 
 /// 載入 AuthenticationServices（冪等；失敗回 false＝島不可用）。
 fn ensure_framework_loaded() -> bool {
-    let path =
-        NSString::from_str("/System/Library/Frameworks/AuthenticationServices.framework");
+    let path = NSString::from_str("/System/Library/Frameworks/AuthenticationServices.framework");
     unsafe {
         let bundle: Option<Retained<AnyObject>> =
             msg_send![class!(NSBundle), bundleWithPath: &*path];
@@ -316,7 +317,8 @@ pub fn request_assertion(
             return;
         };
         // allowedCredentials：有清單才收窄（id 解碼失敗的跳過,寧寬勿拒）。
-        if let Some(transports) = all_supported_transports().filter(|_| !credential_ids.is_empty()) {
+        if let Some(transports) = all_supported_transports().filter(|_| !credential_ids.is_empty())
+        {
             let mut objs: Vec<Retained<AnyObject>> = Vec::new();
             for id in &credential_ids {
                 let Some(bytes) = b64url_decode(id) else {
@@ -340,7 +342,8 @@ pub fn request_assertion(
                 let _: () = msg_send![&*request, setAllowedCredentials: &*arr];
             }
         }
-        let boxed: *mut std::ffi::c_void = Box::into_raw(Box::new(on_done)) as *mut std::ffi::c_void;
+        let boxed: *mut std::ffi::c_void =
+            Box::into_raw(Box::new(on_done)) as *mut std::ffi::c_void;
         let delegate: Option<Retained<IslandDelegate>> = msg_send![
             IslandDelegate::alloc(mtm),
             initWithDone: boxed
@@ -396,7 +399,11 @@ mod tests {
         assert_eq!(b64url(&[0xFB, 0xFF]), "-_8");
         for raw in [&b"foo"[..], b"foob", b"fooba", b"\x00\x01\xfe\xff"] {
             let enc = b64url(raw);
-            assert_eq!(b64url_decode(&enc).as_deref(), Some(raw), "roundtrip {raw:?}");
+            assert_eq!(
+                b64url_decode(&enc).as_deref(),
+                Some(raw),
+                "roundtrip {raw:?}"
+            );
         }
         assert_eq!(b64url_decode("a+"), None);
     }

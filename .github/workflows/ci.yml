@@ -41,6 +41,25 @@ jobs:
           BITWARD_E2E_SERVER: http://localhost:8080
         run: cargo nextest run -p bw-server --features e2e
 
+  # 體制閘：GUI workspace（apps/bitward-gui，獨立 cargo workspace）在 macOS 的
+  # 編譯＋單測＋fmt 閘。教訓：6f057a6 期間 GUI crate 於 HEAD 括號破口 rc=1 無人擋
+  # （root workspace 不含 apps/*，linux-gui 又只驗 Linux 面）。
+  gui:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt gate (GUI workspace)
+        working-directory: apps/bitward-gui
+        run: cargo fmt --check
+      - name: compile gate
+        working-directory: apps/bitward-gui
+        run: cargo check --all-targets
+      - name: unit tests
+        working-directory: apps/bitward-gui
+        run: cargo test --lib
+
   # PR6-E1：Linux 全 workspace（Q3/systemd 落地後，crates/bins 必須在 Linux 全綠；
   # 之前 Linux 只驗 bw-server＋選定 e2e，bw-keys/bw-store/bw-agent 單測從未上過 Linux）。
   linux-check:

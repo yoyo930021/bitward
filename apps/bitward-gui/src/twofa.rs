@@ -13,7 +13,7 @@
 
 use std::rc::Rc;
 
-use bw_proto::{TwoFactorDetails, TwoFactorProviderInfo, TwoFactorProviderState, FactorMode};
+use bw_proto::{FactorMode, TwoFactorDetails, TwoFactorProviderInfo, TwoFactorProviderState};
 use nsh_core::prelude::*;
 
 use crate::state::{AppCore, Cmd};
@@ -91,7 +91,10 @@ pub fn island_gate(info: Option<&TwoFactorProviderInfo>) -> Result<FactorMode, &
         (
             FactorMode::DuoHandoff,
             Some(TwoFactorDetails::DuoIframe { .. } | TwoFactorDetails::DuoRedirect { .. })
-        ) | (FactorMode::WebauthnAssertion, Some(TwoFactorDetails::Webauthn { .. }))
+        ) | (
+            FactorMode::WebauthnAssertion,
+            Some(TwoFactorDetails::Webauthn { .. })
+        )
     );
     if has {
         Ok(mode)
@@ -102,9 +105,7 @@ pub fn island_gate(info: Option<&TwoFactorProviderInfo>) -> Result<FactorMode, &
 
 /// 已啟用清單裡某因子是否在场（管理列狀態徽章用，純查表）。
 pub fn enabled_of(states: &[TwoFactorProviderState], provider: i32) -> bool {
-    states
-        .iter()
-        .any(|s| s.provider == provider && s.enabled)
+    states.iter().any(|s| s.provider == provider && s.enabled)
 }
 
 // ── 設定頁「雙重驗證」分節 ────────────────────────────────────
@@ -229,11 +230,11 @@ fn factor_rows(core: AppCore) -> View {
                         .text_color(theme::TEXT_PRIMARY)
                         .flex_1(),
                 )
-                .child(
-                    text(state_label)
-                        .text_size(px(11.5))
-                        .text_color(if on { theme::SUCCESS } else { theme::TEXT_MUTED }),
-                )
+                .child(text(state_label).text_size(px(11.5)).text_color(if on {
+                    theme::SUCCESS
+                } else {
+                    theme::TEXT_MUTED
+                }))
                 .child(action_cell(c, provider, on)),
         );
         // 子流程面板緊接在觸發列下方。
@@ -330,7 +331,13 @@ fn action_cell(core: AppCore, provider: i32, on: bool) -> View {
         3 => {
             let c = core.clone();
             ui::button_dyn(
-                move || if c.tf_busy.get() { "處理中…".to_owned() } else { "啟用".to_owned() },
+                move || {
+                    if c.tf_busy.get() {
+                        "處理中…".to_owned()
+                    } else {
+                        "啟用".to_owned()
+                    }
+                },
                 ui::Btn::Ghost,
                 move || c.send(Cmd::TfYubikeyAdd),
             )
@@ -338,7 +345,13 @@ fn action_cell(core: AppCore, provider: i32, on: bool) -> View {
         8 => {
             let c = core.clone();
             ui::button_dyn(
-                move || if c.tf_busy.get() { "處理中…".to_owned() } else { "取救援碼".to_owned() },
+                move || {
+                    if c.tf_busy.get() {
+                        "處理中…".to_owned()
+                    } else {
+                        "取救援碼".to_owned()
+                    }
+                },
                 ui::Btn::Ghost,
                 move || c.send(Cmd::TfGetRecovery),
             )
@@ -482,15 +495,11 @@ pub fn duo_modal(core: AppCore) -> View {
             });
             view().flex_1().child(wv)
         }
-        None => view()
-            .flex_1()
-            .items_center()
-            .justify_center()
-            .child(
-                text("伺服器未提供 Duo 交涉材料，無法開啟驗證頁。")
-                    .text_size(px(12.5))
-                    .text_color(theme::TEXT_SECONDARY),
-            ),
+        None => view().flex_1().items_center().justify_center().child(
+            text("伺服器未提供 Duo 交涉材料，無法開啟驗證頁。")
+                .text_size(px(12.5))
+                .text_color(theme::TEXT_SECONDARY),
+        ),
     };
     ui::modal_shell(
         460.0,
@@ -537,7 +546,10 @@ mod tests {
         );
         assert_eq!(duo_token_from_message("TX|ping"), None);
         assert_eq!(duo_token_from_message("AUTH|only-one-seg"), None);
-        assert_eq!(duo_token_from_message("  AUTH|a:APP|b  ").as_deref(), Some("AUTH|a:APP|b"));
+        assert_eq!(
+            duo_token_from_message("  AUTH|a:APP|b  ").as_deref(),
+            Some("AUTH|a:APP|b")
+        );
     }
 
     #[test]

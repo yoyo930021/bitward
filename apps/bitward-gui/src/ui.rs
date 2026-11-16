@@ -51,9 +51,9 @@ pub fn button_dyn(
         .active(|s| s.opacity(0.7))
         .on_press(on_press);
     let styled = match kind {
-        Btn::Primary | Btn::PrimaryWide => base
-            .bg(theme::ACCENT)
-            .hover(|s| s.bg(theme::ACCENT_HOVER)),
+        Btn::Primary | Btn::PrimaryWide => {
+            base.bg(theme::ACCENT).hover(|s| s.bg(theme::ACCENT_HOVER))
+        }
         Btn::Ghost => base
             .bg(theme::BASE)
             .border(px(1.0))
@@ -81,7 +81,13 @@ pub fn form_field(
     secure: bool,
     on_change: impl Fn(String) + 'static,
 ) -> View {
-    form_field_dyn(label, move || placeholder.to_owned(), value, secure, on_change)
+    form_field_dyn(
+        label,
+        move || placeholder.to_owned(),
+        value,
+        secure,
+        on_change,
+    )
 }
 
 /// 佔位提示會隨狀態變動的版本（PR3：登入第二步驗證碼欄依因子形態換提示）。
@@ -468,12 +474,7 @@ pub fn icon_tile(
                 .flex_row()
                 .items_center()
                 .justify_center()
-                .child(
-                    image(uri)
-                        .w(px(size))
-                        .h(px(size))
-                        .fade_duration(0.0),
-                ),
+                .child(image(uri).w(px(size)).h(px(size)).fade_duration(0.0)),
             None => {
                 let k = kind();
                 type_tile(move || k, size, glyph)
@@ -594,16 +595,23 @@ pub fn copy_button(
             });
         })
         .child(
-            text(move || if copied.get() == Some(token) { "✓" } else { "⧉" }.to_owned())
-                .text_size(px(11.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(move || {
-                    if copied.get() == Some(token) {
-                        theme::SUCCESS
-                    } else {
-                        theme::TEXT_MUTED
-                    }
-                }),
+            text(move || {
+                if copied.get() == Some(token) {
+                    "✓"
+                } else {
+                    "⧉"
+                }
+                .to_owned()
+            })
+            .text_size(px(11.0))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(move || {
+                if copied.get() == Some(token) {
+                    theme::SUCCESS
+                } else {
+                    theme::TEXT_MUTED
+                }
+            }),
         )
 }
 

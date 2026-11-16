@@ -202,7 +202,12 @@ pub fn host_of(uri: &str) -> Option<String> {
     let rest = uri.split_once("://").map(|(_, r)| r).unwrap_or(uri);
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     let hostport = authority.rsplit('@').next().unwrap_or("");
-    let host = hostport.split(':').next().unwrap_or("").trim().to_ascii_lowercase();
+    let host = hostport
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     if host.is_empty() || (!host.contains('.') && host != "localhost") {
         return None;
     }
@@ -686,7 +691,12 @@ impl FieldDraft {
     pub fn set_kind(&mut self, kind: CipherFieldKind) {
         self.kind = kind;
         if kind == CipherFieldKind::Boolean {
-            self.value = if self.value == "true" { "true" } else { "false" }.to_owned();
+            self.value = if self.value == "true" {
+                "true"
+            } else {
+                "false"
+            }
+            .to_owned();
         }
     }
 
@@ -1148,15 +1158,13 @@ impl LoginFields {
     /// 目前選中因子的伺服器情報（島材料、hint、形態判定的唯一來源）。
     pub fn selected_provider(&self) -> Option<Arc<bw_proto::TwoFactorProviderInfo>> {
         let n = self.provider.get();
-        self.providers
-            .get()
-            .and_then(|infos| {
-                infos
-                    .iter()
-                    .find(|p| p.provider == n)
-                    .cloned()
-                    .map(Arc::new)
-            })
+        self.providers.get().and_then(|infos| {
+            infos
+                .iter()
+                .find(|p| p.provider == n)
+                .cloned()
+                .map(Arc::new)
+        })
     }
 }
 
@@ -1292,11 +1300,7 @@ pub fn account_row(state: Option<&UnlockStateView>, reauth: bool, email: Option<
 pub const MIN_MASTER_PASSWORD: usize = 12;
 
 /// 改密表單的前端校驗（繁中錯誤訊息）。比對全在純函數裡，reduce 只分派。
-pub fn validate_change_password(
-    current: &str,
-    new: &str,
-    confirm: &str,
-) -> Result<(), String> {
+pub fn validate_change_password(current: &str, new: &str, confirm: &str) -> Result<(), String> {
     if current.is_empty() {
         return Err("請輸入現有主密碼".into());
     }
@@ -1535,8 +1539,12 @@ impl AppCore {
             gen_tool: signal(crate::passgen::GenState::default()),
             gen_tool_pw: signal(None),
             reports_reuse: signal(Arc::new(Vec::new())),
-            reports_weak: signal(Arc::new(serde_json::json!({"threshold": bw_proto::WEAK_PASSWORD_THRESHOLD, "items": []}))),
-            history: signal(Arc::new(serde_json::json!({"supported": false, "versions": []}))),
+            reports_weak: signal(Arc::new(
+                serde_json::json!({"threshold": bw_proto::WEAK_PASSWORD_THRESHOLD, "items": []}),
+            )),
+            history: signal(Arc::new(
+                serde_json::json!({"supported": false, "versions": []}),
+            )),
             send_tab: signal(SendTab::List),
             sends: signal(Arc::new(serde_json::json!({"items": []}))),
             send_form: SendFormFields {
@@ -1626,32 +1634,34 @@ impl AppCore {
     pub fn watch_events(&self) {
         let session = self.session.clone();
         let tx = self.tx.clone();
-        std::thread::spawn(move || loop {
-            let tx2 = tx.clone();
-            let _ = session.listen(
-                &[
-                    EventTopic::OutboxDrained,
-                    EventTopic::VaultChanged,
-                    EventTopic::ApprovalRequired,
-                    EventTopic::LockStateChanged,
-                ],
-                move |topic| {
-                    match topic {
-                        EventTopic::ApprovalRequired => {
-                            let _ = tx2.send(Cmd::FetchPending);
+        std::thread::spawn(move || {
+            loop {
+                let tx2 = tx.clone();
+                let _ = session.listen(
+                    &[
+                        EventTopic::OutboxDrained,
+                        EventTopic::VaultChanged,
+                        EventTopic::ApprovalRequired,
+                        EventTopic::LockStateChanged,
+                    ],
+                    move |topic| {
+                        match topic {
+                            EventTopic::ApprovalRequired => {
+                                let _ = tx2.send(Cmd::FetchPending);
+                            }
+                            // 自動鎖定/解鎖沒有人按的呼叫：靠事件刷新鎖態視角
+                            EventTopic::LockStateChanged => {
+                                let _ = tx2.send(Cmd::RefreshStatus);
+                            }
+                            EventTopic::OutboxDrained | EventTopic::VaultChanged => {
+                                let _ = tx2.send(Cmd::EventsRefresh);
+                            }
+                            _ => {}
                         }
-                        // 自動鎖定/解鎖沒有人按的呼叫：靠事件刷新鎖態視角
-                        EventTopic::LockStateChanged => {
-                            let _ = tx2.send(Cmd::RefreshStatus);
-                        }
-                        EventTopic::OutboxDrained | EventTopic::VaultChanged => {
-                            let _ = tx2.send(Cmd::EventsRefresh);
-                        }
-                        _ => {}
-                    }
-                },
-            );
-            std::thread::sleep(Duration::from_secs(1));
+                    },
+                );
+                std::thread::sleep(Duration::from_secs(1));
+            }
         });
     }
 
@@ -1668,7 +1678,9 @@ impl AppCore {
         self.att_upload_path.set(String::new());
         self.att_upload_open.set(false);
         self.passkeys.set(Arc::new(Vec::new()));
-        self.history.set(Arc::new(serde_json::json!({"supported": false, "versions": []})));
+        self.history.set(Arc::new(
+            serde_json::json!({"supported": false, "versions": []}),
+        ));
         // Send 表單明文（文字/密碼）不跨視角常駐；成功卡連同 URL 一起丟
         self.send_form.reset();
         self.send_created.set(None);
@@ -1882,14 +1894,15 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                     match_type: row.meta.uri_matches.get(i).copied().flatten(),
                 })
                 .collect();
-            core.form
-                .uris
-                .set(std::sync::Arc::new(uri_rows.clone()));
+            core.form.uris.set(std::sync::Arc::new(uri_rows.clone()));
             core.form.tags.set(row.meta.tags.join(", "));
             core.form.kind.set(row.meta.kind);
-            core.form
-                .folder_id
-                .set(row.meta.folder_id.map(|f| f.to_string()).unwrap_or_default());
+            core.form.folder_id.set(
+                row.meta
+                    .folder_id
+                    .map(|f| f.to_string())
+                    .unwrap_or_default(),
+            );
             core.form.notes.set(row.notes.clone().unwrap_or_default());
             let drafts: Vec<FieldDraft> = row
                 .fields
@@ -1989,13 +2002,15 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         }
         Cmd::GeneratePassword => {
             let policy = core.form.gen_panel.get().policy();
-            core.ipc(move |s| match s.call(&Call::Use(UseCall::GeneratePassword { policy })) {
-                Ok(Response::Secret(pw)) => Cmd::Generated(Some(pw)),
-                Ok(other) => Cmd::Failed {
-                    err: format!("GeneratePassword 回應形態不符：{other:?}"),
+            core.ipc(
+                move |s| match s.call(&Call::Use(UseCall::GeneratePassword { policy })) {
+                    Ok(Response::Secret(pw)) => Cmd::Generated(Some(pw)),
+                    Ok(other) => Cmd::Failed {
+                        err: format!("GeneratePassword 回應形態不符：{other:?}"),
+                    },
+                    Err(e) => Cmd::Failed { err: e.display() },
                 },
-                Err(e) => Cmd::Failed { err: e.display() },
-            });
+            );
         }
         Cmd::Generated(pw) => {
             core.settle();
@@ -2006,7 +2021,11 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             // 嚴格模式由 daemon 拒）。
             let pw = unlock_password_field(&core.unlock_pw.get());
             core.unlock_error.set(None);
-            core.ipc(move |s| match s.call(&Call::Auth(AuthCall::Unlock { biometric: false, password: pw })) {
+            core.ipc(move |s| {
+                match s.call(&Call::Auth(AuthCall::Unlock {
+                    biometric: false,
+                    password: pw,
+                })) {
                     Ok(Response::Status(info)) => Cmd::StateUpdated {
                         state: info.state,
                         refetch: true,
@@ -2015,29 +2034,30 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                         server: info.server,
                         biometric: Some(info.biometric_available),
                     },
-                    Ok(other) => Cmd::UnlockFailed(format!(
-                        "Unlock 回應形態不符：{other:?}"
-                    )),
+                    Ok(other) => Cmd::UnlockFailed(format!("Unlock 回應形態不符：{other:?}")),
                     Err(e) => Cmd::UnlockFailed(e.display()),
-                },
-            );
+                }
+            });
         }
         // 批次 14b：Touch ID 解鎖（鑰匙由 daemon 的 Keychain 載入，系統級 prompt）。
         Cmd::RequestUnlockBiometric => {
             core.unlock_error.set(None);
-            core.ipc(|s| match s.call(&Call::Auth(AuthCall::Unlock { biometric: true, password: None })) {
-                Ok(Response::Status(info)) => Cmd::StateUpdated {
-                    state: info.state,
-                    refetch: true,
-                    reauth: info.needs_reauth,
-                    email: info.email,
-                    server: info.server,
-                    biometric: Some(info.biometric_available),
-                },
-                Ok(other) => {
-                    Cmd::UnlockFailed(format!("Unlock 回應形態不符：{other:?}"))
+            core.ipc(|s| {
+                match s.call(&Call::Auth(AuthCall::Unlock {
+                    biometric: true,
+                    password: None,
+                })) {
+                    Ok(Response::Status(info)) => Cmd::StateUpdated {
+                        state: info.state,
+                        refetch: true,
+                        reauth: info.needs_reauth,
+                        email: info.email,
+                        server: info.server,
+                        biometric: Some(info.biometric_available),
+                    },
+                    Ok(other) => Cmd::UnlockFailed(format!("Unlock 回應形態不符：{other:?}")),
+                    Err(e) => Cmd::UnlockFailed(e.display()),
                 }
-                Err(e) => Cmd::UnlockFailed(e.display()),
             });
         }
         // 解鎖失敗：紅字顯示在欄位下方，**不清欄位內容**（使用者不用重打）。
@@ -2046,20 +2066,27 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.unlock_error.set(Some(msg));
         }
         Cmd::TriggerSync => {
-            core.ipc(|s| match s.call(&Call::Sync(SyncCall::Trigger { force: true })) {
-                Ok(Response::Status(info)) => Cmd::SyncDone {
-                    state: info.state,
-                    reauth: info.needs_reauth,
-                    email: info.email,
-                    server: info.server,
+            core.ipc(
+                |s| match s.call(&Call::Sync(SyncCall::Trigger { force: true })) {
+                    Ok(Response::Status(info)) => Cmd::SyncDone {
+                        state: info.state,
+                        reauth: info.needs_reauth,
+                        email: info.email,
+                        server: info.server,
+                    },
+                    Ok(other) => Cmd::Failed {
+                        err: format!("Sync.Trigger 回應形態不符：{other:?}"),
+                    },
+                    Err(e) => Cmd::Failed { err: e.display() },
                 },
-                Ok(other) => Cmd::Failed {
-                    err: format!("Sync.Trigger 回應形態不符：{other:?}"),
-                },
-                Err(e) => Cmd::Failed { err: e.display() },
-            });
+            );
         }
-        Cmd::SyncDone { state, reauth, email, server } => {
+        Cmd::SyncDone {
+            state,
+            reauth,
+            email,
+            server,
+        } => {
             core.settle();
             core.vault.set(Some(state));
             core.error_text.set(None);
@@ -2095,7 +2122,14 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 }
             });
         }
-        Cmd::StateUpdated { state, refetch, reauth, email, server, biometric } => {
+        Cmd::StateUpdated {
+            state,
+            refetch,
+            reauth,
+            email,
+            server,
+            biometric,
+        } => {
             core.settle();
             let unlocked = matches!(state, UnlockStateView::Unlocked { .. });
             // 鎖定轉換（解鎖→非解鎖）＝清除最近搜尋：官方 web vault 同位語意，
@@ -2190,9 +2224,9 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                             Ok(Response::TwoFactorRequest { providers }) => {
                                 Cmd::Login2faRequested(providers)
                             }
-                            Ok(other) => Cmd::LoginDone(Err(format!(
-                                "Login 回應形態不符：{other:?}"
-                            ))),
+                            Ok(other) => {
+                                Cmd::LoginDone(Err(format!("Login 回應形態不符：{other:?}")))
+                            }
                             Err(e) => Cmd::LoginDone(Err(humanize_login(&e.display()))),
                         }
                     });
@@ -2263,9 +2297,9 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                             Ok(Response::TwoFactorRequest { providers }) => {
                                 Cmd::Login2faRequested(providers)
                             }
-                            Ok(other) => Cmd::LoginDone(Err(format!(
-                                "Login 回應形態不符：{other:?}"
-                            ))),
+                            Ok(other) => {
+                                Cmd::LoginDone(Err(format!("Login 回應形態不符：{other:?}")))
+                            }
                             Err(e) => Cmd::LoginDone(Err(humanize_login(&e.display()))),
                         }
                     });
@@ -2277,29 +2311,31 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         Cmd::TfFetch => {
             core.tf_busy.set(true);
             core.tf_error.set(None);
-            core.ipc_quiet(|s| {
-                match s.call(&Call::TwoFactor(bw_proto::TwoFactorCall::List)) {
+            core.ipc_quiet(
+                |s| match s.call(&Call::TwoFactor(bw_proto::TwoFactorCall::List)) {
                     Ok(Response::TwoFactorStates(v)) => Cmd::TfStatesLoaded(v),
                     Ok(other) => {
                         Cmd::TfDone(Err(format!("TwoFactor:List 回應形態不符：{other:?}")))
                     }
                     Err(e) => Cmd::TfDone(Err(e.display())),
-                }
-            });
+                },
+            );
         }
         Cmd::TfGetTotpKey => {
             let Some(pw) = tf_pw_or_err(core) else { return };
             core.tf_busy.set(true);
             core.ipc_quiet(move |s| {
-                match s.call(&Call::TwoFactor(bw_proto::TwoFactorCall::GetAuthenticator {
-                    master_password: Some(pw),
-                })) {
+                match s.call(&Call::TwoFactor(
+                    bw_proto::TwoFactorCall::GetAuthenticator {
+                        master_password: Some(pw),
+                    },
+                )) {
                     Ok(Response::TwoFactorTotp { secret, key_uri }) => {
                         Cmd::TfTotpKey { secret, key_uri }
                     }
-                    Ok(other) => Cmd::TfDone(Err(format!(
-                        "get-authenticator 回應形態不符：{other:?}"
-                    ))),
+                    Ok(other) => {
+                        Cmd::TfDone(Err(format!("get-authenticator 回應形態不符：{other:?}")))
+                    }
                     Err(e) => Cmd::TfDone(Err(e.display())),
                 }
             });
@@ -2307,14 +2343,13 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         Cmd::TfEnableTotp => {
             let Some(pw) = tf_pw_or_err(core) else { return };
             let Some(arc) = core.tf_totp.get() else {
-                core.tf_error.set(Some("先按「取得設定碼」拿伺服器金鑰".into()));
+                core.tf_error
+                    .set(Some("先按「取得設定碼」拿伺服器金鑰".into()));
                 return;
             };
             let key = arc.0.clone();
-            let token = match bw_proto::TwoFactorProviderInfo::validate_token(
-                0,
-                &core.tf_otp.get(),
-            ) {
+            let token = match bw_proto::TwoFactorProviderInfo::validate_token(0, &core.tf_otp.get())
+            {
                 Ok(t) => t,
                 Err(m) => {
                     core.tf_error.set(Some(m));
@@ -2331,9 +2366,9 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                     },
                 )) {
                     Ok(Response::Ok) => Cmd::TfDone(Ok("已啟用 Authenticator 因子".into())),
-                    Ok(other) => Cmd::TfDone(Err(format!(
-                        "enable-authenticator 回應形態不符：{other:?}"
-                    ))),
+                    Ok(other) => {
+                        Cmd::TfDone(Err(format!("enable-authenticator 回應形態不符：{other:?}")))
+                    }
                     Err(e) => Cmd::TfDone(Err(e.display())),
                 }
             });
@@ -2357,9 +2392,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                     email,
                 })) {
                     Ok(Response::Ok) => Cmd::TfDone(Ok("驗證碼已寄出，請查信".into())),
-                    Ok(other) => {
-                        Cmd::TfDone(Err(format!("send-email 回應形態不符：{other:?}")))
-                    }
+                    Ok(other) => Cmd::TfDone(Err(format!("send-email 回應形態不符：{other:?}"))),
                     Err(e) => Cmd::TfDone(Err(e.display())),
                 }
             });
@@ -2370,16 +2403,15 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 core.tf_error.set(Some("先按「寄驗證碼」".into()));
                 return;
             };
-            let token = match bw_proto::TwoFactorProviderInfo::validate_token(
-                1,
-                &core.tf_email_code.get(),
-            ) {
-                Ok(t) => t,
-                Err(m) => {
-                    core.tf_error.set(Some(m));
-                    return;
-                }
-            };
+            let token =
+                match bw_proto::TwoFactorProviderInfo::validate_token(1, &core.tf_email_code.get())
+                {
+                    Ok(t) => t,
+                    Err(m) => {
+                        core.tf_error.set(Some(m));
+                        return;
+                    }
+                };
             core.tf_busy.set(true);
             core.ipc_quiet(move |s| {
                 match s.call(&Call::TwoFactor(bw_proto::TwoFactorCall::EmailVerify {
@@ -2388,19 +2420,15 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                     token,
                 })) {
                     Ok(Response::Ok) => Cmd::TfDone(Ok("已啟用 Email 因子".into())),
-                    Ok(other) => {
-                        Cmd::TfDone(Err(format!("PUT email 回應形態不符：{other:?}")))
-                    }
+                    Ok(other) => Cmd::TfDone(Err(format!("PUT email 回應形態不符：{other:?}"))),
                     Err(e) => Cmd::TfDone(Err(e.display())),
                 }
             });
         }
         Cmd::TfYubikeyAdd => {
             let Some(pw) = tf_pw_or_err(core) else { return };
-            let otp = match bw_proto::TwoFactorProviderInfo::validate_token(
-                3,
-                &core.tf_yubi.get(),
-            ) {
+            let otp = match bw_proto::TwoFactorProviderInfo::validate_token(3, &core.tf_yubi.get())
+            {
                 Ok(t) => t,
                 Err(m) => {
                     core.tf_error.set(Some(m));
@@ -2433,9 +2461,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                         "已停用{}",
                         bw_proto::TwoFactorProviderInfo::label(provider)
                     ))),
-                    Ok(other) => {
-                        Cmd::TfDone(Err(format!("disable 回應形態不符：{other:?}")))
-                    }
+                    Ok(other) => Cmd::TfDone(Err(format!("disable 回應形態不符：{other:?}"))),
                     Err(e) => Cmd::TfDone(Err(e.display())),
                 }
             });
@@ -2448,9 +2474,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                     master_password: Some(pw),
                 })) {
                     Ok(Response::TwoFactorRecoveryCode(code)) => Cmd::TfRecoveryLoaded(code),
-                    Ok(other) => Cmd::TfDone(Err(format!(
-                        "get-recover 回應形態不符：{other:?}"
-                    ))),
+                    Ok(other) => Cmd::TfDone(Err(format!("get-recover 回應形態不符：{other:?}"))),
                     Err(e) => Cmd::TfDone(Err(e.display())),
                 }
             });
@@ -2469,7 +2493,8 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             match code {
                 Some(c) => {
                     core.tf_recovery.set(Some(c));
-                    core.notice.set(Some("救援碼已取得（用後 2FA 全清）".into()));
+                    core.notice
+                        .set(Some("救援碼已取得（用後 2FA 全清）".into()));
                 }
                 None => core.tf_error.set(Some("伺服器尚未發救援碼".into())),
             }
@@ -2503,7 +2528,8 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.login.duo_open.set(false);
             core.login.error.set(None);
             core.login.code.set(tok);
-            core.notice.set(Some("已取回 Duo 憑證，按「完成登入」".into()));
+            core.notice
+                .set(Some("已取回 Duo 憑證，按「完成登入」".into()));
         }
         Cmd::StartWebauthn => {
             let info = core.login.selected_provider();
@@ -2544,7 +2570,8 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 Ok(json) => {
                     core.login.error.set(None);
                     core.login.code.set(json);
-                    core.notice.set(Some("已取回安全金鑰簽章，按「完成登入」".into()));
+                    core.notice
+                        .set(Some("已取回安全金鑰簽章，按「完成登入」".into()));
                 }
                 Err(e) => core.login.error.set(Some(e)),
             }
@@ -2621,13 +2648,21 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             fetch_list(core);
         }
         Cmd::SetArchived { id, archived } => {
-            core.ipc(move |s| match s.call(&Call::Vault(VaultCall::SetArchived { id, archived })) {
-                Ok(Response::Ok) => Cmd::WriteDone { err: None, follow: Follow::List },
-                Ok(other) => Cmd::WriteDone {
-                    err: Some(format!("SetArchived 回應形態不符：{other:?}")),
-                    follow: Follow::List,
-                },
-                Err(e) => Cmd::WriteDone { err: Some(e.display()), follow: Follow::List },
+            core.ipc(move |s| {
+                match s.call(&Call::Vault(VaultCall::SetArchived { id, archived })) {
+                    Ok(Response::Ok) => Cmd::WriteDone {
+                        err: None,
+                        follow: Follow::List,
+                    },
+                    Ok(other) => Cmd::WriteDone {
+                        err: Some(format!("SetArchived 回應形態不符：{other:?}")),
+                        follow: Follow::List,
+                    },
+                    Err(e) => Cmd::WriteDone {
+                        err: Some(e.display()),
+                        follow: Follow::List,
+                    },
+                }
             });
         }
         Cmd::IconLoaded { host, res } => {
@@ -2660,46 +2695,52 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         }
         Cmd::RestoreItem(id) => {
             let name = item_name(core, id);
-            core.ipc(move |s| match s.call(&Call::Vault(VaultCall::Restore { id })) {
-                Ok(Response::Ok) => Cmd::TrashWriteDone {
-                    err: None,
-                    notify: Some(format!("已還原「{name}」")),
+            core.ipc(
+                move |s| match s.call(&Call::Vault(VaultCall::Restore { id })) {
+                    Ok(Response::Ok) => Cmd::TrashWriteDone {
+                        err: None,
+                        notify: Some(format!("已還原「{name}」")),
+                    },
+                    Ok(other) => Cmd::TrashWriteDone {
+                        err: Some(format!("Restore 回應形態不符：{other:?}")),
+                        notify: None,
+                    },
+                    Err(e) => Cmd::TrashWriteDone {
+                        err: Some(e.display()),
+                        notify: None,
+                    },
                 },
-                Ok(other) => Cmd::TrashWriteDone {
-                    err: Some(format!("Restore 回應形態不符：{other:?}")),
-                    notify: None,
-                },
-                Err(e) => Cmd::TrashWriteDone {
-                    err: Some(e.display()),
-                    notify: None,
-                },
-            });
+            );
         }
         Cmd::AskPurge(id) => {
             let name = item_name(core, id);
             core.confirm.set(Some(Arc::new(Confirm {
                 title: format!("永久刪除「{name}」？"),
-                description: "只清本機：鏡像列、關聯與該項未推送的 outbox 列一併移除，不再發伺服器請求。".into(),
+                description:
+                    "只清本機：鏡像列、關聯與該項未推送的 outbox 列一併移除，不再發伺服器請求。"
+                        .into(),
                 confirm_label: "永久刪除".into(),
                 destructive: true,
                 on_confirm: Cmd::PurgeNow(id),
             })));
         }
         Cmd::PurgeNow(id) => {
-            core.ipc(move |s| match s.call(&Call::Vault(VaultCall::Purge { id })) {
-                Ok(Response::Ok) => Cmd::TrashWriteDone {
-                    err: None,
-                    notify: Some("已永久刪除".into()),
+            core.ipc(
+                move |s| match s.call(&Call::Vault(VaultCall::Purge { id })) {
+                    Ok(Response::Ok) => Cmd::TrashWriteDone {
+                        err: None,
+                        notify: Some("已永久刪除".into()),
+                    },
+                    Ok(other) => Cmd::TrashWriteDone {
+                        err: Some(format!("Purge 回應形態不符：{other:?}")),
+                        notify: None,
+                    },
+                    Err(e) => Cmd::TrashWriteDone {
+                        err: Some(e.display()),
+                        notify: None,
+                    },
                 },
-                Ok(other) => Cmd::TrashWriteDone {
-                    err: Some(format!("Purge 回應形態不符：{other:?}")),
-                    notify: None,
-                },
-                Err(e) => Cmd::TrashWriteDone {
-                    err: Some(e.display()),
-                    notify: None,
-                },
-            });
+            );
         }
         Cmd::TrashWriteDone { err, notify } => {
             core.settle();
@@ -2738,8 +2779,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 let _ = s;
                 Cmd::ImportPreviewed(match crate::import::read_text(&path) {
                     Err(e) => Err(e),
-                    Ok(text) => crate::import::parse(&text)
-                        .map(|p| (p.rows.len(), p.skipped)),
+                    Ok(text) => crate::import::parse(&text).map(|p| (p.rows.len(), p.skipped)),
                 })
             });
         }
@@ -2749,9 +2789,11 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         }
         Cmd::ImportRun => {
             let path = core.import_path.get();
-            core.ipc(move |s| Cmd::ImportDone(crate::import::read_text(&path).and_then(|text| {
-                crate::import::run(&s, &text)
-            })));
+            core.ipc(move |s| {
+                Cmd::ImportDone(
+                    crate::import::read_text(&path).and_then(|text| crate::import::run(&s, &text)),
+                )
+            });
         }
         Cmd::ImportDone(res) => {
             core.settle();
@@ -2773,10 +2815,12 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             }
         }
         Cmd::UploadAttachment { item_id, path } => {
-                if core.att_state.get().busy() {
+            if core.att_state.get().busy() {
                 return;
             }
-    core.att_state.update(|s| { s.start(crate::attach::AttOp::Upload); });
+            core.att_state.update(|s| {
+                s.start(crate::attach::AttOp::Upload);
+            });
             core.ipc(move |s| {
                 let res = crate::attach::read_for_upload(&path).and_then(|(name, bytes)| {
                     match s.call(&Call::Vault(VaultCall::Attachment {
@@ -2805,10 +2849,12 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             attachment_id,
             file_name,
         } => {
-                if core.att_state.get().busy() {
+            if core.att_state.get().busy() {
                 return;
             }
-    core.att_state.update(|s| { s.start(crate::attach::AttOp::Download); });
+            core.att_state.update(|s| {
+                s.start(crate::attach::AttOp::Download);
+            });
             core.ipc(move |s| {
                 let res = match s.call(&Call::Vault(VaultCall::Attachment {
                     sub: AttachmentOp::Download {
@@ -2849,10 +2895,12 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             item_id,
             attachment_id,
         } => {
-                if core.att_state.get().busy() {
+            if core.att_state.get().busy() {
                 return;
             }
-    core.att_state.update(|s| { s.start(crate::attach::AttOp::Delete); });
+            core.att_state.update(|s| {
+                s.start(crate::attach::AttOp::Delete);
+            });
             core.ipc(move |s| {
                 let res = match s.call(&Call::Vault(VaultCall::Attachment {
                     sub: AttachmentOp::Delete {
@@ -2961,13 +3009,15 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 core.error_text.set(Some("請至少保留一個字元集".into()));
                 return;
             }
-            core.ipc(move |s| match s.call(&Call::Use(UseCall::GeneratePassword { policy })) {
-                Ok(Response::Secret(pw)) => Cmd::ToolGenerated(Ok(pw)),
-                Ok(other) => Cmd::ToolGenerated(Err(format!(
-                    "GeneratePassword 回應形態不符：{other:?}"
-                ))),
-                Err(e) => Cmd::ToolGenerated(Err(e.display())),
-            });
+            core.ipc(
+                move |s| match s.call(&Call::Use(UseCall::GeneratePassword { policy })) {
+                    Ok(Response::Secret(pw)) => Cmd::ToolGenerated(Ok(pw)),
+                    Ok(other) => {
+                        Cmd::ToolGenerated(Err(format!("GeneratePassword 回應形態不符：{other:?}")))
+                    }
+                    Err(e) => Cmd::ToolGenerated(Err(e.display())),
+                },
+            );
         }
         Cmd::ToolGenerated(res) => {
             core.settle();
@@ -2990,21 +3040,25 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         Cmd::FetchReuse => {
             // 重用掃描需金鑰（daemon 端 with_keys）：鎖定態回錯屬正常缺席，
             // 走 quiet 不閃橫條（卡面以「需解鎖」佔位語意呈現）。
-            core.ipc_quiet(|s| match s.call(&Call::Vault(VaultCall::Reports {
-                sub: bw_proto::Reports::PasswordReuse,
-            })) {
-                Ok(Response::DupGroups(g)) => Cmd::ReuseLoaded(Arc::new(g)),
-                _ => Cmd::ReuseLoaded(Arc::new(Vec::new())),
+            core.ipc_quiet(|s| {
+                match s.call(&Call::Vault(VaultCall::Reports {
+                    sub: bw_proto::Reports::PasswordReuse,
+                })) {
+                    Ok(Response::DupGroups(g)) => Cmd::ReuseLoaded(Arc::new(g)),
+                    _ => Cmd::ReuseLoaded(Arc::new(Vec::new())),
+                }
             });
         }
         Cmd::FetchWeak => {
-            core.ipc_quiet(|s| match s.call(&Call::Vault(VaultCall::Reports {
-                sub: bw_proto::Reports::WeakPasswords,
-            })) {
-                Ok(Response::Json(v)) => Cmd::WeakLoaded(Arc::new(v)),
-                _ => Cmd::WeakLoaded(Arc::new(serde_json::json!({
-                    "threshold": bw_proto::WEAK_PASSWORD_THRESHOLD, "items": []
-                }))),
+            core.ipc_quiet(|s| {
+                match s.call(&Call::Vault(VaultCall::Reports {
+                    sub: bw_proto::Reports::WeakPasswords,
+                })) {
+                    Ok(Response::Json(v)) => Cmd::WeakLoaded(Arc::new(v)),
+                    _ => Cmd::WeakLoaded(Arc::new(serde_json::json!({
+                        "threshold": bw_proto::WEAK_PASSWORD_THRESHOLD, "items": []
+                    }))),
+                }
             });
         }
         Cmd::ReuseLoaded(g) => {
@@ -3018,17 +3072,19 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         Cmd::FetchHistory(id) => {
             // 代理伺服器端點：離線／路由缺席都回 supported:false 形態；
             // 傳輸級失敗靜默（歷史是詳情頁配角，不搶錯誤橫條）。
-            core.ipc_quiet(move |s| match s.call(&Call::Vault(VaultCall::Reports {
-                sub: bw_proto::Reports::CipherHistory { id },
-            })) {
-                Ok(Response::Json(v)) => Cmd::HistoryLoaded {
-                    item: id,
-                    report: Arc::new(v),
-                },
-                _ => Cmd::HistoryLoaded {
-                    item: id,
-                    report: Arc::new(serde_json::json!({"supported": false, "versions": []})),
-                },
+            core.ipc_quiet(move |s| {
+                match s.call(&Call::Vault(VaultCall::Reports {
+                    sub: bw_proto::Reports::CipherHistory { id },
+                })) {
+                    Ok(Response::Json(v)) => Cmd::HistoryLoaded {
+                        item: id,
+                        report: Arc::new(v),
+                    },
+                    _ => Cmd::HistoryLoaded {
+                        item: id,
+                        report: Arc::new(serde_json::json!({"supported": false, "versions": []})),
+                    },
+                }
             });
         }
         Cmd::HistoryLoaded { item, report } => {
@@ -3054,12 +3110,14 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         Cmd::FetchSends => {
             // 清單主內容：失敗進橫條（daemon 離線照回鏡像，能錯的是少數
             // 傳輸/存儲態）；回包 {"items":[...]} 原樣入訊號、渲染端解析。
-            core.ipc(|s| match s.call(&Call::Vault(VaultCall::Send {
-                sub: bw_proto::SendOp::List,
-            })) {
-                Ok(Response::Json(v)) => Cmd::SendsLoaded(Arc::new(v)),
-                Ok(other) => Cmd::SendsFailed(format!("Send.List 回應形態不符：{other:?}")),
-                Err(e) => Cmd::SendsFailed(e.display()),
+            core.ipc(|s| {
+                match s.call(&Call::Vault(VaultCall::Send {
+                    sub: bw_proto::SendOp::List,
+                })) {
+                    Ok(Response::Json(v)) => Cmd::SendsLoaded(Arc::new(v)),
+                    Ok(other) => Cmd::SendsFailed(format!("Send.List 回應形態不符：{other:?}")),
+                    Err(e) => Cmd::SendsFailed(e.display()),
+                }
             });
         }
         Cmd::SendsLoaded(v) => {
@@ -3327,9 +3385,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 let content = match content {
                     Some(c) => c,
                     None => match crate::attach::read_for_upload(&path) {
-                        Ok((file_name, bytes)) => {
-                            bw_proto::SendContent::File { file_name, bytes }
-                        }
+                        Ok((file_name, bytes)) => bw_proto::SendContent::File { file_name, bytes },
                         Err(e) => return Cmd::SendCreated(Err(e)),
                     },
                 };
@@ -3375,14 +3431,16 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             })));
         }
         Cmd::DeleteSend(id) => {
-            core.ipc(move |s| match s.call(&Call::Vault(VaultCall::Send {
-                sub: bw_proto::SendOp::Remove { id },
-            })) {
-                Ok(Response::Ok) => Cmd::SendDeleted(Ok(())),
-                Ok(other) => {
-                    Cmd::SendDeleted(Err(format!("Send.Remove 回應形態不符：{other:?}")))
+            core.ipc(move |s| {
+                match s.call(&Call::Vault(VaultCall::Send {
+                    sub: bw_proto::SendOp::Remove { id },
+                })) {
+                    Ok(Response::Ok) => Cmd::SendDeleted(Ok(())),
+                    Ok(other) => {
+                        Cmd::SendDeleted(Err(format!("Send.Remove 回應形態不符：{other:?}")))
+                    }
+                    Err(e) => Cmd::SendDeleted(Err(e.display())),
                 }
-                Err(e) => Cmd::SendDeleted(Err(e.display())),
             });
         }
         Cmd::SendDeleted(res) => {
@@ -3411,11 +3469,15 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         }
         Cmd::ApplySettings(next) => {
             // 改即存：整包回寫（四欄全量 PUT 語意，無部分更新競態面）。
-            core.ipc(move |s| match s.call(&Call::Admin(AdminCall::SetSettings(next))) {
-                Ok(Response::Ok) => Cmd::SettingsSaved(Ok(())),
-                Ok(other) => Cmd::SettingsSaved(Err(format!("SetSettings 回應形態不符：{other:?}"))),
-                Err(e) => Cmd::SettingsSaved(Err(e.display())),
-            });
+            core.ipc(
+                move |s| match s.call(&Call::Admin(AdminCall::SetSettings(next))) {
+                    Ok(Response::Ok) => Cmd::SettingsSaved(Ok(())),
+                    Ok(other) => {
+                        Cmd::SettingsSaved(Err(format!("SetSettings 回應形態不符：{other:?}")))
+                    }
+                    Err(e) => Cmd::SettingsSaved(Err(e.display())),
+                },
+            );
         }
         Cmd::SettingsSaved(res) => {
             core.settle();
@@ -3430,15 +3492,19 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         Cmd::FetchPasskeys(id) => {
             // rp_id=None 取全庫再按 item 過濾（列表本就是全庫投影）；鎖定態
             // daemon 回 Locked——輪詢類失敗靜默（詳情不因此閃橫條）。
-            core.ipc_quiet(move |s| match s.call(&Call::Passkey(PasskeyCall::GetPasskeys { rp_id: None })) {
-                Ok(Response::Passkeys(rows)) => Cmd::PasskeysLoaded {
-                    item: id,
-                    entries: Arc::new(rows.into_iter().filter(|e| e.item_id == Some(id)).collect()),
-                },
-                _ => Cmd::PasskeysLoaded {
-                    item: id,
-                    entries: Arc::new(Vec::new()),
-                },
+            core.ipc_quiet(move |s| {
+                match s.call(&Call::Passkey(PasskeyCall::GetPasskeys { rp_id: None })) {
+                    Ok(Response::Passkeys(rows)) => Cmd::PasskeysLoaded {
+                        item: id,
+                        entries: Arc::new(
+                            rows.into_iter().filter(|e| e.item_id == Some(id)).collect(),
+                        ),
+                    },
+                    _ => Cmd::PasskeysLoaded {
+                        item: id,
+                        entries: Arc::new(Vec::new()),
+                    },
+                }
             });
         }
         Cmd::PasskeysLoaded { item, entries } => {
@@ -3467,9 +3533,9 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                     credential_id: credential,
                 })) {
                     Ok(Response::Ok) => Cmd::PasskeyDeleted(Ok(())),
-                    Ok(other) => Cmd::PasskeyDeleted(Err(format!(
-                        "DeletePasskey 回應形態不符：{other:?}"
-                    ))),
+                    Ok(other) => {
+                        Cmd::PasskeyDeleted(Err(format!("DeletePasskey 回應形態不符：{other:?}")))
+                    }
                     Err(e) => Cmd::PasskeyDeleted(Err(e.display())),
                 }
             });
@@ -3524,7 +3590,10 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                     },
                     Err(e) => Err(format!("拒絕 id 非 uuid：{e}")),
                 };
-                Cmd::PendingActed { approve: false, res }
+                Cmd::PendingActed {
+                    approve: false,
+                    res,
+                }
             });
         }
         Cmd::PendingActed { approve, res } => {
@@ -3532,7 +3601,14 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             match res {
                 Ok(()) => {
                     core.error_text.set(None);
-                    core.notice.set(Some(if approve { "已批准請求" } else { "已拒絕請求" }.into()));
+                    core.notice.set(Some(
+                        if approve {
+                            "已批准請求"
+                        } else {
+                            "已拒絕請求"
+                        }
+                        .into(),
+                    ));
                     core.send(Cmd::FetchPending);
                     // 批准可能放行了被擋的鏡像寫入，列表順勢重抓。
                     fetch_list(core);
@@ -3681,10 +3757,7 @@ fn request_hosts(core: &AppCore, hosts: Vec<String>) {
     let now = Instant::now();
     let mut missing: Vec<String> = Vec::new();
     for h in hosts {
-        let mut guard = core
-            .icon_sigs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut guard = core.icon_sigs.lock().unwrap_or_else(|e| e.into_inner());
         match guard.get(&h) {
             // 單飛／長駐：Loading、Ready 不重發；Failed 退避期滿才重試。
             Some(sig) => {
@@ -3711,14 +3784,18 @@ fn request_hosts(core: &AppCore, hosts: Vec<String>) {
         std::thread::spawn(move || {
             let cmd = match session.call(&Call::Vault(VaultCall::GetIcon { host: host.clone() })) {
                 // 轉碼（ICO→PNG）在 worker 執行緒做，不堵渲染（批次 13）。
-                Ok(Response::AttachmentBytes(b)) => {
-                    Cmd::IconLoaded { host, res: Ok(icon_data_uri(&b)) }
-                }
+                Ok(Response::AttachmentBytes(b)) => Cmd::IconLoaded {
+                    host,
+                    res: Ok(icon_data_uri(&b)),
+                },
                 Ok(other) => Cmd::IconLoaded {
                     host,
                     res: Err(format!("GetIcon 回應形態不符：{other:?}")),
                 },
-                Err(e) => Cmd::IconLoaded { host, res: Err(e.display()) },
+                Err(e) => Cmd::IconLoaded {
+                    host,
+                    res: Err(e.display()),
+                },
             };
             let _ = tx.send(cmd);
         });
@@ -3728,10 +3805,7 @@ fn request_hosts(core: &AppCore, hosts: Vec<String>) {
 /// 取（或建立）某 host 的圖示訊號——渲染端訂閱**單一 host**，
 /// 別 host 到貨不再牽動本磚重繪（批次 10 閃爍修復核心）。
 pub fn icon_signal(core: &AppCore, host: &str) -> Signal<IconState> {
-    let mut guard = core
-        .icon_sigs
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut guard = core.icon_sigs.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(sig) = guard.get(host) {
         return *sig;
     }
@@ -3870,10 +3944,7 @@ fn submit_form(core: &AppCore) {
                     }
                     // Zeroize 點 ②：edits 內的明文在此序列化進 Outgoing 幀，
                     // 呼叫結束即出棧；GUI 端不留常駐明文。
-                    match s.call(&Call::Vault(VaultCall::Patch {
-                        id,
-                        edits: batch,
-                    })) {
+                    match s.call(&Call::Vault(VaultCall::Patch { id, edits: batch })) {
                         Ok(Response::Ok) => {}
                         Ok(other) => err = Some(format!("Patch 回應形態不符：{other:?}")),
                         Err(e) => err = Some(e.display()),
@@ -3895,7 +3966,12 @@ fn submit_form(core: &AppCore) {
 }
 
 /// 逐筆套 overlay 標籤；回傳第一個錯誤（若有）。
-pub(crate) fn apply_tags(s: &Session, id: ItemId, remove: &[String], add: &[String]) -> Option<String> {
+pub(crate) fn apply_tags(
+    s: &Session,
+    id: ItemId,
+    remove: &[String],
+    add: &[String],
+) -> Option<String> {
     for t in remove {
         if let Err(e) = s.call(&Call::Vault(VaultCall::Overlay {
             id,
@@ -4019,14 +4095,20 @@ pub fn uri_edits(
     orig_matches: &[Option<u8>],
     rows: &[UriDraft],
 ) -> (Vec<FieldEdit>, Vec<FieldEdit>, Vec<FieldEdit>) {
-    let present: std::collections::HashSet<u32> =
-        rows.iter().map(|r| r.key).filter(|k| (*k as usize) < orig.len()).collect();
+    let present: std::collections::HashSet<u32> = rows
+        .iter()
+        .map(|r| r.key)
+        .filter(|k| (*k as usize) < orig.len())
+        .collect();
     let mut sets = Vec::new();
     let mut appends = Vec::new();
     let mut match_tail = Vec::new();
     for r in rows {
         let now = nonblank(r.uri.trim());
-        if let Some(base) = orig.get(r.key as usize).filter(|_| (r.key as usize) < orig.len()) {
+        if let Some(base) = orig
+            .get(r.key as usize)
+            .filter(|_| (r.key as usize) < orig.len())
+        {
             if now.as_deref() != Some(base.as_str()) {
                 sets.push(FieldEdit::Set {
                     path: format!("uri.{}", r.key),
@@ -4282,10 +4364,7 @@ fn nav_interrupts(cmd: &Cmd) -> bool {
 /// 位置）；structural＝SetType（基準位置）→ RemoveField（基準位置，
 /// 遞減穩定）→ AppendField（新增列，尾插、維持表單順序）。
 /// 分兩批是為了迴避 daemon「同欄 type×值」同欄衝突判定。
-pub fn field_edits(
-    orig: &[FieldDraft],
-    cur: &[FieldDraft],
-) -> (Vec<FieldEdit>, Vec<FieldEdit>) {
+pub fn field_edits(orig: &[FieldDraft], cur: &[FieldDraft]) -> (Vec<FieldEdit>, Vec<FieldEdit>) {
     let mut leaf = Vec::new();
     let mut types = Vec::new();
     let mut removes = Vec::new();
@@ -4392,7 +4471,10 @@ mod tests {
         // 缺席→發；Loading/Ready→永不重發（單飛長駐）。
         assert!(icon_request_due(None, now));
         assert!(!icon_request_due(Some(&IconState::Loading), now));
-        assert!(!icon_request_due(Some(&IconState::Ready("data:".into())), now));
+        assert!(!icon_request_due(
+            Some(&IconState::Ready("data:".into())),
+            now
+        ));
         // Failed：退避期內不重發，期滿重試（負快取）。
         let fresh = IconState::Failed(now - Duration::from_secs(300));
         assert!(!icon_request_due(Some(&fresh), now));
@@ -4456,13 +4538,19 @@ mod tests {
         const FB: &[u8] = include_bytes!("../tests/fixtures/facebook.ico");
         assert_eq!(sniff_icon(FB), Some("image/x-icon"));
         let uri = icon_data_uri(FB).expect("真 ICO 應轉得動");
-        assert!(uri.starts_with("data:image/png;base64,"), "ICO 必須吐 PNG data URI");
+        assert!(
+            uri.starts_with("data:image/png;base64,"),
+            "ICO 必須吐 PNG data URI"
+        );
         // base64 解回來必須是 PNG magic（NSImage 吃得了的形態）。
         use base64::Engine;
         let back = base64::engine::general_purpose::STANDARD
             .decode(uri.trim_start_matches("data:image/png;base64,"))
             .unwrap();
-        assert!(back.starts_with(&[0x89, b'P', b'N', b'G']), "轉碼結果非 PNG");
+        assert!(
+            back.starts_with(&[0x89, b'P', b'N', b'G']),
+            "轉碼結果非 PNG"
+        );
         // 破 ICO（合法頭＋零 frame）→ 解不動 → None＝負快取退避。
         assert!(icon_data_uri(&[0, 0, 1, 0, 0, 0, 0, 0]).is_none());
         // PNG 原樣不動（不重編碼）。
@@ -4495,7 +4583,11 @@ mod tests {
         f.toggle_archived();
         assert!(f.archived && !f.trash, "退出垃圾桶不應殘留封存態交叉污染");
         assert_eq!(archived_filter(true), Some(true));
-        assert_eq!(archived_filter(false), None, "主列表不發 Some(false)（舊 daemon 兼容）");
+        assert_eq!(
+            archived_filter(false),
+            None,
+            "主列表不發 Some(false)（舊 daemon 兼容）"
+        );
     }
 
     #[test]
@@ -4510,8 +4602,14 @@ mod tests {
         assert!(uri.starts_with("data:image/png;base64,"));
         assert!(icon_data_uri(b"junk").is_none());
         // host 解析：去 scheme/userinfo/port/path；無點非 localhost 拒。
-        assert_eq!(host_of("https://GitHub.com/x?q=1").as_deref(), Some("github.com"));
-        assert_eq!(host_of("http://user:pw@127.0.0.1:18095/api").as_deref(), Some("127.0.0.1"));
+        assert_eq!(
+            host_of("https://GitHub.com/x?q=1").as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(
+            host_of("http://user:pw@127.0.0.1:18095/api").as_deref(),
+            Some("127.0.0.1")
+        );
         assert_eq!(host_of("localhost:3000").as_deref(), Some("localhost"));
         assert_eq!(host_of("no-host"), None);
         assert_eq!(host_of("https:///path"), None);
@@ -4530,10 +4628,22 @@ mod tests {
     #[test]
     fn normalize_server_gates_scheme_and_host() {
         // 缺 scheme 補 https、大小寫正規化、localhost/含點 host 過閘。
-        assert_eq!(normalize_server("vault.example.com").unwrap(), "https://vault.example.com");
-        assert_eq!(normalize_server("HTTPS://Vault.Example.com/x").unwrap(), "https://Vault.Example.com/x");
-        assert_eq!(normalize_server("http://127.0.0.1:18095").unwrap(), "http://127.0.0.1:18095");
-        assert_eq!(normalize_server("localhost:8080").unwrap(), "https://localhost:8080");
+        assert_eq!(
+            normalize_server("vault.example.com").unwrap(),
+            "https://vault.example.com"
+        );
+        assert_eq!(
+            normalize_server("HTTPS://Vault.Example.com/x").unwrap(),
+            "https://Vault.Example.com/x"
+        );
+        assert_eq!(
+            normalize_server("http://127.0.0.1:18095").unwrap(),
+            "http://127.0.0.1:18095"
+        );
+        assert_eq!(
+            normalize_server("localhost:8080").unwrap(),
+            "https://localhost:8080"
+        );
         // 非 http(s)、空 host、含空白、空字串全拒。
         assert!(normalize_server("ftp://x.test").is_err());
         assert!(normalize_server("https://").is_err());
@@ -4551,7 +4661,10 @@ mod tests {
             validate_login("vault.test", "  ", "pw").unwrap_err(),
             "請輸入 email"
         );
-        assert_eq!(validate_login("vault.test", "a@b.c", "pw").unwrap(), "https://vault.test");
+        assert_eq!(
+            validate_login("vault.test", "a@b.c", "pw").unwrap(),
+            "https://vault.test"
+        );
     }
 
     #[test]
@@ -4579,8 +4692,14 @@ mod tests {
         // 6 位碼（Authenticator/Email）
         assert_eq!(validate_factor(0, " 123456 ").unwrap(), "123456");
         assert_eq!(validate_factor(1, "000000").unwrap(), "000000");
-        assert_eq!(validate_factor(0, "12345").unwrap_err(), "驗證碼需為 6 位數字");
-        assert_eq!(validate_factor(0, "12a456").unwrap_err(), "驗證碼需為 6 位數字");
+        assert_eq!(
+            validate_factor(0, "12345").unwrap_err(),
+            "驗證碼需為 6 位數字"
+        );
+        assert_eq!(
+            validate_factor(0, "12a456").unwrap_err(),
+            "驗證碼需為 6 位數字"
+        );
         // 救援碼：去分隔符＋小寫化（Vaultwarden 以小寫比對，實錄 user.rs:169-175）
         assert_eq!(
             validate_factor(8, "Y3XV-4T6Z-7QBJ-KMNP-2RTW-3XYZ-ABCD").unwrap(),
@@ -4596,7 +4715,10 @@ mod tests {
     #[test]
     fn humanize_login_flags_stale_totp() {
         let out = humanize_login("http 400: Invalid TOTP code! Server time: ...");
-        assert!(out.starts_with("http 400: Invalid TOTP code!"), "原文保留：{out}");
+        assert!(
+            out.starts_with("http 400: Invalid TOTP code!"),
+            "原文保留：{out}"
+        );
         assert!(out.contains("驗證碼錯誤或已過期"), "加可懂提示：{out}");
         // 其他錯誤不動原文。
         assert_eq!(humanize_login("weird"), "weird");
@@ -4604,17 +4726,29 @@ mod tests {
 
     #[test]
     fn account_row_maps_reauth_first() {
-        let unlocked = UnlockStateView::Unlocked { epoch: 1, deadline_epoch_ms: None };
+        let unlocked = UnlockStateView::Unlocked {
+            epoch: 1,
+            deadline_epoch_ms: None,
+        };
         let out = UnlockStateView::SignedOut;
         // needs_reauth 優先於一切（即使仍解鎖）。
-        assert_eq!(account_row(Some(&unlocked), true, Some("a@b.c")), AcctRow::Reauth);
+        assert_eq!(
+            account_row(Some(&unlocked), true, Some("a@b.c")),
+            AcctRow::Reauth
+        );
         assert_eq!(account_row(None, true, None), AcctRow::Reauth);
         // 未登入（含 Welcome 尚無狀態）→ 登入入口。
         assert_eq!(account_row(Some(&out), false, None), AcctRow::SignedOut);
         assert_eq!(account_row(None, false, None), AcctRow::SignedOut);
         // 其餘為已登入，email 可知則附。
-        assert_eq!(account_row(Some(&unlocked), false, Some("a@b.c")), AcctRow::Signed(Some("a@b.c".into())));
-        assert_eq!(account_row(Some(&unlocked), false, None), AcctRow::Signed(None));
+        assert_eq!(
+            account_row(Some(&unlocked), false, Some("a@b.c")),
+            AcctRow::Signed(Some("a@b.c".into()))
+        );
+        assert_eq!(
+            account_row(Some(&unlocked), false, None),
+            AcctRow::Signed(None)
+        );
     }
 
     #[test]
@@ -4638,36 +4772,99 @@ mod tests {
         }];
         // 基準原值＝不髒；空白抖動與「空密碼＝不動」也不髒（同 submit 正規化）。
         assert!(!form_is_dirty(
-            Some(&orig), "GitHub", "octo", "", &rows, "dev", "", "",
-            ItemKind::Login, &[]
+            Some(&orig),
+            "GitHub",
+            "octo",
+            "",
+            &rows,
+            "dev",
+            "",
+            "",
+            ItemKind::Login,
+            &[]
         ));
         assert!(!form_is_dirty(
-            Some(&orig), "  GitHub ", "octo", "   ", &rows, " dev ", " ", "",
-            ItemKind::Login, &[]
+            Some(&orig),
+            "  GitHub ",
+            "octo",
+            "   ",
+            &rows,
+            " dev ",
+            " ",
+            "",
+            ItemKind::Login,
+            &[]
         ));
         // 改名字、換密碼、清空網址、動標籤＝髒。
         assert!(form_is_dirty(
-            Some(&orig), "GitHub2", "octo", "", &rows, "dev", "", "",
-            ItemKind::Login, &[]
+            Some(&orig),
+            "GitHub2",
+            "octo",
+            "",
+            &rows,
+            "dev",
+            "",
+            "",
+            ItemKind::Login,
+            &[]
         ));
         assert!(form_is_dirty(
-            Some(&orig), "GitHub", "octo", "newpw", &rows, "dev", "", "",
-            ItemKind::Login, &[]
+            Some(&orig),
+            "GitHub",
+            "octo",
+            "newpw",
+            &rows,
+            "dev",
+            "",
+            "",
+            ItemKind::Login,
+            &[]
         ));
         // 清空網址列值（Set uri.0 None）＝髒；列數縮減在編輯面不可達（無 ✕）。
         assert!(form_is_dirty(
-            Some(&orig), "GitHub", "octo", "", &[UriDraft { key: 0, uri: "  ".into(), match_type: None }],
-            "dev", "", "", ItemKind::Login, &[]
+            Some(&orig),
+            "GitHub",
+            "octo",
+            "",
+            &[UriDraft {
+                key: 0,
+                uri: "  ".into(),
+                match_type: None
+            }],
+            "dev",
+            "",
+            "",
+            ItemKind::Login,
+            &[]
         ));
         // 只改判定欄（match 預設→精確）＝髒：SetUriMatch 走 leaf 批。
         assert!(form_is_dirty(
-            Some(&orig), "GitHub", "octo", "",
-            &[UriDraft { key: 0, uri: "https://github.com".into(), match_type: Some(3) }],
-            "dev", "", "", ItemKind::Login, &[]
+            Some(&orig),
+            "GitHub",
+            "octo",
+            "",
+            &[UriDraft {
+                key: 0,
+                uri: "https://github.com".into(),
+                match_type: Some(3)
+            }],
+            "dev",
+            "",
+            "",
+            ItemKind::Login,
+            &[]
         ));
         assert!(form_is_dirty(
-            Some(&orig), "GitHub", "octo", "", &rows, "dev, 工作", "", "",
-            ItemKind::Login, &[]
+            Some(&orig),
+            "GitHub",
+            "octo",
+            "",
+            &rows,
+            "dev, 工作",
+            "",
+            "",
+            ItemKind::Login,
+            &[]
         ));
     }
 
@@ -4675,17 +4872,56 @@ mod tests {
     fn form_dirty_create_treats_any_input_as_dirty() {
         // 無基準＝新增：全空乾淨；任一欄位、型別切換、非空欄列＝髒。
         assert!(!form_is_dirty(
-            None, "", "", "", &[], "", "", "", ItemKind::Login, &[]
+            None,
+            "",
+            "",
+            "",
+            &[],
+            "",
+            "",
+            "",
+            ItemKind::Login,
+            &[]
         ));
         assert!(form_is_dirty(
-            None, "x", "", "", &[], "", "", "", ItemKind::Login, &[]
+            None,
+            "x",
+            "",
+            "",
+            &[],
+            "",
+            "",
+            "",
+            ItemKind::Login,
+            &[]
         ));
         assert!(form_is_dirty(
-            None, "", "", "", &[], "", "", "", ItemKind::SecureNote, &[]
+            None,
+            "",
+            "",
+            "",
+            &[],
+            "",
+            "",
+            "",
+            ItemKind::SecureNote,
+            &[]
         ));
         assert!(form_is_dirty(
-            None, "", "", "", &[UriDraft { key: NEW_URI, uri: "https://a.test".into(), match_type: None }],
-            "", "", "", ItemKind::Login, &[]
+            None,
+            "",
+            "",
+            "",
+            &[UriDraft {
+                key: NEW_URI,
+                uri: "https://a.test".into(),
+                match_type: None
+            }],
+            "",
+            "",
+            "",
+            ItemKind::Login,
+            &[]
         ));
         let row = FieldDraft {
             key: 1,
@@ -4694,7 +4930,16 @@ mod tests {
             kind: CipherFieldKind::Text,
         };
         assert!(form_is_dirty(
-            None, "", "", "", &[], "", "", "", ItemKind::Login, &[row]
+            None,
+            "",
+            "",
+            "",
+            &[],
+            "",
+            "",
+            "",
+            ItemKind::Login,
+            &[row]
         ));
         let blank = FieldDraft {
             key: 2,
@@ -4703,7 +4948,16 @@ mod tests {
             kind: CipherFieldKind::Text,
         };
         assert!(!form_is_dirty(
-            None, "", "", "", &[], "", "", "", ItemKind::Login, &[blank]
+            None,
+            "",
+            "",
+            "",
+            &[],
+            "",
+            "",
+            "",
+            ItemKind::Login,
+            &[blank]
         ));
     }
 
@@ -4713,40 +4967,80 @@ mod tests {
         let no_match: [Option<u8>; 2] = [None, None];
         // 全等基準＝三批皆空。
         let same = [
-            UriDraft { key: 0, uri: "https://a.test".into(), match_type: None },
-            UriDraft { key: 1, uri: "https://b.test".into(), match_type: None },
+            UriDraft {
+                key: 0,
+                uri: "https://a.test".into(),
+                match_type: None,
+            },
+            UriDraft {
+                key: 1,
+                uri: "https://b.test".into(),
+                match_type: None,
+            },
         ];
         let (s, t, tail) = uri_edits(&orig, &no_match, &same);
         assert!(s.is_empty() && t.is_empty() && tail.is_empty());
         // 倒置排列但 key 對齊→只有真改動的列產 Set。
         let swapped = [
-            UriDraft { key: 1, uri: "https://b.test".into(), match_type: None },
-            UriDraft { key: 0, uri: "https://a2.test".into(), match_type: None },
+            UriDraft {
+                key: 1,
+                uri: "https://b.test".into(),
+                match_type: None,
+            },
+            UriDraft {
+                key: 0,
+                uri: "https://a2.test".into(),
+                match_type: None,
+            },
         ];
         let (s, t, tail) = uri_edits(&orig, &no_match, &swapped);
-        assert!(matches!(&s[..], [FieldEdit::Set{path, value}] if path=="uri.0" && value.as_deref()==Some("https://a2.test")));
+        assert!(
+            matches!(&s[..], [FieldEdit::Set{path, value}] if path=="uri.0" && value.as_deref()==Some("https://a2.test"))
+        );
         assert!(t.is_empty() && tail.is_empty());
         // 基準有 match、現值回落預設＝SetUriMatch None（leaf 批）。
         let reset = [
-            UriDraft { key: 0, uri: "https://a.test".into(), match_type: None },
+            UriDraft {
+                key: 0,
+                uri: "https://a.test".into(),
+                match_type: None,
+            },
             same[1].clone(),
         ];
         let (s, _, _) = uri_edits(&orig, &[Some(1), None], &reset);
         assert!(matches!(&s[..], [FieldEdit::SetUriMatch{index, match_type: None}] if *index==0));
         // 清空列值＝Set None；刪列＝RemoveUri 按基準索引、由大而小。
-        let dropped = [UriDraft { key: 0, uri: "https://a.test".into(), match_type: None }];
+        let dropped = [UriDraft {
+            key: 0,
+            uri: "https://a.test".into(),
+            match_type: None,
+        }];
         let (s, t, _tail) = uri_edits(&orig, &no_match, &dropped);
         assert!(s.is_empty());
         assert!(matches!(&t[..], [FieldEdit::RemoveUri{index}] if *index==1));
         let dropped_both: [UriDraft; 0] = [];
         let (_, t, _) = uri_edits(&orig, &no_match, &dropped_both);
-        assert!(matches!(&t[..], [FieldEdit::RemoveUri{index:1}, FieldEdit::RemoveUri{index:0}]));
+        assert!(matches!(
+            &t[..],
+            [
+                FieldEdit::RemoveUri { index: 1 },
+                FieldEdit::RemoveUri { index: 0 }
+            ]
+        ));
         // 新增列（key 不在基準）＝AppendUri 落結構批尾端；空白新列跳過。
         let with_new = [
             same[0].clone(),
             same[1].clone(),
-            UriDraft { key: NEW_URI, uri: " https://c.test ".into(), match_type: None },
-            UriDraft { key: NEW_URI.wrapping_sub(1), uri: "   ".into(), match_type: None },
+            UriDraft {
+                key: NEW_URI,
+                uri: " https://c.test ".into(),
+                match_type: None,
+            },
+            UriDraft {
+                key: NEW_URI.wrapping_sub(1),
+                uri: "   ".into(),
+                match_type: None,
+            },
         ];
         let (s, t, tail) = uri_edits(&orig, &no_match, &with_new);
         assert!(s.is_empty());
@@ -4755,11 +5049,23 @@ mod tests {
         // 新列帶判定＋刪一列：判定批索引＝基準數−刪除數＋附加序（0）＝1。
         let drop_and_append = [
             same[1].clone(),
-            UriDraft { key: NEW_URI, uri: "https://c.test".into(), match_type: Some(2) },
+            UriDraft {
+                key: NEW_URI,
+                uri: "https://c.test".into(),
+                match_type: Some(2),
+            },
         ];
         let (_, t, tail) = uri_edits(&orig, &no_match, &drop_and_append);
-        assert!(matches!(&t[..], [FieldEdit::RemoveUri{index:0}, FieldEdit::AppendUri{..}]));
-        assert!(matches!(&tail[..], [FieldEdit::SetUriMatch{index, match_type: Some(2)}] if *index==1));
+        assert!(matches!(
+            &t[..],
+            [
+                FieldEdit::RemoveUri { index: 0 },
+                FieldEdit::AppendUri { .. }
+            ]
+        ));
+        assert!(
+            matches!(&tail[..], [FieldEdit::SetUriMatch{index, match_type: Some(2)}] if *index==1)
+        );
     }
 
     #[test]
@@ -4771,7 +5077,10 @@ mod tests {
         // 有碼或真錯才出現；錯誤走可懂一行。
         assert!(totp_section_shown(Some("123456"), None));
         assert!(totp_section_shown(None, Some("取碼失敗：seed 無效")));
-        assert_eq!(humanize_totp("base32 decode error"), "取碼失敗：base32 decode error");
+        assert_eq!(
+            humanize_totp("base32 decode error"),
+            "取碼失敗：base32 decode error"
+        );
         assert_eq!(humanize_totp("WtpError::Locked"), "取碼失敗：庫已鎖定");
     }
 
@@ -4902,7 +5211,10 @@ mod tests {
         assert_eq!(leaf.len(), 1);
         assert!(matches!(
             structural.as_slice(),
-            [FieldEdit::SetType { index: 0, kind: CipherFieldKind::Boolean }]
+            [FieldEdit::SetType {
+                index: 0,
+                kind: CipherFieldKind::Boolean
+            }]
         ));
     }
 

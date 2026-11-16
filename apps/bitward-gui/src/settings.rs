@@ -56,109 +56,123 @@ pub fn pane(core: AppCore) -> View {
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme::TEXT_PRIMARY),
         )
-        .child(scroll().flex_1().child(
-            view()
-                .flex_col()
-                .gap_5()
-                .w_full()
-                .max_w(px(560.0))
-                .child(setting_row(
-                    "自動鎖定",
-                    "閒置多久後自動鎖庫（純狀態輪詢不計入活動）。",
-                    dropdown(
-                        core.settings,
-                        auto_core,
-                        |s| s.auto_lock_minutes,
-                        |mut s, v| {
-                            s.auto_lock_minutes = v;
-                            s
-                        },
-                        &AUTO_LOCK_LADDER,
-                    ),
-                ))
-                .child(setting_row(
-                    "剪貼簿清除",
-                    "複製敏感值後幾秒清空（中途另複製則讓位）。",
-                    dropdown(
-                        core.settings,
-                        clip_core,
-                        |s| s.clipboard_clear_secs,
-                        |mut s, v| {
-                            s.clipboard_clear_secs = v;
-                            s
-                        },
-                        &CLIPBOARD_LADDER,
-                    ),
-                ))
-                .child(setting_row(
-                    "重新啟動後鎖定",
-                    "開啟＝重啟一律從鎖態起；關閉＝daemon 啟動自動解鎖。",
-                    toggle(core.settings, restart_core, |s| s.lock_on_sleep_restart, |mut s, v| {
-                        s.lock_on_sleep_restart = v;
-                        s
-                    }),
-                ))
-                .child(setting_row(
-                    "鎖定時清除最近搜尋",
-                    "開啟＝進入鎖態即清掉搜尋框字串。",
-                    toggle(core.settings, search_core, |s| s.clear_search_on_lock, |mut s, v| {
-                        s.clear_search_on_lock = v;
-                        s
-                    }),
-                ))
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_3()
-                        .pt_2()
-                        .child(ui::button("立即鎖定", ui::Btn::Ghost, move || {
-                            lock_core.send(Cmd::RequestLock)
-                        }))
-                        .child(
-                            text("立即上鎖 vault（解鎖需裝置金鑰）")
-                                .text_size(px(theme::TEXT_PAGE_SUB))
-                                .text_color(theme::TEXT_MUTED),
+        .child(
+            scroll().flex_1().child(
+                view()
+                    .flex_col()
+                    .gap_5()
+                    .w_full()
+                    .max_w(px(560.0))
+                    .child(setting_row(
+                        "自動鎖定",
+                        "閒置多久後自動鎖庫（純狀態輪詢不計入活動）。",
+                        dropdown(
+                            core.settings,
+                            auto_core,
+                            |s| s.auto_lock_minutes,
+                            |mut s, v| {
+                                s.auto_lock_minutes = v;
+                                s
+                            },
+                            &AUTO_LOCK_LADDER,
                         ),
-                )
-                // 批次 11：側欄收合後，庫工具與外觀搬進設定頁分節。
-                .child(
-                    view()
-                        .flex_col()
-                        .gap_2()
-                        .child(ui::section_title("庫工具"))
-                        .child(
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .child(ui::button("匯出", ui::Btn::Ghost, move || {
-                                    export_core.send(Cmd::AskExport)
-                                }))
-                                .child(ui::button("匯入", ui::Btn::Ghost, move || {
-                                    import_core.send(Cmd::OpenImport)
-                                }))
-                                .child(when(
-                                    move || state::can_change_password(&pw_cond.vault.get()),
-                                    move || {
-                                        let c = pw_build.clone();
-                                        ui::button("變更主密碼", ui::Btn::Ghost, move || {
-                                            c.send(Cmd::OpenChangePassword)
-                                        })
-                                    },
-                                )),
+                    ))
+                    .child(setting_row(
+                        "剪貼簿清除",
+                        "複製敏感值後幾秒清空（中途另複製則讓位）。",
+                        dropdown(
+                            core.settings,
+                            clip_core,
+                            |s| s.clipboard_clear_secs,
+                            |mut s, v| {
+                                s.clipboard_clear_secs = v;
+                                s
+                            },
+                            &CLIPBOARD_LADDER,
                         ),
-                )
-                .child(
-                    view()
-                        .flex_col()
-                        .gap_2()
-                        .child(ui::section_title("外觀"))
-                        .child(crate::theme_picker(theme_core.clone())),
-                )
-                // PR3：雙重驗證管理面（清單／TOTP／Email／YubiKey／救援碼）。
-                .child(crate::twofa::section(core.clone())),
-        ))
+                    ))
+                    .child(setting_row(
+                        "重新啟動後鎖定",
+                        "開啟＝重啟一律從鎖態起；關閉＝daemon 啟動自動解鎖。",
+                        toggle(
+                            core.settings,
+                            restart_core,
+                            |s| s.lock_on_sleep_restart,
+                            |mut s, v| {
+                                s.lock_on_sleep_restart = v;
+                                s
+                            },
+                        ),
+                    ))
+                    .child(setting_row(
+                        "鎖定時清除最近搜尋",
+                        "開啟＝進入鎖態即清掉搜尋框字串。",
+                        toggle(
+                            core.settings,
+                            search_core,
+                            |s| s.clear_search_on_lock,
+                            |mut s, v| {
+                                s.clear_search_on_lock = v;
+                                s
+                            },
+                        ),
+                    ))
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_3()
+                            .pt_2()
+                            .child(ui::button("立即鎖定", ui::Btn::Ghost, move || {
+                                lock_core.send(Cmd::RequestLock)
+                            }))
+                            .child(
+                                text("立即上鎖 vault（解鎖需裝置金鑰）")
+                                    .text_size(px(theme::TEXT_PAGE_SUB))
+                                    .text_color(theme::TEXT_MUTED),
+                            ),
+                    )
+                    // 批次 11：側欄收合後，庫工具與外觀搬進設定頁分節。
+                    .child(
+                        view()
+                            .flex_col()
+                            .gap_2()
+                            .child(ui::section_title("庫工具"))
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(ui::button("匯出", ui::Btn::Ghost, move || {
+                                        export_core.send(Cmd::AskExport)
+                                    }))
+                                    .child(ui::button("匯入", ui::Btn::Ghost, move || {
+                                        import_core.send(Cmd::OpenImport)
+                                    }))
+                                    .child(when(
+                                        move || state::can_change_password(&pw_cond.vault.get()),
+                                        move || {
+                                            let c = pw_build.clone();
+                                            ui::button(
+                                                "變更主密碼",
+                                                ui::Btn::Ghost,
+                                                move || c.send(Cmd::OpenChangePassword),
+                                            )
+                                        },
+                                    )),
+                            ),
+                    )
+                    .child(
+                        view()
+                            .flex_col()
+                            .gap_2()
+                            .child(ui::section_title("外觀"))
+                            .child(crate::theme_picker(theme_core.clone())),
+                    )
+                    // PR3：雙重驗證管理面（清單／TOTP／Email／YubiKey／救援碼）。
+                    .child(crate::twofa::section(core.clone())),
+            ),
+        )
 }
 
 /// 設定列：左標題＋說明、右控件（官方設定頁行版式）。
@@ -296,8 +310,14 @@ fn toggle(
         })
         .child(ui::bool_switch(move || switch_get(settings.get())))
         .child(
-            text(move || if text_get(settings.get()) { "開" } else { "關" })
-                .text_size(px(12.5))
-                .text_color(theme::TEXT_SECONDARY),
+            text(move || {
+                if text_get(settings.get()) {
+                    "開"
+                } else {
+                    "關"
+                }
+            })
+            .text_size(px(12.5))
+            .text_color(theme::TEXT_SECONDARY),
         )
 }

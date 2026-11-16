@@ -8,8 +8,8 @@
 //! 新增/編輯與確認走模態；nav_stack 在 macOS dev host 不渲染，spike
 //! FINDINGS 卡點 4）。外觀代幣全在 `theme`（本批發官方淺色皮）。
 
-mod attach;
 mod approvals;
+mod attach;
 mod btp;
 mod detail;
 mod emergency;
@@ -521,7 +521,12 @@ fn sidebar(core: AppCore) -> View {
         ))
         .child(side_group_header(state::SideGroup::Tools, core.clone()))
         .child(when(
-            move || !tools_cond.sidebar_fold.get().collapsed(state::SideGroup::Tools),
+            move || {
+                !tools_cond
+                    .sidebar_fold
+                    .get()
+                    .collapsed(state::SideGroup::Tools)
+            },
             move || {
                 let gen_sel = gen_sel.clone();
                 let gen_press = gen_press.clone();
@@ -570,21 +575,23 @@ fn sidebar(core: AppCore) -> View {
         ))
         .child(side_group_header(state::SideGroup::System, core.clone()))
         .child(when(
-            move || !system_cond.sidebar_fold.get().collapsed(state::SideGroup::System),
+            move || {
+                !system_cond
+                    .sidebar_fold
+                    .get()
+                    .collapsed(state::SideGroup::System)
+            },
             move || {
                 let set_sel = set_sel.clone();
                 let set_press = set_press.clone();
-                view()
-                    .flex_col()
-                    .gap_0p5()
-                    .child(side_item(
-                        "設定".to_owned(),
-                        move || set_sel.route.get() == Route::Settings,
-                        move || set_press.send(Cmd::OpenSettings),
-                        false,
-                        None,
-                        || 0,
-                    ))
+                view().flex_col().gap_0p5().child(side_item(
+                    "設定".to_owned(),
+                    move || set_sel.route.get() == Route::Settings,
+                    move || set_press.send(Cmd::OpenSettings),
+                    false,
+                    None,
+                    || 0,
+                ))
             },
         ))
         .child(view().flex_1())
@@ -676,7 +683,8 @@ fn side_item(
     let row = if disabled {
         row.tooltip(ui::tooltip_card(tip.unwrap_or("即將推出")))
     } else {
-        row.on_press(on_press).hover(|s| s.bg(theme::SURFACE_RAISED))
+        row.on_press(on_press)
+            .hover(|s| s.bg(theme::SURFACE_RAISED))
     };
     row.child(
         view()
@@ -838,7 +846,12 @@ fn router(core: AppCore) -> impl IntoElement {
         let lock_build = lock_build0.clone();
         let split_build = split_build0.clone();
         when(
-            move || !matches!(lock_cond.vault.get(), Some(UnlockStateView::Unlocked { .. })),
+            move || {
+                !matches!(
+                    lock_cond.vault.get(),
+                    Some(UnlockStateView::Unlocked { .. })
+                )
+            },
             move || lock_page(lock_build.clone()),
         )
         .otherwise(move || split(split_build.clone()))
@@ -887,8 +900,10 @@ fn split(core: AppCore) -> View {
                     } else {
                         detail::loading()
                     }
-                })),
-        )
+                }
+                _ => detail::placeholder(),
+            },
+        )))
 }
 
 /// 鎖態頁：置中 lock glyph＋狀態字＋accent 解鎖卡（協定走金鑰鏈，
@@ -971,21 +986,18 @@ fn lock_page(core: AppCore) -> View {
                                     .focus(|s| s.border_color(theme::ACCENT)),
                             )
                             .child(
-                                text(move || {
-                                    err_c.unlock_error.get().unwrap_or_default()
-                                })
-                                .text_size(px(12.5))
-                                .line_height(px(18.0))
-                                .text_color(theme::DESTRUCTIVE),
+                                text(move || err_c.unlock_error.get().unwrap_or_default())
+                                    .text_size(px(12.5))
+                                    .line_height(px(18.0))
+                                    .text_color(theme::DESTRUCTIVE),
                             )
-                            .child(ui::button(
-                                "解鎖",
-                                ui::Btn::PrimaryWide,
-                                move || {
+                            .child(
+                                ui::button("解鎖", ui::Btn::PrimaryWide, move || {
                                     let cc = unlock_build.clone();
                                     cc.send(Cmd::RequestUnlock)
-                                },
-                            ).w_full())
+                                })
+                                .w_full(),
+                            )
                             // 批次 14b：僅當 daemon 回報 Keychain 生物可用才顯鈕。
                             .child(when(
                                 move || bio_c.biometric_ok.get(),
@@ -1012,10 +1024,14 @@ fn lock_page(core: AppCore) -> View {
 /// 失敗顯示 daemon 錯誤原文＋可懂化；成功→hub 登入即解鎖→StateUpdated 進庫。
 fn login_page(core: AppCore) -> View {
     // 預填：server 取 status 上次值（空則留佔位提示）；email 取帳號列值。
-    if core.login.server.get().is_empty() && let Some(s) = core.acct_server.get() {
+    if core.login.server.get().is_empty()
+        && let Some(s) = core.acct_server.get()
+    {
         core.login.server.set(s);
     }
-    if core.login.email.get().is_empty() && let Some(e) = core.acct_email.get() {
+    if core.login.email.get().is_empty()
+        && let Some(e) = core.acct_email.get()
+    {
         core.login.email.set(e);
     }
     let server = core.login.server;
@@ -1166,12 +1182,9 @@ fn login_page(core: AppCore) -> View {
                                 move |v| code.set(v),
                             ))
                             .child(dynamic(move || {
-                                let mode = sel_core
-                                    .login
-                                    .selected_provider()
-                                    .and_then(|p| {
-                                        bw_proto::TwoFactorProviderInfo::factor_mode(p.provider)
-                                    });
+                                let mode = sel_core.login.selected_provider().and_then(|p| {
+                                    bw_proto::TwoFactorProviderInfo::factor_mode(p.provider)
+                                });
                                 match mode {
                                     Some(bw_proto::FactorMode::DuoHandoff) => {
                                         let c = sel_core.clone();
@@ -1414,11 +1427,7 @@ fn banner(core: AppCore) -> impl IntoElement {
                     view()
                         .cursor_pointer()
                         .on_press(move || dismiss.error_text.set(None))
-                        .child(
-                            text("✕")
-                                .text_size(px(12.0))
-                                .text_color(theme::TEXT_MUTED),
-                        ),
+                        .child(text("✕").text_size(px(12.0)).text_color(theme::TEXT_MUTED)),
                 )
         },
     )
