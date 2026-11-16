@@ -28,6 +28,7 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 pass() { echo "ok: $1"; }
 
 cleanup() {
+  [[ "${EA_KEEP:-}" == "1" ]] && return
   docker rm -f "$VW" >/dev/null 2>&1 || true
   pkill -f "bitwarderd --data-dir $DG" 2>/dev/null || true
   pkill -f "bitwarderd --data-dir $DB" 2>/dev/null || true
@@ -88,4 +89,46 @@ if BG ea invite "$EB" --type view --days 1 >/dev/null 2>&1; then
 fi
 pass "重複邀請回可懂錯誤"
 
-echo "EXIT-C1-PARTIAL 0"
+# ── C2：grantee 發起恢復→批准→唯讀檢視（外部鑰投影）──────────
+echo "$PWG" | BG dev-seed --name ea-login --uri https://ea.example.com --password s3cr3t-ea >/dev/null
+BG sync >/dev/null
+BB ea initiate "$EAID" >/dev/null
+[[ "$(BG ea ls | jq -r '.[0].status')" == "RecoveryInitiated" ]] \
+  || fail "initiate 後 grantor 側應見 RecoveryInitiated"
+BG ea approve "$EAID" >/dev/null
+[[ "$(BB ea ls --granted | jq -r '.[0].status')" == "RecoveryApproved" ]] \
+  || fail "approve 後 grantee 側未收斂 RecoveryApproved"
+pass "initiate→approve 狀態收斂"
+
+VIEW_JSON=$(BB --json ea view "$EAID")
+echo "$VIEW_JSON" | jq -e '[.[].meta.name] | index("ea-login")' >/dev/null \
+  || fail "view 未含 grantor 項目名：$(echo "$VIEW_JSON" | jq -c '[.[].meta.name]')"
+echo "$VIEW_JSON" | jq -e '.[0].password == "s3cr3t-ea"' >/dev/null \
+  || fail "view 未出 grantor 密碼明文（外部鑰鏈斷）：$(echo "$VIEW_JSON" | jq -c '.[0]|{username,password}')"
+pass "grantee 以派發金鑰讀到 grantor 帳密明文"
+
+# epoch 快取語意：同 epoch 重讀不打 VW（access log 只 1 發 view POST）。
+VIEW_POSTS_1=$(docker logs "$VW" 2>&1 | grep -cE "\[request\]\[INFO\] POST /api/emergency-access/[^ ]+/view" || true)
+BB ea view "$EAID" >/dev/null
+VIEW_POSTS_2=$(docker logs "$VW" 2>&1 | grep -cE "\[request\]\[INFO\] POST /api/emergency-access/[^ ]+/view" || true)
+[[ "$VIEW_POSTS_1" == "$VIEW_POSTS_2" && "$VIEW_POSTS_1" -ge 1 ]] \
+  || fail "同 epoch 重讀應吃 daemon 快取（$VIEW_POSTS_1→$VIEW_POSTS_2）"
+# 上鎖：明文閘拒；解鎖：epoch 已變，必須重新打 VW。
+BB lock >/dev/null
+if BB ea view "$EAID" >/dev/null 2>&1; then
+  fail "鎖態 view 應被拒（快取已失效）"
+fi
+echo "$PWB" | BB unlock --password-stdin >/dev/null
+BB ea view "$EAID" >/dev/null
+VIEW_POSTS_3=$(docker logs "$VW" 2>&1 | grep -cE "\[request\]\[INFO\] POST /api/emergency-access/[^ ]+/view" || true)
+[[ "$VIEW_POSTS_3" == "$((VIEW_POSTS_1 + 1))" ]] \
+  || fail "鎖→解鎖後 view 應重取 VW 一次（$VIEW_POSTS_2→$VIEW_POSTS_3）"
+pass "epoch 語意：鎖態明文出棧、解鎖後重取（access log 計數實證）"
+
+# 拒絕路徑：RecoveryApproved 仍可 reject（源檔兩態皆收）→ 回 Confirmed。
+BG ea reject "$EAID" >/dev/null
+[[ "$(BB ea ls --granted | jq -r '.[0].status')" == "Confirmed" ]] \
+  || fail "reject 後應回 Confirmed"
+pass "reject 閉環回 Confirmed（view 入口消失由 can_view 純測釘選）"
+
+echo "EXIT-C2-PARTIAL 0"

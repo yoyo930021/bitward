@@ -68,7 +68,7 @@ impl Hub {
                 .with_keys(|kb| {
                     // 金鑰選擇統一走解析器（item key／org key／user key 三態，
                     // 見 `Hub::cipher_decrypt_key`）；金鑰不出閉包（不變量 3）。
-                    let k = self.cipher_decrypt_key(kb, &row.enc_cipher, &org_keys)?;
+                    let k = self.cipher_decrypt_key(kb.user_key(), &row.enc_cipher, &org_keys)?;
                     let dec = |s: &str| {
                         bw_crypto::decrypt_bytes_with_key(&k, s)
                             .ok()
@@ -144,7 +144,7 @@ impl Hub {
             }
             let scored = self.machine.with_keys(|kb| {
                 // 金鑰不出閉包（不變量 3）；解不開（org 未派生等）跳過比誤評準。
-                let dec = self.cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
+                let dec = self.cipher_field_decryptor(kb.user_key(), &row.enc_cipher, &org_keys);
                 let pw = row
                     .enc_cipher
                     .pointer("/login/password")
@@ -222,7 +222,7 @@ impl Hub {
             let (name, uri_count) = self
                 .machine
                 .with_keys(|kb| {
-                    let dec = self.cipher_field_decryptor(kb, &e, &org_keys);
+                    let dec = self.cipher_field_decryptor(kb.user_key(), &e, &org_keys);
                     let name = e
                         .get("name")
                         .and_then(Value::as_str)

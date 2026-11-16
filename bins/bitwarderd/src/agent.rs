@@ -333,6 +333,9 @@ impl Hub {
             | Call::EmergencyAccess(EaCall::ListGrantors) => {
                 (Access::See(bw_proto::Sensitivity::Identity), None)
             }
+            Call::EmergencyAccess(EaCall::View { .. }) => {
+                (Access::Reveal(bw_proto::Sensitivity::Secret), None)
+            }
             Call::EmergencyAccess(_) => (Access::Mutate(MutateOp::Patch), None),
             Call::Use(UseCall::TotpCode { id }) => (Access::Use(UseKind::TotpCode), Some(*id)),
             Call::Use(UseCall::ResolveRef { .. }) => {
@@ -720,7 +723,7 @@ impl Hub {
         let org_keys = self.org_key_map();
         self.machine
             .with_keys(|kb| {
-                let d = self.cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
+                let d = self.cipher_field_decryptor(kb.user_key(), &row.enc_cipher, &org_keys);
                 row.enc_cipher
                     .pointer(&path)
                     .and_then(Value::as_str)

@@ -532,6 +532,14 @@ enum EaCmd {
     Confirm { id: String },
     /// 撤銷（grantor/grantee 兩側皆可）
     Revoke { id: String },
+    /// grantee 發起恢復（Confirmed → RecoveryInitiated，等 wait 天自動批准）
+    Initiate { id: String },
+    /// grantor 批准恢復（→ RecoveryApproved，grantee 才能 view/takeover）
+    Approve { id: String },
+    /// grantor 拒絕恢復（回 Confirmed）
+    Reject { id: String },
+    /// grantee 唯讀視圖（需解鎖態；輸出 grantor 項目 Reveal 投影）
+    View { id: String },
 }
 
 #[derive(Subcommand)]
@@ -1632,6 +1640,10 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             },
             EaCmd::Confirm { id } => EaCall::Confirm { ea_id: id.clone() },
             EaCmd::Revoke { id } => EaCall::Revoke { ea_id: id.clone() },
+            EaCmd::Initiate { id } => EaCall::Initiate { ea_id: id.clone() },
+            EaCmd::Approve { id } => EaCall::Approve { ea_id: id.clone() },
+            EaCmd::Reject { id } => EaCall::Reject { ea_id: id.clone() },
+            EaCmd::View { id } => EaCall::View { ea_id: id.clone() },
         }),
         Cmd::Settings { cmd } => match cmd {
             SettingsCmd::Show => Call::Admin(AdminCall::GetSettings),
@@ -2430,7 +2442,8 @@ fn parse_approval(s: &str) -> Result<Uuid, String> {
 fn print_response(resp: &Response, json: bool) {
     use serde_json::json;
     match resp {
-        Response::Items(rows) => {
+        // EA view 明文出口（PR4 C2）與本庫清單同渲染（--json 扁平、人讀 format_item）
+        Response::Items(rows) | Response::EaView(rows) => {
             if json {
                 println!("{}", serde_json::to_string(rows).unwrap());
             } else {

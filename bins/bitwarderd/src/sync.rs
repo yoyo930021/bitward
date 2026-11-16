@@ -258,7 +258,7 @@ impl Hub {
         let ours = self
             .machine
             .with_keys(|kb| -> Option<Value> {
-                let key = self.cipher_decrypt_key(kb, &base, &org_keys)?;
+                let key = self.cipher_decrypt_key(kb.user_key(), &base, &org_keys)?;
                 let enc =
                     |v: &str| bw_crypto::encrypt_bytes_key(&key, v.as_bytes()).unwrap_or_default();
                 let ours = bw_vault::apply_merged(&base, &map, &enc);
@@ -836,7 +836,7 @@ impl Hub {
         let merged = self
             .machine
             .with_keys(|kb| -> Option<Result<Option<Value>, Vec<String>>> {
-                let key = self.cipher_decrypt_key(kb, &theirs, &org_keys)?;
+                let key = self.cipher_decrypt_key(kb.user_key(), &theirs, &org_keys)?;
                 let dec = |s: &str| -> Option<String> {
                     bw_crypto::decrypt_bytes_with_key(&key, s)
                         .ok()
@@ -963,7 +963,7 @@ impl Hub {
         }
         self.machine
             .with_keys(|kb| -> Option<String> {
-                let item = self.cipher_decrypt_key(kb, theirs, org_keys)?;
+                let item = self.cipher_decrypt_key(kb.user_key(), theirs, org_keys)?;
                 let wrap: &[u8] = match target_org {
                     None => kb.user_key().as_bytes(),
                     Some(o) => org_keys.get(&o).map(|k| k.as_bytes())?,
@@ -1096,7 +1096,9 @@ impl Hub {
                                 // 衝突欄位顯示同讀寫口徑：按 cipher 歸屬走解析器
                                 // 攤平（含 item key 兩段鏈）。無鑰 → 空欄位清單
                                 // （純顯示路徑，最壞不報欄，不硬用 user key 誤解）。
-                                let Some(key) = self.cipher_decrypt_key(kb, ours, &org_keys) else {
+                                let Some(key) =
+                                    self.cipher_decrypt_key(kb.user_key(), ours, &org_keys)
+                                else {
                                     return Vec::new();
                                 };
                                 let dec = |s: &str| -> Option<String> {

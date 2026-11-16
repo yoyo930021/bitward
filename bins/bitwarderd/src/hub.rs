@@ -94,6 +94,10 @@ pub struct Hub {
     pub settings: std::sync::Mutex<bw_proto::Settings>,
     /// Send 接收頁 loopback 監聽的實際 port（0＝未起；webUrl 與探測以在場與否為準）。
     pub webui_port: std::sync::atomic::AtomicU16,
+    /// PR4 C2：grantee 緊急檢視快取（ea_id →（LockEpoch，Reveal 投影））。
+    /// 明文只活記憶體（同 GUI 訊號紀律，不落盤）；epoch 一變（上鎖/解鎖）
+    /// 整批作廢——plan 的「本機上鎖則 view 快取失效」語意在此實作。
+    pub ea_view_cache: std::sync::Mutex<HashMap<String, (u64, Vec<ItemView>)>>,
 }
 
 pub type DispatchResult = Result<Response, WtpError>;
@@ -207,6 +211,7 @@ impl Hub {
             keystore,
             settings: std::sync::Mutex::new(initial_settings),
             webui_port: std::sync::atomic::AtomicU16::new(0),
+            ea_view_cache: std::sync::Mutex::new(HashMap::new()),
         });
         // 自動鎖定政策接線（settings.rs）：解鎖時的 idle deadline 由設定決定。
         hub.apply_timeout_policy();
@@ -1261,11 +1266,11 @@ impl Hub {
     /// 項目會全欄誤解，寫回更會推出無人解得開的密文）。
     pub(crate) fn cipher_decrypt_key(
         &self,
-        kb: &bw_keys::KeyBundle,
+        user_key: &bw_crypto::UserKey,
         cipher: &Value,
         org_keys: &HashMap<Uuid, bw_crypto::OrgKey>,
     ) -> Option<Zeroizing<Vec<u8>>> {
-        let user: &[u8] = kb.user_key().as_bytes();
+        let user: &[u8] = user_key.as_bytes();
         let owner: Option<&[u8]> = match self.cipher_owner_org(cipher) {
             None => Some(user),
             Some(org) => org_keys.get(&org).map(|k| k.as_bytes()),
@@ -1299,13 +1304,16 @@ impl Hub {
     /// 讀路徑欄位解密器（project_one/totp/autotype/SecretRef/索引回填共用）：
     /// 金鑰取自 [`Self::cipher_decrypt_key`]，閉包只在 `with_keys` 閉包內
     /// 存活（不變量 3）。單欄解不開回 None（容忍漂移，同舊行為）。
+    /// 吃 `&UserKey` 而非 `&KeyBundle`＝**外部鑰視窗**注入點（PR4）：
+    /// 本機解鎖鏈傳 `kb.user_key()`，EA view 投影傳 grantor 的 user key，
+    /// 同一支三態選鑰解析器不另起爐灶。
     pub(crate) fn cipher_field_decryptor(
         &self,
-        kb: &bw_keys::KeyBundle,
+        user_key: &bw_crypto::UserKey,
         enc_cipher: &Value,
         org_keys: &HashMap<Uuid, bw_crypto::OrgKey>,
     ) -> impl Fn(&str) -> Option<String> + '_ {
-        let key = self.cipher_decrypt_key(kb, enc_cipher, org_keys);
+        let key = self.cipher_decrypt_key(user_key, enc_cipher, org_keys);
         move |e: &str| {
             let k: &[u8] = key.as_ref()?;
             bw_crypto::decrypt_bytes_with_key(k, e)
@@ -1333,7 +1341,7 @@ impl Hub {
                 continue;
             };
             let decrypted = self.machine.with_keys(|kb| {
-                let dec = self.cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
+                let dec = self.cipher_field_decryptor(kb.user_key(), &row.enc_cipher, &org_keys);
                 bw_vault::plain_index(&row.enc_cipher, &dec)
             });
             let idx = match decrypted {
@@ -1391,7 +1399,7 @@ impl Hub {
         let org_keys = self.org_key_map();
         let reveal = view == View::Reveal;
         let dec = self.machine.with_keys(|kb| {
-            let d = self.cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
+            let d = self.cipher_field_decryptor(kb.user_key(), &row.enc_cipher, &org_keys);
             let (username, password, notes, fields) = {
                 let login = row.enc_cipher.get("login");
                 let username = login
@@ -1488,7 +1496,7 @@ impl Hub {
             let org_keys = self.org_key_map();
             self.machine
                 .with_keys(|kb| {
-                    let d = self.cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
+                    let d = self.cipher_field_decryptor(kb.user_key(), &row.enc_cipher, &org_keys);
                     let dec = |field: &str| {
                         row.enc_cipher
                             .pointer(&format!("/login/{field}"))
@@ -1548,7 +1556,7 @@ impl Hub {
             let org_keys = self.org_key_map();
             self.machine
                 .with_keys(|kb| {
-                    let d = self.cipher_field_decryptor(kb, &row.enc_cipher, &org_keys);
+                    let d = self.cipher_field_decryptor(kb.user_key(), &row.enc_cipher, &org_keys);
                     row.enc_cipher
                         .pointer("/login/totp")
                         .and_then(Value::as_str)
@@ -1664,7 +1672,7 @@ fn mask_card_number(num: &str) -> String {
 /// 否則明文原樣）。缺 card 節回 None（非卡片型別／伺服器未帶）。
 /// 遮罩紀律同 password：Masked 只給 `number_masked`/`code_masked`，
 /// Reveal 才給 `number`/`code` 全值。
-fn project_card(
+pub(crate) fn project_card(
     cipher: &Value,
     dec: &dyn Fn(&str) -> Option<String>,
     reveal: bool,
@@ -1701,7 +1709,7 @@ fn project_card(
 
 /// 鏡像 `$.identity` 節 → 投影（PR1 讀側）。十八欄全 EncString＋
 /// conditionalEncString 寬容；無遮罩欄（官方詳情頁解鎖即讀，同 notes 紀律）。
-fn project_identity(
+pub(crate) fn project_identity(
     cipher: &Value,
     dec: &dyn Fn(&str) -> Option<String>,
 ) -> Option<bw_proto::IdentityView> {
@@ -1890,6 +1898,10 @@ fn action_tag(c: &Call) -> String {
         Call::EmergencyAccess(EaCall::Invite { .. }) => "Ea.Invite",
         Call::EmergencyAccess(EaCall::Confirm { .. }) => "Ea.Confirm",
         Call::EmergencyAccess(EaCall::Revoke { .. }) => "Ea.Revoke",
+        Call::EmergencyAccess(EaCall::Initiate { .. }) => "Ea.Initiate",
+        Call::EmergencyAccess(EaCall::Approve { .. }) => "Ea.Approve",
+        Call::EmergencyAccess(EaCall::Reject { .. }) => "Ea.Reject",
+        Call::EmergencyAccess(EaCall::View { .. }) => "Ea.View",
         Call::Use(UseCall::TotpCode { .. }) => "Use.TotpCode",
         Call::Use(UseCall::GeneratePassword { .. }) => "Use.GeneratePassword",
         Call::Use(UseCall::ResolveRef { .. }) => "Use.ResolveRef",
@@ -2010,6 +2022,8 @@ fn sensitivity_of_call(c: &Call, resp: Option<&Response>) -> bw_proto::Sensitivi
         Call::TwoFactor(_) => Identity,
         // EA 管理面（PR4）：清單出口是對方 email/名稱/狀態＝Identity；
         // 邀請/確認/撤銷的出口不含明文（包裝好的 user key 信封只入程）。
+        // View 出口帶 grantor 全庫明文（Reveal 投影）＝Secret 級。
+        Call::EmergencyAccess(EaCall::View { .. }) => Secret,
         Call::EmergencyAccess(_) => Identity,
         Call::Auth(_) | Call::Admin(_) | Call::Sync(_) | Call::Agent(_) | Call::Fill(_) => Opaque,
     }
@@ -2421,7 +2435,7 @@ mod tests {
         let resolve = |cipher: Value| {
             let hub = hub.clone();
             hub.machine
-                .with_keys(|kb| hub.cipher_decrypt_key(kb, &cipher, &HashMap::new()))
+                .with_keys(|kb| hub.cipher_decrypt_key(kb.user_key(), &cipher, &HashMap::new()))
                 .unwrap()
                 .map(|k| k.to_vec())
         };
@@ -2449,14 +2463,14 @@ mod tests {
         let got = hub
             .machine
             .with_keys(|kb| {
-                hub.cipher_decrypt_key(kb, &shared, &one_org_keys(org, &orgkey))
+                hub.cipher_decrypt_key(kb.user_key(), &shared, &one_org_keys(org, &orgkey))
                     .map(|k| k.to_vec())
             })
             .unwrap();
         assert_eq!(got.as_deref(), Some(orgkey.as_bytes()));
         assert_eq!(
             hub.machine
-                .with_keys(|kb| hub.cipher_decrypt_key(kb, &shared, &HashMap::new()))
+                .with_keys(|kb| hub.cipher_decrypt_key(kb.user_key(), &shared, &HashMap::new()))
                 .unwrap(),
             None,
             "org key 未派生 → None（同寫側拒寫口徑）"
@@ -2468,7 +2482,7 @@ mod tests {
         let got = hub
             .machine
             .with_keys(|kb| {
-                hub.cipher_decrypt_key(kb, &shared2, &one_org_keys(org, &orgkey))
+                hub.cipher_decrypt_key(kb.user_key(), &shared2, &one_org_keys(org, &orgkey))
                     .map(|k| k.to_vec())
             })
             .unwrap();

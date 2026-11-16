@@ -879,8 +879,21 @@ pub enum EaCall {
     /// （OAEP-SHA1，同 org invite 的 `wrap_org_key` 一支）包裝自己的 user key
     /// 作 `key`。需要解鎖態；grantee 的 user id 由 daemon 查 trusted 清單取得。
     Confirm { ea_id: String },
-    /// 撤銷（`DELETE {base}/{id}`，grantor/grantee 兩側皆可用，源檔同路徑）。
+    /// 撤銷（`DELETE {base}/{id}`，grantor/grantee 兩側皆可，源檔同路徑）。
     Revoke { ea_id: String },
+    /// grantee 發起恢復（`POST {base}/{id}/initiate`，C2）：狀態 Confirmed →
+    /// RecoveryInitiated，等待 `wait_time_days` 後伺服器自動批准
+    /// （`emergency_request_timeout_job`，排程預設每天一跑）。
+    Initiate { ea_id: String },
+    /// grantor 批准恢復（`POST {base}/{id}/approve`，C2）→ RecoveryApproved。
+    Approve { ea_id: String },
+    /// grantor 拒絕恢復（`POST {base}/{id}/reject`，C2）→ 回 Confirmed。
+    Reject { ea_id: String },
+    /// grantee 唯讀視圖（`POST {base}/{id}/view`，C2）：daemon 拉
+    /// `{ciphers,keyEncrypted}`，以己RSA 私鑰解出 grantor user key，經
+    /// `Hub::cipher_decrypt_key` 外部鑰視窗投影成 Reveal 級 `ItemView` 清單。
+    /// 需要解鎖態（解私鑰信封）；結果按 `LockEpoch` 快取——上鎖即失效。
+    View { ea_id: String },
 }
 
 /// EA 存取等級（upstream `EmergencyAccessType`：0=View、1=Takeover）。
@@ -1626,6 +1639,9 @@ pub enum Response {
     /// `EmergencyAccess:ListGrantees/ListGrantors` 回包（PR4；兩側清單同形態，
     /// `EaContact::role` 區分視角；置尾紀律同 Passkey）。
     EaContacts(Vec<EaContact>),
+    /// `EmergencyAccess:View` 回包（PR4 C2）：grantor 項目的唯讀投影
+    /// （Reveal 級欄位齊全；水印與只讀語意在 GUI 面）。
+    EaView(Vec<ItemView>),
 }
 
 /// 伺服器宣告的可用第二因子（daemon 由 `bw-server` 挑戰映射而來的輕量形態）。
@@ -2214,7 +2230,10 @@ mod tests {
         }]);
         let bytes = postcard::to_allocvec(&contacts).unwrap();
         let back: Response = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(serde_json::to_string(&back).unwrap(), serde_json::to_string(&contacts).unwrap());
+        assert_eq!(
+            serde_json::to_string(&back).unwrap(),
+            serde_json::to_string(&contacts).unwrap()
+        );
         let j = serde_json::to_string(&contacts).unwrap();
         let back: Response = serde_json::from_str(&j).unwrap();
         assert_eq!(serde_json::to_string(&back).unwrap(), j);
@@ -2228,11 +2247,18 @@ mod tests {
             },
             EaCall::Confirm { ea_id: "x".into() },
             EaCall::Revoke { ea_id: "x".into() },
+            EaCall::Initiate { ea_id: "x".into() },
+            EaCall::Approve { ea_id: "x".into() },
+            EaCall::Reject { ea_id: "x".into() },
+            EaCall::View { ea_id: "x".into() },
         ] {
             let wrapped = Call::EmergencyAccess(call);
             let bytes = postcard::to_allocvec(&wrapped).unwrap();
             let back: Call = postcard::from_bytes(&bytes).unwrap();
-            assert_eq!(serde_json::to_string(&back).unwrap(), serde_json::to_string(&wrapped).unwrap());
+            assert_eq!(
+                serde_json::to_string(&back).unwrap(),
+                serde_json::to_string(&wrapped).unwrap()
+            );
         }
     }
 

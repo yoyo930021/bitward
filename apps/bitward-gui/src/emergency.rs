@@ -36,16 +36,49 @@ pub fn can_confirm(c: &EaContact) -> bool {
     c.role == EaRole::Grantee && c.status == EaStatus::Accepted
 }
 
-/// 緊急联系人頁視角（右欄整塊）。
+/// 發起恢復入口（C2，我在他人的 grantee 清單＝role Grantor）：Confirmed 起跳；
+/// RecoveryInitiated 顯示進行中不重發。
+pub fn can_initiate(c: &EaContact) -> bool {
+    c.role == EaRole::Grantor && c.status == EaStatus::Confirmed
+}
+
+/// grantor 批准/拒絕鈕（C2）：對方已發起恢復，等我表態。
+pub fn can_adjudicate(c: &EaContact) -> bool {
+    c.role == EaRole::Grantee && c.status == EaStatus::RecoveryInitiated
+}
+
+/// 檢視入口（C2）：恢復已批准且型別是 View（Takeover 型別走接管，C3）。
+pub fn can_view(c: &EaContact) -> bool {
+    c.role == EaRole::Grantor
+        && c.status == EaStatus::RecoveryApproved
+        && c.access_type == bw_proto::EaAccessType::View
+}
+
+/// 緊急联系人頁視角（右欄整塊）：清單態 ↔ 水印唯讀檢視態同訊號切換。
 pub fn pane(core: AppCore) -> View {
     let invite_core = core.clone();
-    let empty_cond = core.clone();
-    let err_cond = core.clone();
     view()
         .flex_1()
         .flex_col()
         .px_8()
         .py_5()
+        .gap_4()
+        .child(dynamic(move || {
+            if core.ea_view_items.get().is_some() {
+                view_pane(core.clone())
+            } else {
+                contacts_body(core.clone(), invite_core.clone())
+            }
+        }))
+}
+
+/// 清單態：標題＋重新整理＋兩側清單＋邀請表單。
+fn contacts_body(core: AppCore, invite_core: AppCore) -> View {
+    let empty_cond = core.clone();
+    let err_cond = core.clone();
+    view()
+        .flex_1()
+        .flex_col()
         .gap_4()
         .child(
             view()
@@ -177,11 +210,150 @@ fn contact_row(c: EaContact, core: AppCore) -> View {
                 }
             }
         }))
+        .child(recovery_actions(&c, &id, &core))
         .child(ui::button("撤銷", ui::Btn::Ghost, {
             let revoke_core = core.clone();
             let revoke_id = id.clone();
             move || revoke_core.send(Cmd::EaRevoke(revoke_id.clone()))
         }))
+}
+
+/// 恢復流動作列（C2）：依純判別閘現算——我在 grantor 側給「發起恢復」與
+/// 「檢視」；我在 grantee 側遇對方請求中給「批准／拒絕」。
+fn recovery_actions(c: &EaContact, id: &str, core: &AppCore) -> View {
+    let mut row = view().flex_row().items_center().gap_2();
+    if can_initiate(c) {
+        let ic = core.clone();
+        let iid = id.to_owned();
+        row = row.child(ui::button("發起恢復", ui::Btn::Ghost, move || {
+            ic.send(Cmd::EaInitiate(iid.clone()))
+        }));
+    }
+    if can_adjudicate(c) {
+        let ac = core.clone();
+        let aid = id.to_owned();
+        row = row.child(ui::button("批准", ui::Btn::Primary, move || {
+            ac.send(Cmd::EaApprove(aid.clone()))
+        }));
+        let rc = core.clone();
+        let rid = id.to_owned();
+        row = row.child(ui::button("拒絕", ui::Btn::Ghost, move || {
+            rc.send(Cmd::EaReject(rid.clone()))
+        }));
+    }
+    if can_view(c) {
+        let vc = core.clone();
+        let vid = id.to_owned();
+        row = row.child(ui::button("檢視", ui::Btn::Primary, move || {
+            vc.send(Cmd::EaView(vid.clone()))
+        }));
+    }
+    row
+}
+
+/// 水印唯讀檢視態（C2）：標題＋返回＋水印帶＋grantor 項目明文列。
+fn view_pane(core: AppCore) -> View {
+    let back_core = core.clone();
+    let items_sig = core.ea_view_items;
+    let each_core = core.clone();
+    let who = core
+        .ea_view_for
+        .get()
+        .unwrap_or_else(|| "緊急檢視".to_owned());
+    view()
+        .flex_1()
+        .flex_col()
+        .gap_3()
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .child(ui::button("返回", ui::Btn::Ghost, move || {
+                    back_core.send(Cmd::EaViewLoaded(None))
+                }))
+                .child(
+                    text(format!("{who} 的密碼庫（唯讀）"))
+                        .text_size(px(theme::TEXT_PAGE_TITLE))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::TEXT_PRIMARY),
+                )
+                .child(ui::badge("唯讀", theme::WARNING, theme::SURFACE)),
+        )
+        .child(watermark_band())
+        .child(
+            scroll().flex_1().child(
+                view()
+                    .flex_col()
+                    .gap_2()
+                    .w_full()
+                    .max_w(px(720.0))
+                    .child(each(
+                        move || {
+                            items_sig
+                                .get()
+                                .map(|a| a.as_ref().clone())
+                                .unwrap_or_default()
+                        },
+                        |v: &bw_proto::ItemView| v.meta.id,
+                        move |row: ReadSignal<bw_proto::ItemView>, _| {
+                            view_row(row.get(), each_core.clone())
+                        },
+                    ))
+                    .child(when(
+                        move || items_sig.get().map(|a| a.is_empty()).unwrap_or(false),
+                        || row_note("對方的密碼庫是空的（或項目都無法解密）。"),
+                    )),
+            ),
+        )
+}
+
+/// 水印帶：三條低透明度重複字樣橫幅（截圖可證「水印在場」；只讀態全程在頂部）。
+fn watermark_band() -> View {
+    view()
+        .flex_row()
+        .gap_8()
+        .child(wm_text())
+        .child(wm_text())
+        .child(wm_text())
+}
+
+fn wm_text() -> View {
+    view().child(
+        text("bitward 緊急檢視 · 唯讀")
+            .text_size(px(theme::TEXT_PAGE_SUB))
+            .font_weight(FontWeight::BOLD)
+            .text_color(theme::TEXT_MUTED)
+            .opacity(0.35),
+    )
+}
+
+/// 檢視單列：名稱＋帳號＋密碼明文＋型別章（無編輯入口——唯讀語意）。
+fn view_row(v: bw_proto::ItemView, _core: AppCore) -> View {
+    let pw = v
+        .password
+        .clone()
+        .or(v.password_masked.clone())
+        .unwrap_or_else(|| "—".into());
+    view()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .min_h(px(theme::ROW_H))
+        .px_3()
+        .rounded(px(theme::RADIUS_CONTROL))
+        .border(px(1.0))
+        .border_color(theme::HAIRLINE)
+        .bg(theme::ELEVATED)
+        .child(
+            text(v.meta.name.clone().unwrap_or_else(|| "（無名）".into()))
+                .text_size(px(theme::TEXT_ROW))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme::TEXT_PRIMARY),
+        )
+        .child(view().flex_1())
+        .child(row_note(v.username.clone().unwrap_or_default()))
+        .child(row_note(format!("密碼 {pw}")))
 }
 
 /// 邀請表單：email＋型別 chips＋等待天數＋送出。
@@ -287,6 +459,40 @@ mod tests {
             EaStatus::Accepted,
             EaAccessType::View
         )));
+    }
+
+    #[test]
+    fn recovery_gates_split_by_role_and_state() {
+        // 我在 grantee 側（role Grantor）：Confirmed 可發起、批准後可檢視
+        let confirmed = contact(EaRole::Grantor, EaStatus::Confirmed, EaAccessType::View);
+        let approved_view = contact(
+            EaRole::Grantor,
+            EaStatus::RecoveryApproved,
+            EaAccessType::View,
+        );
+        let approved_take = contact(
+            EaRole::Grantor,
+            EaStatus::RecoveryApproved,
+            EaAccessType::Takeover,
+        );
+        assert!(can_initiate(&confirmed));
+        assert!(!can_view(&confirmed));
+        assert!(can_view(&approved_view) && !can_initiate(&approved_view));
+        // 接管型別批准後不出檢視入口（C3 給接管鈕）
+        assert!(!can_view(&approved_take));
+        // 我在 grantor 側（role Grantee）：對方請求中才出批准/拒絕
+        let pending = contact(
+            EaRole::Grantee,
+            EaStatus::RecoveryInitiated,
+            EaAccessType::View,
+        );
+        assert!(can_adjudicate(&pending));
+        assert!(!can_adjudicate(&contact(
+            EaRole::Grantee,
+            EaStatus::Confirmed,
+            EaAccessType::View
+        )));
+        assert!(!can_initiate(&pending), "grantee 側不该看到發起恢復");
     }
 
     #[test]

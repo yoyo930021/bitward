@@ -633,6 +633,16 @@ pub enum Cmd {
     EaConfirm(String),
     /// 撤銷（兩側皆可）。
     EaRevoke(String),
+    /// grantee 發起恢復（`EmergencyAccess:Initiate`）。
+    EaInitiate(String),
+    /// grantor 批准恢復（`EmergencyAccess:Approve`）。
+    EaApprove(String),
+    /// grantor 拒絕恢復（`EmergencyAccess:Reject`）。
+    EaReject(String),
+    /// grantee 拉唯讀視圖（`EmergencyAccess:View`；需解鎖態）。
+    EaView(String),
+    /// 視圖回包：Some＝進水印唯讀態；None＝退出回清單。
+    EaViewLoaded(Option<std::sync::Arc<Vec<bw_proto::ItemView>>>),
     /// EA 寫操作收尾：Ok(toast)／Err(可懂錯誤)；成功後自動重取清單。
     EaDone(Result<String, String>),
     /// Sync:Trigger 成功回包：蓋同步時間戳、提示「已同步」、重抓列表。
@@ -1425,6 +1435,10 @@ pub struct AppCore {
     pub ea_email: Signal<String>,
     pub ea_takeover: Signal<bool>,
     pub ea_days: Signal<String>,
+    /// 緊急檢視明文鏡（C2）：Some＝水印唯讀態展開中；`ea_view_for`＝該視圖
+    /// 隸屬的 grantor 顯示名。**epoch 語意**：進鎖態即清（見 StateUpdated）。
+    pub ea_view_items: Signal<Option<std::sync::Arc<Vec<bw_proto::ItemView>>>>,
+    pub ea_view_for: Signal<Option<String>>,
 }
 
 impl AppCore {
@@ -1537,6 +1551,8 @@ impl AppCore {
             ea_email: signal(String::new()),
             ea_takeover: signal(false),
             ea_days: signal("7".to_owned()),
+            ea_view_items: signal(None),
+            ea_view_for: signal(None),
             form: FormFields {
                 name: signal(String::new()),
                 username: signal(String::new()),
@@ -2085,6 +2101,10 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 core.tf_email_code.set(String::new());
                 core.tf_yubi.set(String::new());
                 core.tf_recovery.set(None);
+                // 明文出棧（PR4 C2 epoch 語意）：緊急檢視明文隨鎖消失，
+                // 重解鎖後再讀會向 daemon 重取（daemon 快取同 epoch 作廢）。
+                core.ea_view_items.set(None);
+                core.ea_view_for.set(None);
             }
             if was_unlocked
                 && !unlocked
@@ -3144,6 +3164,84 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                     core.send(Cmd::EaFetch);
                 }
                 Err(e) => core.ea_error.set(Some(e)),
+            }
+        }
+        Cmd::EaInitiate(id) => {
+            core.ea_error.set(None);
+            core.ea_busy.set(true);
+            core.ipc_quiet(move |s| {
+                match s.call(&Call::EmergencyAccess(bw_proto::EaCall::Initiate {
+                    ea_id: id.clone(),
+                })) {
+                    Ok(Response::Ok) => {
+                        Cmd::EaDone(Ok("已發起恢復請求（等待期過後自動生效）".into()))
+                    }
+                    Ok(other) => Cmd::EaDone(Err(format!("initiate 回應形態不符：{other:?}"))),
+                    Err(e) => Cmd::EaDone(Err(e.display())),
+                }
+            });
+        }
+        Cmd::EaApprove(id) => {
+            core.ea_busy.set(true);
+            core.ipc_quiet(move |s| {
+                match s.call(&Call::EmergencyAccess(bw_proto::EaCall::Approve {
+                    ea_id: id.clone(),
+                })) {
+                    Ok(Response::Ok) => Cmd::EaDone(Ok("已批准恢復".into())),
+                    Ok(other) => Cmd::EaDone(Err(format!("approve 回應形態不符：{other:?}"))),
+                    Err(e) => Cmd::EaDone(Err(e.display())),
+                }
+            });
+        }
+        Cmd::EaReject(id) => {
+            core.ea_busy.set(true);
+            core.ipc_quiet(move |s| {
+                match s.call(&Call::EmergencyAccess(bw_proto::EaCall::Reject {
+                    ea_id: id.clone(),
+                })) {
+                    Ok(Response::Ok) => Cmd::EaDone(Ok("已拒絕恢復（狀態回已確認）".into())),
+                    Ok(other) => Cmd::EaDone(Err(format!("reject 回應形態不符：{other:?}"))),
+                    Err(e) => Cmd::EaDone(Err(e.display())),
+                }
+            });
+        }
+        Cmd::EaView(id) => {
+            // 視圖標題用對方顯示名（清單鏡在場才取到；缺席以 id 前 8 碼代）。
+            let label = core
+                .ea_grantors
+                .get()
+                .iter()
+                .find(|c| c.id == id)
+                .map(|c| {
+                    if c.name.is_empty() {
+                        c.email.clone()
+                    } else {
+                        c.name.clone()
+                    }
+                })
+                .unwrap_or_else(|| id.chars().take(8).collect());
+            core.ea_view_for.set(Some(label));
+            core.ea_busy.set(true);
+            core.ipc_quiet(move |s| {
+                match s.call(&Call::EmergencyAccess(bw_proto::EaCall::View {
+                    ea_id: id.clone(),
+                })) {
+                    Ok(Response::EaView(items)) => {
+                        Cmd::EaViewLoaded(Some(std::sync::Arc::new(items)))
+                    }
+                    Ok(other) => Cmd::EaDone(Err(format!("view 回應形態不符：{other:?}"))),
+                    Err(e) => Cmd::EaDone(Err(e.display())),
+                }
+            });
+        }
+        Cmd::EaViewLoaded(items) => {
+            core.ea_busy.set(false);
+            match items {
+                Some(v) => core.ea_view_items.set(Some(v)),
+                None => {
+                    core.ea_view_items.set(None);
+                    core.ea_view_for.set(None);
+                }
             }
         }
         Cmd::SubmitSend => {

@@ -56,7 +56,7 @@ impl Hub {
         let (key_env, name_env, ct_blob) = self
             .machine
             .with_keys(|kb| -> Option<(String, String, Vec<u8>)> {
-                let key = self.cipher_decrypt_key(kb, &cipher, &org_keys)?;
+                let key = self.cipher_decrypt_key(kb.user_key(), &cipher, &org_keys)?;
                 let mut att_key = vec![0u8; 64];
                 rand::thread_rng().fill_bytes(&mut att_key);
                 let key_env = bw_crypto::encrypt_bytes_key(&key, &att_key).ok()?;
@@ -175,7 +175,7 @@ impl Hub {
         let plain = self
             .machine
             .with_keys(|kb| -> Option<Vec<u8>> {
-                let field_key = self.cipher_decrypt_key(kb, &row_cipher, &org_keys)?;
+                let field_key = self.cipher_decrypt_key(kb.user_key(), &row_cipher, &org_keys)?;
                 let ct_s = std::str::from_utf8(&ct).ok()?;
                 let att_key = bw_crypto::decrypt_bytes_with_key(&field_key, &key_env).ok()?;
                 bw_crypto::decrypt_bytes_with_key(&att_key, ct_s).ok()
