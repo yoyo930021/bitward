@@ -55,6 +55,9 @@ pub enum Quirk {
     /// `client_credentials` 也要帶 deviceIdentifier/deviceName/deviceType，否則 400
     /// （Vaultwarden 1.37.2 實測：`device_identifier cannot be blank`）。
     ClientCredentialsRequiresDevice,
+    /// EA 端點掛在 `accounts/emergency-access/*` 而非 `emergency-access/*`
+    /// （較舊官方雲佈局；`Client::ea_paths` 探測命中時記錄，VW 恆不出現）。
+    EmergencyAccessUnderAccounts,
 }
 
 impl Quirk {
@@ -80,6 +83,7 @@ impl Quirk {
             }
             Self::AttachmentUploadRequiresMultipart => "attachment-upload-requires-multipart",
             Self::ClientCredentialsRequiresDevice => "client-credentials-requires-device",
+            Self::EmergencyAccessUnderAccounts => "emergency-access-under-accounts",
         }
     }
 }

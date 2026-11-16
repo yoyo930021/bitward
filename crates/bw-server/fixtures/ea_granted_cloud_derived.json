@@ -1,0 +1,21 @@
+{
+  "data": [
+    {
+      "id": "8a7c0000-0000-4000-8000-00000000ea01",
+      "name": "家人",
+      "email": "grantor@example.com",
+      "avatarColor": null,
+      "status": 3,
+      "type": 1,
+      "waitTimeDays": 3,
+      "grantorId": "8a7c0000-0000-4000-8000-00000000u001",
+      "recoveryInitiatedDate": "2026-11-16T12:00:00Z",
+      "lastNotificationDate": "2026-11-16T12:00:00Z",
+      "creationDate": "2026-10-01T00:00:00Z",
+      "revisionDate": "2026-11-16T12:00:00Z",
+      "object": "emergencyAccessGrantorDetails"
+    }
+  ],
+  "object": "list",
+  "continuationToken": null
+}

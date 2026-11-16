@@ -6,6 +6,7 @@ mod apns;
 mod arena;
 mod attach;
 mod datamanage;
+mod ea;
 mod hub;
 mod icon;
 mod passkey;

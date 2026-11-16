@@ -24,9 +24,11 @@
 //! | 附件 v2 | `POST {api}/ciphers/{id}/attachment/v2`、`GET/DELETE .../attachment/{aid}` | 只取 URL，上傳 PUT 由呼叫方做 |
 //! | 探測 | `GET {api}/config`、`GET {api}/version`、`GET {identity}/.well-known/openid-configuration` | |
 //! | 2FA 管理面 | `GET {api}/two-factor`、`POST/PUT/DELETE {api}/two-factor/*` | 見 `two_factor` 模組表 |
+//! | 緊急存取（EA） | `GET/POST/PUT/DELETE {api}/emergency-access/*`（探測回退 `accounts/emergency-access/*`） | 見 `ea` 模組表 |
 //! | notifications | `WS {notifications}/hub?access_token=…` | 官方 json hub protocol；VW messagepack |
 
 pub mod auth;
+pub mod ea;
 pub mod error;
 pub mod json;
 pub mod notify;
@@ -128,6 +130,8 @@ struct State {
     urls: Option<ServerUrls>,
     /// 打過探測了沒（即使全失敗也要記住，免得每個請求都重探一次）
     probed: bool,
+    /// EA 端點路徑形態（`ea::Client::ea_paths` 探測後快取；None＝未探）
+    ea_paths: Option<crate::ea::EaPaths>,
 }
 
 /// 一個帳號對一個 server 的連線。可跨 `.await` 複製使用（內部是 `Arc`-free 的 RwLock 狀態）。

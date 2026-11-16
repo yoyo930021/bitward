@@ -11,10 +11,10 @@ use uuid::Uuid;
 use bw_btp::{read_server, write_client};
 use bw_proto::{
     AdminCall, AgentCall, Auth, AuthCall, Call, CipherDraft, CipherField, CipherFieldKind,
-    ClientMsg, FieldEdit, FillCall, ImportItem, ItemId, ItemKind, ItemView, MutationId,
-    OverlayOpWire, PROTO_VERSION, PasskeyCall, ProtoVersion, Query, Resolution, Response,
-    ServerMsg, SessionToken, Settings, SortKey, SyncCall, TwoFactorCall, TwoFactorInput,
-    TwoFactorProviderInfo, UseCall, VaultCall, View, WtpError,
+    ClientMsg, EaAccessType, EaCall, EaRole, FieldEdit, FillCall, ImportItem, ItemId, ItemKind,
+    ItemView, MutationId, OverlayOpWire, PROTO_VERSION, PasskeyCall, ProtoVersion, Query,
+    Resolution, Response, ServerMsg, SessionToken, Settings, SortKey, SyncCall, TwoFactorCall,
+    TwoFactorInput, TwoFactorProviderInfo, UseCall, VaultCall, View, WtpError,
 };
 
 #[derive(Parser)]
@@ -68,6 +68,12 @@ enum Cmd {
     TwoFactor {
         #[command(subcommand)]
         cmd: TwoFactorCmd,
+    },
+    /// 緊急存取（PR4）：联系人清單／邀請／確認／撤銷（C1）＋恢復與視圖（C2/C3）。
+    #[command(alias = "emergency-access")]
+    Ea {
+        #[command(subcommand)]
+        cmd: EaCmd,
     },
     Sync,
     Ls {
@@ -505,6 +511,27 @@ enum TwoFactorCmd {
     /// 停用一個因子（`provider`＝upstream 編號：0 TOTP、1 Email、2 Duo、
     /// 3 YubiKey、7 WebAuthn；stdin：主密碼）
     Disable { provider: i32 },
+}
+
+#[derive(Subcommand)]
+enum EaCmd {
+    /// 联系人清單：預設＝我授權的對象（grantee 側欄）；`--granted`＝授權給我的
+    Ls {
+        #[arg(long)]
+        granted: bool,
+    },
+    /// 邀請緊急联系人（`--type view|takeover`、`--days` 恢復等待天數）
+    Invite {
+        email: String,
+        #[arg(long, default_value = "view")]
+        r#type: String,
+        #[arg(long, default_value_t = 7)]
+        days: u32,
+    },
+    /// grantor 確認（以對方公鑰派發 user key；需解鎖態）
+    Confirm { id: String },
+    /// 撤銷（grantor/grantee 兩側皆可）
+    Revoke { id: String },
 }
 
 #[derive(Subcommand)]
@@ -1582,6 +1609,30 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                 provider: *provider,
             },
         }),
+        Cmd::Ea { cmd } => Call::EmergencyAccess(match cmd {
+            EaCmd::Ls { granted } => {
+                if *granted {
+                    EaCall::ListGrantors
+                } else {
+                    EaCall::ListGrantees
+                }
+            }
+            EaCmd::Invite {
+                email,
+                r#type,
+                days,
+            } => EaCall::Invite {
+                email: email.clone(),
+                access_type: match r#type.as_str() {
+                    "takeover" => EaAccessType::Takeover,
+                    "view" => EaAccessType::View,
+                    other => return Err(format!("--type 只收 view|takeover（收到 {other}）")),
+                },
+                wait_time_days: *days,
+            },
+            EaCmd::Confirm { id } => EaCall::Confirm { ea_id: id.clone() },
+            EaCmd::Revoke { id } => EaCall::Revoke { ea_id: id.clone() },
+        }),
         Cmd::Settings { cmd } => match cmd {
             SettingsCmd::Show => Call::Admin(AdminCall::GetSettings),
             SettingsCmd::Set { payload } => {
@@ -2494,6 +2545,27 @@ fn print_response(resp: &Response, json: bool) {
                 .collect();
             println!("{}", serde_json::to_string_pretty(&rows).unwrap());
         }
+        // EA 清單（PR4）：扁平 JSON 列（e2e jq 直接命中 id/status）
+        Response::EaContacts(v) => {
+            let rows: Vec<_> = v
+                .iter()
+                .map(|c| {
+                    json!({
+                        "id": c.id,
+                        "userId": c.user_id,
+                        "email": c.email,
+                        "name": c.name,
+                        "status": format!("{:?}", c.status),
+                        "statusLabel": c.status.label(),
+                        "type": format!("{:?}", c.access_type),
+                        "waitTimeDays": c.wait_time_days,
+                        "grantedToMe": c.role == EaRole::Grantor,
+                        "recoveryInitiatedAt": c.recovery_initiated_at,
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&rows).unwrap());
+        }
         Response::Profile(p) => println!("{}", json!(p)),
         Response::Ok => println!("ok"),
         // 展開 newtype variant，jq 路徑直接命中欄位（避免 {"Status":{...}} 外殼）
@@ -2682,7 +2754,19 @@ async fn dev_register(server: &str, email: &str, _stdin: bool) -> Result<(), Str
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut raw);
     let uk = bw_crypto::UserKey::from_bytes(raw.to_vec()).map_err(|e| e.to_string())?;
     let key = bw_crypto::encrypt_user_key(&mk, &uk).map_err(|e| e.to_string())?;
-    let acc = NewAccount::new(email, "e2e dev", mph, key);
+    // RSA keypair（官方客戶端註冊同形）：EA confirm/takeover 與 org akey 的
+    // RSA 鏈都要求帳號在伺服器上有 publicKey——缺了它 `/users/{id}/public-key`
+    // 回「User has no public_key」（VW 1.37.2 實錄）。
+    let pair = bw_crypto::generate_rsa_keypair(&uk).map_err(|e| e.to_string())?;
+    // 伺服器上的 publicKey 欄是 PEM 裝甲（orgpath.sh 同形；官方客戶端同）——
+    // 生成器給的是 b64 SPKI，裝甲後再送。
+    let pub_pem = format!(
+        "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----",
+        pair.public_key_b64
+    );
+    let mut acc = NewAccount::new(email, "e2e dev", mph, key);
+    acc.public_key = Some(pub_pem);
+    acc.encrypted_private_key = Some(pair.encrypted_private_key);
     client.register(&acc).await.map_err(|e| e.to_string())?;
     println!("registered {email}");
     Ok(())

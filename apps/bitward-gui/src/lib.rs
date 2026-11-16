@@ -12,6 +12,7 @@ mod attach;
 mod approvals;
 mod btp;
 mod detail;
+mod emergency;
 mod export;
 mod form;
 mod genpage;
@@ -391,7 +392,7 @@ fn topbar(core: AppCore) -> View {
 
 /// 左側欄（批次 12：按 kind 重構）——待批准＋徽章頂部獨立，其下三組：
 /// 密碼庫（全部項目／(未分類)／資料夾樹／已共享／已封存／垃圾桶＝庫視圖全回檯面）、
-/// 工具（產生密碼／Send／報告）、系統（設定）。組標題 11px uppercase muted，
+/// 工具（產生密碼／Send／報告／緊急联系人）、系統（設定）。組標題 11px uppercase muted，
 /// 「工具／系統」兩組可收合（本 session 記憶）。底部＝帳號列＋立即同步。
 /// 資料夾／垃圾桶／已封存互斥（`VaultFilter`）；cmd+1..4 直跳目標不變。
 fn sidebar(core: AppCore) -> View {
@@ -418,6 +419,8 @@ fn sidebar(core: AppCore) -> View {
     let rep_press = core.clone();
     let send_sel = core.clone();
     let send_press = core.clone();
+    let ea_sel = core.clone();
+    let ea_press = core.clone();
     let sync_core = core.clone();
     let tools_cond = core.clone();
     let system_cond = core.clone();
@@ -526,6 +529,8 @@ fn sidebar(core: AppCore) -> View {
                 let send_press = send_press.clone();
                 let rep_sel = rep_sel.clone();
                 let rep_press = rep_press.clone();
+                let ea_sel = ea_sel.clone();
+                let ea_press = ea_press.clone();
                 view()
                     .flex_col()
                     .gap_0p5()
@@ -549,6 +554,14 @@ fn sidebar(core: AppCore) -> View {
                         "報告".to_owned(),
                         move || rep_sel.route.get() == Route::Reports,
                         move || rep_press.send(Cmd::OpenReports),
+                        false,
+                        None,
+                        || 0,
+                    ))
+                    .child(side_item(
+                        "緊急联系人".to_owned(),
+                        move || ea_sel.route.get() == Route::Emergency,
+                        move || ea_press.send(Cmd::OpenEmergency),
                         false,
                         None,
                         || 0,
@@ -842,6 +855,7 @@ fn split(core: AppCore) -> View {
     let reports_build = core.clone();
     let gen_build = core.clone();
     let send_build = core.clone();
+    let emergency_build = core.clone();
     let form_build = core.clone();
     view()
         .flex_row()
@@ -858,26 +872,20 @@ fn split(core: AppCore) -> View {
                 .child(list::toolbar(core.clone()))
                 .child(list::panel(core.clone())),
         )
-        .child(
-            view()
-                .flex_1()
-                .bg(theme::BASE)
-                .child(dynamic(move || {
-                    match route_cond.route.get() {
-                        Route::Approvals => approvals::pane(approvals_build.clone()),
-                        Route::Settings => settings::pane(settings_build.clone()),
-                        Route::Reports => reports::pane(reports_build.clone()),
-                        Route::Generator => genpage::pane(gen_build.clone()),
-                        Route::Send => send::pane(send_build.clone()),
-                        Route::Create => form::pane(form_build.clone()),
-                        Route::Edit(_) | Route::Detail(_) => {
-                            if detail_cond.detail.get().is_some() {
-                                detail::pane(detail_build.clone())
-                            } else {
-                                detail::loading()
-                            }
-                        }
-                        _ => detail::placeholder(),
+        .child(view().flex_1().bg(theme::BASE).child(dynamic(
+            move || match route_cond.route.get() {
+                Route::Approvals => approvals::pane(approvals_build.clone()),
+                Route::Settings => settings::pane(settings_build.clone()),
+                Route::Reports => reports::pane(reports_build.clone()),
+                Route::Generator => genpage::pane(gen_build.clone()),
+                Route::Send => send::pane(send_build.clone()),
+                Route::Emergency => emergency::pane(emergency_build.clone()),
+                Route::Create => form::pane(form_build.clone()),
+                Route::Edit(_) | Route::Detail(_) => {
+                    if detail_cond.detail.get().is_some() {
+                        detail::pane(detail_build.clone())
+                    } else {
+                        detail::loading()
                     }
                 })),
         )

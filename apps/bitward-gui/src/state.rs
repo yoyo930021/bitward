@@ -51,6 +51,8 @@ pub enum Route {
     Generator,
     /// Send 加密分享（右欄視角，側欄「Send」進入；清單↔新增↔成功三態同訊號切換）。
     Send,
+    /// 緊急联系人（右欄視角，側欄「緊急联系人」進入；PR4）。
+    Emergency,
 }
 
 /// Send 視角兩態（清單／新增表單；成功態由 `send_created` 訊號承載）。
@@ -269,7 +271,7 @@ pub fn group_items(g: SideGroup) -> &'static [&'static str] {
     match g {
         // 庫視圖全回檯面（批次 11 的「更多」混類收合已拆）。
         SideGroup::Vault => &["全部項目", "（未分類）", "已共享", "已封存", "垃圾桶"],
-        SideGroup::Tools => &["產生密碼", "Send", "報告"],
+        SideGroup::Tools => &["產生密碼", "Send", "報告", "緊急联系人"],
         SideGroup::System => &["設定"],
     }
 }
@@ -615,6 +617,24 @@ pub enum Cmd {
     WebauthnDone(Result<String, String>),
     /// 空作（背景路徑無情報可落地時佔位）。
     Nop,
+    // ── 緊急存取（PR4 GUI 面）────────────────────────────────
+    /// 進入緊急联系人頁（工具組；右欄視角）。
+    OpenEmergency,
+    /// 拉兩側清單（ListGrantees＋ListGrantors 各一發）。
+    EaFetch,
+    /// 清單回包（grantee＝我授權的；grantor＝授權給我的）。
+    EaLoaded {
+        grantees: Vec<bw_proto::EaContact>,
+        grantors: Vec<bw_proto::EaContact>,
+    },
+    /// 表單送出邀請（email＋型別＋等待天數）。
+    EaInvite,
+    /// grantor 確認（daemon 以對方公鑰派發 user key，需解鎖態）。
+    EaConfirm(String),
+    /// 撤銷（兩側皆可）。
+    EaRevoke(String),
+    /// EA 寫操作收尾：Ok(toast)／Err(可懂錯誤)；成功後自動重取清單。
+    EaDone(Result<String, String>),
     /// Sync:Trigger 成功回包：蓋同步時間戳、提示「已同步」、重抓列表。
     SyncDone {
         state: UnlockStateView,
@@ -1393,6 +1413,18 @@ pub struct AppCore {
     pub sends: Signal<Arc<serde_json::Value>>,
     pub send_form: SendFormFields,
     pub send_created: Signal<Option<Arc<serde_json::Value>>>,
+    /// 緊急联系人頁（PR4）：兩側清單鏡＋邀請表單草稿。
+    /// 清單是 Identity 級（名稱/email/狀態），鎖態不必清；
+    /// 明文視圖（`ea_view_*`，C2）進鎖態即清——epoch 語意見 reducer。
+    pub ea_grantees: Signal<Arc<Vec<bw_proto::EaContact>>>,
+    pub ea_grantors: Signal<Arc<Vec<bw_proto::EaContact>>>,
+    /// 本輪是否已取過清單（空態文案與載入中分開）。
+    pub ea_loaded: Signal<bool>,
+    pub ea_busy: Signal<bool>,
+    pub ea_error: Signal<Option<String>>,
+    pub ea_email: Signal<String>,
+    pub ea_takeover: Signal<bool>,
+    pub ea_days: Signal<String>,
 }
 
 impl AppCore {
@@ -1497,6 +1529,14 @@ impl AppCore {
                 error: signal(None),
             },
             send_created: signal(None),
+            ea_grantees: signal(Arc::new(Vec::new())),
+            ea_grantors: signal(Arc::new(Vec::new())),
+            ea_loaded: signal(false),
+            ea_busy: signal(false),
+            ea_error: signal(None),
+            ea_email: signal(String::new()),
+            ea_takeover: signal(false),
+            ea_days: signal("7".to_owned()),
             form: FormFields {
                 name: signal(String::new()),
                 username: signal(String::new()),
@@ -3000,6 +3040,112 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.settle();
             core.error_text.set(Some(e));
         }
+        // ── 緊急存取（PR4 GUI 面）─────────────────────────────
+        Cmd::OpenEmergency => {
+            core.leave_detail();
+            core.sort_menu.set(false);
+            core.route.set(Route::Emergency);
+            core.send(Cmd::EaFetch);
+        }
+        Cmd::EaFetch => {
+            // 兩側清單各一發；任一失敗即整頁錯誤（橫條紀律同 FetchSends）。
+            core.ipc(|s| {
+                let pull = |call: bw_proto::EaCall| -> Result<Vec<bw_proto::EaContact>, String> {
+                    match s.call(&Call::EmergencyAccess(call)) {
+                        Ok(Response::EaContacts(v)) => Ok(v),
+                        Ok(other) => Err(format!("EA 清單回應形態不符：{other:?}")),
+                        Err(e) => Err(e.display()),
+                    }
+                };
+                match (
+                    pull(bw_proto::EaCall::ListGrantees),
+                    pull(bw_proto::EaCall::ListGrantors),
+                ) {
+                    (Ok(grantees), Ok(grantors)) => Cmd::EaLoaded { grantees, grantors },
+                    (Err(e), _) | (_, Err(e)) => Cmd::EaDone(Err(e)),
+                }
+            });
+        }
+        Cmd::EaLoaded { grantees, grantors } => {
+            core.settle();
+            core.ea_busy.set(false);
+            core.ea_error.set(None);
+            core.ea_grantees.set(Arc::new(grantees));
+            core.ea_grantors.set(Arc::new(grantors));
+            core.ea_loaded.set(true);
+        }
+        Cmd::EaInvite => {
+            let email = core.ea_email.get().trim().to_owned();
+            if !email.contains('@') {
+                core.ea_error.set(Some("請輸入有效 email".into()));
+                return;
+            }
+            let days = match core.ea_days.get().trim().parse::<u32>() {
+                Ok(n @ 1..=3650) => n,
+                _ => {
+                    core.ea_error
+                        .set(Some("等待天數需為 1..3650 的整數".into()));
+                    return;
+                }
+            };
+            let access_type = if core.ea_takeover.get() {
+                bw_proto::EaAccessType::Takeover
+            } else {
+                bw_proto::EaAccessType::View
+            };
+            core.ea_error.set(None);
+            core.ea_busy.set(true);
+            core.ipc_quiet(move |s| {
+                match s.call(&Call::EmergencyAccess(bw_proto::EaCall::Invite {
+                    email: email.clone(),
+                    access_type,
+                    wait_time_days: days,
+                })) {
+                    Ok(Response::Ok) => {
+                        Cmd::EaDone(Ok(format!("已邀請 {email}（等待 {days} 天）")))
+                    }
+                    Ok(other) => Cmd::EaDone(Err(format!("invite 回應形態不符：{other:?}"))),
+                    Err(e) => Cmd::EaDone(Err(e.display())),
+                }
+            });
+        }
+        Cmd::EaConfirm(id) => {
+            core.ea_error.set(None);
+            core.ea_busy.set(true);
+            core.ipc_quiet(move |s| {
+                match s.call(&Call::EmergencyAccess(bw_proto::EaCall::Confirm {
+                    ea_id: id.clone(),
+                })) {
+                    Ok(Response::Ok) => Cmd::EaDone(Ok("已確認（金鑰已派發）".into())),
+                    Ok(other) => Cmd::EaDone(Err(format!("confirm 回應形態不符：{other:?}"))),
+                    Err(e) => Cmd::EaDone(Err(e.display())),
+                }
+            });
+        }
+        Cmd::EaRevoke(id) => {
+            core.ea_error.set(None);
+            core.ea_busy.set(true);
+            core.ipc_quiet(move |s| {
+                match s.call(&Call::EmergencyAccess(bw_proto::EaCall::Revoke {
+                    ea_id: id.clone(),
+                })) {
+                    Ok(Response::Ok) => Cmd::EaDone(Ok("已撤銷".into())),
+                    Ok(other) => Cmd::EaDone(Err(format!("revoke 回應形態不符：{other:?}"))),
+                    Err(e) => Cmd::EaDone(Err(e.display())),
+                }
+            });
+        }
+        Cmd::EaDone(res) => {
+            core.ea_busy.set(false);
+            match res {
+                Ok(msg) => {
+                    core.notice.set(Some(msg));
+                    core.ea_email.set(String::new());
+                    core.send(Cmd::EaFetch);
+                }
+                Err(e) => core.ea_error.set(Some(e)),
+            }
+        }
         Cmd::SubmitSend => {
             let f = &core.send_form;
             f.error.set(None);
@@ -3989,6 +4135,7 @@ fn nav_interrupts(cmd: &Cmd) -> bool {
             | Cmd::ToggleArchived
             | Cmd::OpenReports
             | Cmd::OpenGenerator
+            | Cmd::OpenEmergency
     )
 }
 
@@ -4136,7 +4283,10 @@ mod tests {
             group_items(SideGroup::Vault),
             ["全部項目", "（未分類）", "已共享", "已封存", "垃圾桶"]
         );
-        assert_eq!(group_items(SideGroup::Tools), ["產生密碼", "Send", "報告"]);
+        assert_eq!(
+            group_items(SideGroup::Tools),
+            ["產生密碼", "Send", "報告", "緊急联系人"]
+        );
         assert_eq!(group_items(SideGroup::System), ["設定"]);
         let all: Vec<&str> = [SideGroup::Vault, SideGroup::Tools, SideGroup::System]
             .into_iter()

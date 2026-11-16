@@ -397,6 +397,8 @@ pub enum Call {
     Push(PushCall),
     /// 置尾（同上紀律）：服務端 2FA 因子管理面（`/two-factor/*` 代理，PR3）。
     TwoFactor(TwoFactorCall),
+    /// 置尾（同上紀律）：緊急存取（EA）管理與唯讀視圖（PR4）。
+    EmergencyAccess(EaCall),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -854,6 +856,122 @@ pub struct TwoFactorProviderState {
     /// upstream `TwoFactorProviderType` 編號（見 [`TwoFactorProviderInfo::label`]）
     pub provider: i32,
     pub enabled: bool,
+}
+
+/// 緊急存取（EA）呼叫（PR4）：daemon 代理 upstream `emergency-access/*` 端點。
+/// 狀態機（官方 readme 與 Vaultwarden 1.37.2 `src/api/core/emergency_access.rs`）：
+/// invite→accept→confirm→initiate→approve/逾時→view/takeover。
+/// `ea_id` 是 EA 記錄 id（端點路徑參數），不是 vault ItemId。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EaCall {
+    /// 我授權的對象清單（`GET {base}/trusted`，我在 grantor 側）
+    ListGrantees,
+    /// 授權給我的對象清單（`GET {base}/granted`，我在 grantee 側）
+    ListGrantors,
+    /// 邀請（`POST {base}/invite`）。VW 未啟 mail 時對既有帳號直接 Accepted
+    /// （源檔 `send_invite` 分支），雲端則停在 Invited 等對方 accept。
+    Invite {
+        email: String,
+        access_type: EaAccessType,
+        wait_time_days: u32,
+    },
+    /// grantor 確認（`POST {base}/{id}/confirm`）：daemon 以受託人 RSA 公鑰
+    /// （OAEP-SHA1，同 org invite 的 `wrap_org_key` 一支）包裝自己的 user key
+    /// 作 `key`。需要解鎖態；grantee 的 user id 由 daemon 查 trusted 清單取得。
+    Confirm { ea_id: String },
+    /// 撤銷（`DELETE {base}/{id}`，grantor/grantee 兩側皆可用，源檔同路徑）。
+    Revoke { ea_id: String },
+}
+
+/// EA 存取等級（upstream `EmergencyAccessType`：0=View、1=Takeover）。
+/// View＝唯讀帳密；Takeover＝可改主密碼接管帳號。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EaAccessType {
+    View,
+    Takeover,
+}
+
+impl EaAccessType {
+    pub fn from_wire(v: i64) -> Self {
+        match v {
+            1 => EaAccessType::Takeover,
+            _ => EaAccessType::View,
+        }
+    }
+    pub fn wire(self) -> i64 {
+        match self {
+            EaAccessType::View => 0,
+            EaAccessType::Takeover => 1,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            EaAccessType::View => "檢視",
+            EaAccessType::Takeover => "接管",
+        }
+    }
+}
+
+/// EA 狀態機位置（upstream `EmergencyAccessStatus` 0..4；未知編號原樣承載）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EaStatus {
+    Invited,
+    Accepted,
+    Confirmed,
+    RecoveryInitiated,
+    RecoveryApproved,
+    Other(i32),
+}
+
+impl EaStatus {
+    pub fn from_wire(v: i64) -> Self {
+        match v {
+            0 => EaStatus::Invited,
+            1 => EaStatus::Accepted,
+            2 => EaStatus::Confirmed,
+            3 => EaStatus::RecoveryInitiated,
+            4 => EaStatus::RecoveryApproved,
+            other => EaStatus::Other(other as i32),
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            EaStatus::Invited => "已邀請",
+            EaStatus::Accepted => "已接受（待確認）",
+            EaStatus::Confirmed => "已確認",
+            EaStatus::RecoveryInitiated => "恢復請求中",
+            EaStatus::RecoveryApproved => "恢復已批准",
+            EaStatus::Other(_) => "未知狀態",
+        }
+    }
+}
+
+/// 清單列的視角：同一支 `EaContact` 服務兩側清單。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EaRole {
+    /// 我在 grantor 側：`user_id`/`email` 是受託人（grantee）
+    Grantee,
+    /// 我在 grantee 側：`user_id`/`email` 是授權人（grantor）
+    Grantor,
+}
+
+/// 一條緊急存取關係（daemon 由 `trusted`/`granted` 回包解析，欄位寬容）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EaContact {
+    /// EA 記錄 id（confirm/initiate/… 端點的路徑參數）
+    pub id: String,
+    /// 對方 user id；邀請未被接受前伺服器只有 email → None
+    pub user_id: Option<String>,
+    pub email: String,
+    pub name: String,
+    pub status: EaStatus,
+    pub access_type: EaAccessType,
+    pub wait_time_days: u32,
+    /// 恢復發起時刻（ISO 字串）。VW 1.37.2 的清單回包**不含**此欄（源檔
+    /// `to_json_grantee_details`）→ None；官方雲有（`recoveryInitiatedDate`）。
+    #[serde(default)]
+    pub recovery_initiated_at: Option<String>,
+    pub role: EaRole,
 }
 
 /// passkey 條目的 Metadata 級視圖：b64url 識別材料 + 公鑰，無密鑰。
@@ -1505,6 +1623,9 @@ pub enum Response {
     /// `TwoFactor:GetRecoveryCode` 回包：None＝伺服器尚未發碼
     /// （启用任一因子後才有）。
     TwoFactorRecoveryCode(Option<String>),
+    /// `EmergencyAccess:ListGrantees/ListGrantors` 回包（PR4；兩側清單同形態，
+    /// `EaContact::role` 區分視角；置尾紀律同 Passkey）。
+    EaContacts(Vec<EaContact>),
 }
 
 /// 伺服器宣告的可用第二因子（daemon 由 `bw-server` 挑戰映射而來的輕量形態）。
@@ -2075,6 +2196,44 @@ mod tests {
         let j = serde_json::to_string(&full).unwrap();
         let back: StatusInfo = serde_json::from_str(&j).unwrap();
         assert_eq!(back.email, full.email);
+    }
+
+    /// PR4 EA 變體：postcard＋JSON 雙線往返（置尾紀律的回歸釘選）。
+    #[test]
+    fn emergency_access_variants_roundtrip() {
+        let contacts = Response::EaContacts(vec![EaContact {
+            id: "ea-1".into(),
+            user_id: Some("u-2".into()),
+            email: "g@bitward.test".into(),
+            name: "受托".into(),
+            status: EaStatus::Confirmed,
+            access_type: EaAccessType::Takeover,
+            wait_time_days: 7,
+            recovery_initiated_at: None,
+            role: EaRole::Grantee,
+        }]);
+        let bytes = postcard::to_allocvec(&contacts).unwrap();
+        let back: Response = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), serde_json::to_string(&contacts).unwrap());
+        let j = serde_json::to_string(&contacts).unwrap();
+        let back: Response = serde_json::from_str(&j).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), j);
+        for call in [
+            EaCall::ListGrantees,
+            EaCall::ListGrantors,
+            EaCall::Invite {
+                email: "a@b.test".into(),
+                access_type: EaAccessType::View,
+                wait_time_days: 2,
+            },
+            EaCall::Confirm { ea_id: "x".into() },
+            EaCall::Revoke { ea_id: "x".into() },
+        ] {
+            let wrapped = Call::EmergencyAccess(call);
+            let bytes = postcard::to_allocvec(&wrapped).unwrap();
+            let back: Call = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(serde_json::to_string(&back).unwrap(), serde_json::to_string(&wrapped).unwrap());
+        }
     }
 
     /// 2FA 批紀律：Login 尾附 `two_factor` must `default`——舊 CLI 幀（無此欄）

@@ -11,8 +11,8 @@ use bw_agent::{
     parse_grants, parse_ref,
 };
 use bw_proto::{
-    AgentCall, ApprovalId, AuthCall, Call, EventTopic, PasskeyCall, PushCall, Response, RunPlan,
-    SessionId, SyncCall, TwoFactorCall, UseCall, VaultCall, View, WtpError,
+    AgentCall, ApprovalId, AuthCall, Call, EaCall, EventTopic, PasskeyCall, PushCall, Response,
+    RunPlan, SessionId, SyncCall, TwoFactorCall, UseCall, VaultCall, View, WtpError,
 };
 use bw_store::{SessionRow, SessionState};
 
@@ -326,6 +326,14 @@ impl Hub {
                 (Access::Reveal(bw_proto::Sensitivity::Secret), None)
             }
             Call::TwoFactor(_) => (Access::Mutate(MutateOp::Patch), None),
+            // EA（PR4）：清單＝See(Identity)（對方名稱/email/狀態編號）；
+            // 邀請/確認/撤銷改帳號的受託關係＝Mutate(Patch)，無 item 錨點
+            // （ea_id 不是 cipher）走 Target::All。
+            Call::EmergencyAccess(EaCall::ListGrantees)
+            | Call::EmergencyAccess(EaCall::ListGrantors) => {
+                (Access::See(bw_proto::Sensitivity::Identity), None)
+            }
+            Call::EmergencyAccess(_) => (Access::Mutate(MutateOp::Patch), None),
             Call::Use(UseCall::TotpCode { id }) => (Access::Use(UseKind::TotpCode), Some(*id)),
             Call::Use(UseCall::ResolveRef { .. }) => {
                 (Access::Reveal(bw_proto::Sensitivity::Secret), None)

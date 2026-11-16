@@ -43,6 +43,13 @@
 - `error_400_bad_master_password_vw.json`、`error_400_unknown_email_vw.json` — 密碼錯/帳號不存在的 400 體。
 - `two_factor_get-authenticator` 對應的 `two_factor_get_authenticator_vw_1.37.2.json` — 取 TOTP secret（`key` 為 base32）。
 
+### 緊急存取（EA，PR4）
+
+- `ea_trusted_vw_1.37.2.json` — `GET /api/emergency-access/trusted`（grantor 側受託人清單；真錄 `dev/e2e/ea.sh` 鏈 2026-11-16，status=2 Confirmed、含 `granteeId`）。
+- `ea_granted_vw_1.37.2.json` — `GET /api/emergency-access/granted`（grantee 側授權人清單，同場錄製；含 `grantorId`）。**注意**：VW 清單回包不含 `recoveryInitiatedDate`（源檔 `to_json_grantor_details`），倒數欄位缺失是常態不是漂移。
+- `users_public_key_vw_1.37.2.json` — `GET /api/users/{id}/public-key`（PEM 裝甲；route 直接掛 `/api`，無 `accounts` 前綴——`dev/e2e/orgpath.sh:155` 同路徑實錄）。
+- `ea_granted_cloud_derived.json` — **推導**（無可錄製的雲帳號）：舊雲佈局 `GET /api/accounts/emergency-access` 形態，帶 `recoveryInitiatedDate`/`lastNotificationDate`（`EmergencyAccessGrantorDetails` 慣例）。值假形真；`tests/ea_proxy.rs::probe_falls_back_to_cloud_accounts_layout` 用它釘探測回退路徑。
+
 ### sync / ciphers / 附件
 
 - `sync_with_attachment_vw_1.37.2.json` — 完整 `GET /sync`：`profile`（含 `accountKeys`）、`ciphers`（`attachments` 是 **array**，附件 id 是 20 字元 hex 不是 UUID）、`folders`、`collections`、`domains`、`policies`、`sends`、`userDecryption`。

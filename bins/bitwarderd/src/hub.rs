@@ -20,8 +20,8 @@ use bw_keys::{
 #[cfg(target_os = "macos")]
 use bw_keys::KeyStore;
 use bw_proto::{
-    AccountInfo, AdminCall, AgentCall, AuditChainInfo, AuthCall, Call, FillCall, ItemId, ItemView,
-    OutboxCounts, PROTO_VERSION, PasskeyCall, PushCall, Response, StatusInfo, SyncCall,
+    AccountInfo, AdminCall, AgentCall, AuditChainInfo, AuthCall, Call, EaCall, FillCall, ItemId,
+    ItemView, OutboxCounts, PROTO_VERSION, PasskeyCall, PushCall, Response, StatusInfo, SyncCall,
     TwoFactorCall, TwoFactorInput, TwoFactorProviderInfo, UseCall, VaultCall, View, WtpError,
 };
 use bw_server::{Client, PasswordLogin, ServerError, TwoFactorProviderType};
@@ -651,6 +651,7 @@ impl Hub {
                 }
             },
             Call::TwoFactor(tfc) => self.two_factor_manage(tfc).await,
+            Call::EmergencyAccess(ec) => self.ea_dispatch(ec).await,
             Call::Fill(FillCall::AutoType { id, template }) => {
                 self.autotype(*id, template.as_deref()).await
             }
@@ -1884,6 +1885,11 @@ fn action_tag(c: &Call) -> String {
         Call::TwoFactor(TwoFactorCall::EmailSendCode { .. }) => "TwoFactor.EmailSendCode",
         Call::TwoFactor(TwoFactorCall::EmailVerify { .. }) => "TwoFactor.EmailVerify",
         Call::TwoFactor(TwoFactorCall::EnableYubikey { .. }) => "TwoFactor.EnableYubikey",
+        Call::EmergencyAccess(EaCall::ListGrantees) => "Ea.ListGrantees",
+        Call::EmergencyAccess(EaCall::ListGrantors) => "Ea.ListGrantors",
+        Call::EmergencyAccess(EaCall::Invite { .. }) => "Ea.Invite",
+        Call::EmergencyAccess(EaCall::Confirm { .. }) => "Ea.Confirm",
+        Call::EmergencyAccess(EaCall::Revoke { .. }) => "Ea.Revoke",
         Call::Use(UseCall::TotpCode { .. }) => "Use.TotpCode",
         Call::Use(UseCall::GeneratePassword { .. }) => "Use.GeneratePassword",
         Call::Use(UseCall::ResolveRef { .. }) => "Use.ResolveRef",
@@ -2002,6 +2008,9 @@ fn sensitivity_of_call(c: &Call, resp: Option<&Response>) -> bw_proto::Sensitivi
         Call::TwoFactor(TwoFactorCall::GetAuthenticator { .. })
         | Call::TwoFactor(TwoFactorCall::GetRecoveryCode { .. }) => Secret,
         Call::TwoFactor(_) => Identity,
+        // EA 管理面（PR4）：清單出口是對方 email/名稱/狀態＝Identity；
+        // 邀請/確認/撤銷的出口不含明文（包裝好的 user key 信封只入程）。
+        Call::EmergencyAccess(_) => Identity,
         Call::Auth(_) | Call::Admin(_) | Call::Sync(_) | Call::Agent(_) | Call::Fill(_) => Opaque,
     }
 }
