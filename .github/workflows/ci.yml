@@ -60,6 +60,24 @@ jobs:
         working-directory: apps/bitward-gui
         run: cargo test --lib
 
+  # 體制閘：Android workspace（apps/bitward-android，獨立 cargo workspace）host 態
+  # 編譯＋單測。教訓：PR1 6f895c7 給 CipherDraft 加 card/identity 未跟 Android 構造點，
+  # root workspace 不含 apps/*、gui 閘只罩 bitward-gui，兩處 E0063 在 HEAD 掛了整天
+  # 無任何 job 擋。`--all-targets` 連 cfg(test) 構造點一起罩（同型第三處就在測內）。
+  # fmt 暫不入閘：該檔既存大量歷史 fmt diff（86 處），整刷另批處理。
+  android-check:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: compile gate
+        working-directory: apps/bitward-android
+        run: cargo check -q --all-targets
+      - name: unit tests
+        working-directory: apps/bitward-android
+        run: cargo test -q --lib
+
   # PR6-E1：Linux 全 workspace（Q3/systemd 落地後，crates/bins 必須在 Linux 全綠；
   # 之前 Linux 只驗 bw-server＋選定 e2e，bw-keys/bw-store/bw-agent 單測從未上過 Linux）。
   linux-check:
