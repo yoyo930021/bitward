@@ -433,10 +433,12 @@ impl Client {
         }
     }
 
-    /// 直連取回附件位元組（簽名 URL，token 在 query 內；仍補 bearer 無害）。
-    /// 不過 `send`（其回 String，附件是二進位），單獨走 bytes 路徑。
+    /// 直連取回附件位元組（簽名 URL，token 在 query 內；同 origin 才另補 bearer，
+    /// 跨源只靠 query token，見 item 7）。不過 `send`（其回 String，附件是二進位），
+    /// 單獨走 bytes 路徑。
     pub async fn attachment_fetch_bytes(&self, url: &str) -> Result<Vec<u8>, ServerError> {
-        let req = self.authorized(self.http.get(url)).await;
+        // item 7：簽名 URL 可能被他源承載，bearer 只在同 origin 時附帶。
+        let req = self.authorized_same_origin(self.http.get(url), url).await;
         let resp = req.send().await?;
         let status = u16::from(resp.status());
         if !(200..299).contains(&status) {

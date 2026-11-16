@@ -108,7 +108,9 @@ impl Client {
                 .mime_str("application/octet-stream")
                 .map_err(|e| ServerError::Malformed(e.to_string()))?,
         );
-        let req = self.authorized(self.http.post(upload_url)).await;
+        let req = self
+            .authorized_same_origin(self.http.post(upload_url), upload_url)
+            .await;
         let (status, text) = self.send(req.multipart(form)).await?;
         match self.parse_ok(status, &text) {
             Ok(_) => Ok(()),

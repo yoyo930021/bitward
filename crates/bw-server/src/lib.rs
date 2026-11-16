@@ -774,6 +774,28 @@ impl Client {
         Err(Box::new(ApiError::parse(status, body)))
     }
 
+    /// `url` 是否與 server base 同 origin（item 7）。附件／Send 的上下載 URL 是
+    /// server 回報的絕對位址，惡意 server 可指向他源；bearer 只該附在同一 origin。
+    fn same_origin(&self, url: &str) -> bool {
+        Url::parse(url)
+            .ok()
+            .is_some_and(|u| u.origin() == self.base.origin())
+    }
+
+    /// 只在 `url` 同 origin 時補 bearer 的 `authorized`（item 7）：跨源簽名 URL
+    /// 的鑑權靠它自帶的 query token，不再把主 token 送到別的主機。
+    async fn authorized_same_origin(
+        &self,
+        req: reqwest::RequestBuilder,
+        url: &str,
+    ) -> reqwest::RequestBuilder {
+        if self.same_origin(url) {
+            self.authorized(req).await
+        } else {
+            req
+        }
+    }
+
     async fn authorized(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match self.state.read().await.access_token.clone() {
             Some(t) => req.bearer_auth(t),
@@ -942,6 +964,22 @@ mod tests {
         );
         assert_eq!(jwt_claim_str(token, "nope"), None);
         assert_eq!(jwt_claim_str("not-a-jwt", "sub"), None);
+    }
+
+    #[test]
+    fn same_origin_gates_bearer_for_signed_urls() {
+        // item 7：bearer 只附在同 origin 的 server 回報 URL 上。
+        let c = Client::new("https://vault.example").unwrap();
+        assert!(c.same_origin("https://vault.example/signed?token=x"));
+        assert!(
+            !c.same_origin("http://vault.example/signed"),
+            "scheme 降級不同源"
+        );
+        assert!(
+            !c.same_origin("https://cdn.example/signed"),
+            "跨 host 不同源"
+        );
+        assert!(!c.same_origin("not a url"));
     }
 
     #[test]

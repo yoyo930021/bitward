@@ -355,22 +355,29 @@ pub fn extract_urls(config: Option<&Value>, base_url: &str) -> ServerUrls {
 }
 
 /// 座標相同的 URL 直接採用；只有「標準路徑」卻換了 origin 的，視為 server 自報的別名，
-/// 改回 base 的 origin 再沿用其路徑。
+/// 改回 base 的 origin 再沿用其路徑。https base 收到 http 回報＝降級：別名情形連
+/// scheme 一起改回 base，非別名情形一律拒絕（item 7，不讓 http URL 承載 bearer）。
 fn rebase_if_alias(base: &str, found: &str, default_path: &str) -> Option<String> {
     let mut found_url = url::Url::parse(found).ok()?;
     let base_url = url::Url::parse(base).ok()?;
     if found_url.origin() == base_url.origin() {
         return Some(found.trim_end_matches('/').to_owned());
     }
-    let same_scheme = found_url.scheme() == base_url.scheme();
     let is_default_path =
         found_url.path().trim_end_matches('/') == default_path.trim_end_matches('/');
-    if same_scheme && is_default_path {
+    let same_scheme = found_url.scheme() == base_url.scheme();
+    // https base 收到 http 回報＝協定降級。
+    let downgrade = found_url.scheme() == "http" && base_url.scheme() == "https";
+    if is_default_path && (same_scheme || downgrade) {
         found_url.set_scheme(base_url.scheme()).ok();
         let _ = found_url.set_host(base_url.host_str());
         found_url.set_port(base_url.port()).ok();
         found_url.set_path(default_path);
         return Some(found_url.to_string().trim_end_matches('/').to_owned());
+    }
+    // 非別名的 http 降級：拒絕採用（呼叫端退回 base 派生的預設路徑）。
+    if downgrade {
+        return None;
     }
     Some(found.trim_end_matches('/').to_owned())
 }
@@ -563,6 +570,27 @@ mod tests {
                 .as_deref(),
             Some("https://n.example")
         );
+    }
+
+    #[test]
+    fn rebase_rejects_http_downgrade_on_https_base() {
+        // item 7：https base 收到 http 回報。
+        // (a) 別名（標準路徑）→ 連 scheme 一起改回 base 的 https origin。
+        let alias = json!({"environment": {"api": "http://localhost/api"}});
+        let urls = extract_urls(Some(&alias), "https://vault.example");
+        assert_eq!(urls.api.as_deref(), Some("https://vault.example/api"));
+        // (b) 非標準路徑的 http → 拒絕採用（None，退回 base 派生預設）。
+        let off = json!({"environment": {"notifications": "http://cdn.example/attach"}});
+        let urls = extract_urls(Some(&off), "https://vault.example");
+        assert_eq!(urls.notifications, None, "http 降級的自訂路徑不得採用");
+        // (c) 同 origin https 原樣採用。
+        let same = json!({"environment": {"api": "https://vault.example/api"}});
+        let urls = extract_urls(Some(&same), "https://vault.example");
+        assert_eq!(urls.api.as_deref(), Some("https://vault.example/api"));
+        // (d) http base（本機）收到 http 別名：同 scheme，照樣 rebase（非降級）。
+        let local = json!({"environment": {"api": "http://localhost/api"}});
+        let urls = extract_urls(Some(&local), "http://127.0.0.1:18080");
+        assert_eq!(urls.api.as_deref(), Some("http://127.0.0.1:18080/api"));
     }
 
     #[test]
