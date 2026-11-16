@@ -12,9 +12,13 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use bw_keys::{
-    AccountLabel, AuthContext, BwCryptoKernel, FileKeyStore, KeyStore, LockReason, UnlockMachine,
+    AccountLabel, AuthContext, BwCryptoKernel, FileKeyStore, LockReason, UnlockMachine,
     UnlockMaterial, UnlockReceipt,
 };
+// PR6-E1：`biometric_available` 走 KeyStore trait，只在 macOS 封存選擇塊需要；
+// Linux 側（dyn 物件方法免 import）留著會吃 unused 拒鎖，故 cfg 閘。
+#[cfg(target_os = "macos")]
+use bw_keys::KeyStore;
 use bw_proto::{
     AccountInfo, AdminCall, AgentCall, AuditChainInfo, AuthCall, Call, FillCall, ItemId, ItemView,
     OutboxCounts, PROTO_VERSION, PasskeyCall, PushCall, Response, StatusInfo, SyncCall,
@@ -134,12 +138,23 @@ impl Hub {
         // 硬體可用才接替 FileKeyStore，否則（含非 macOS）維持檔案路徑。
         // 遷移：選中 keychain 時清掉舊封存檔——首波解鎖走主密碼，
         // finish_unlock 自動 re-seal 進 keychain（machine.enrollment 既有路徑）。
-        let keychain = bw_keys::KeychainKeystore::from_env();
-        let use_keychain = keychain.biometric_available();
-        let keystore: std::sync::Arc<dyn bw_keys::KeyStore> = if use_keychain {
-            let _ = std::fs::remove_dir_all(data_dir.join("keys"));
-            std::sync::Arc::new(keychain)
-        } else {
+        let keystore: std::sync::Arc<dyn bw_keys::KeyStore> = {
+            #[cfg(target_os = "macos")]
+            {
+                let keychain = bw_keys::KeychainKeystore::from_env();
+                if keychain.biometric_available() {
+                    let _ = std::fs::remove_dir_all(data_dir.join("keys"));
+                    std::sync::Arc::new(keychain)
+                } else {
+                    std::sync::Arc::new(
+                        FileKeyStore::new(data_dir.join("keys")).map_err(|e| e.to_string())?,
+                    )
+                }
+            }
+            // PR6-E1：KeychainKeystore 型別只在 macOS 編譯；非 macOS（Linux 正式
+            // 支援）恒 FileKeyStore——註解既有承諾的代碼化（trunk 在 ubuntu 自 14b
+            // 起編不過，本 job 的 linux-check CI 根治）。
+            #[cfg(not(target_os = "macos"))]
             std::sync::Arc::new(FileKeyStore::new(data_dir.join("keys")).map_err(|e| e.to_string())?)
         };
         // 固定 label：首次登入時 account.json 還不存在，若用 email 作 label
