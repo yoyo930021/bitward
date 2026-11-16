@@ -185,6 +185,21 @@ impl Hub {
                     }
                 }
                 FieldEdit::Set { path, value } => {
+                    // 型別節路徑（PR1 子批 c）：card.<f>／identity.<f> 欄名白名單，
+                    // 未知鍵擋在入列前（不讓靜默蒸發）。
+                    if path.starts_with("card.") || path.starts_with("identity.") {
+                        let (section, field) = path.split_once('.').unwrap();
+                        let known = if section == "card" {
+                            bw_proto::CARD_FIELDS.contains(&field)
+                        } else {
+                            bw_proto::IDENTITY_FIELDS.contains(&field)
+                        };
+                        if !known {
+                            return Err(denied(format!(
+                                "未知 {section} 欄名 {field:?}，got {path:?}"
+                            )));
+                        }
+                    }
                     if let Some(rest) = path.strip_prefix("field.") {
                         let (id_s, leaf) = rest.rsplit_once('.').unwrap_or((rest, ""));
                         if !matches!(leaf, "name" | "value" | "type") {
@@ -495,11 +510,53 @@ impl Hub {
                 // SecureNote（type 2）官方線格式不帶 login 物件：整塊跳過，
                 // 改掛 secureNote 子物件（jslib 同形；VW 缺它回 400 "Data missing"，
                 // 2026-11-08 實錄：curl POST /api/ciphers 三態 probe）。
+                // 型別節（PR1）：Card（type 3）掛 card 六欄、Identity（type 4）掛
+                // identity 十八欄，全欄以 item key 加密（官方 conditionalEncString
+                // 寫側一律出信封）；login 缺席＝官方同形。
                 if draft.kind == bw_proto::ItemKind::SecureNote {
                     c["secureNote"] = json!({"type": 0});
                 }
+                if let Some(card) = &draft.card
+                    && draft.kind == bw_proto::ItemKind::Card
+                {
+                    c["card"] = json!({
+                        "cardholderName": card.cardholder_name.as_deref().filter(|s| !s.is_empty()).map(&enc),
+                        "brand": card.brand.as_deref().filter(|s| !s.is_empty()).map(&enc),
+                        "number": card.number.as_deref().filter(|s| !s.is_empty()).map(&enc),
+                        "expMonth": card.exp_month.as_deref().filter(|s| !s.is_empty()).map(&enc),
+                        "expYear": card.exp_year.as_deref().filter(|s| !s.is_empty()).map(&enc),
+                        "code": card.code.as_deref().filter(|s| !s.is_empty()).map(&enc),
+                    });
+                }
+                if let Some(idn) = &draft.identity
+                    && draft.kind == bw_proto::ItemKind::Identity
+                {
+                    let f = |v: &Option<String>| {
+                        v.as_deref().filter(|s| !s.is_empty()).map(&enc)
+                    };
+                    c["identity"] = json!({
+                        "title": f(&idn.title),
+                        "firstName": f(&idn.first_name),
+                        "middleName": f(&idn.middle_name),
+                        "lastName": f(&idn.last_name),
+                        "address1": f(&idn.address1),
+                        "address2": f(&idn.address2),
+                        "address3": f(&idn.address3),
+                        "city": f(&idn.city),
+                        "state": f(&idn.state),
+                        "postalCode": f(&idn.postal_code),
+                        "country": f(&idn.country),
+                        "company": f(&idn.company),
+                        "email": f(&idn.email),
+                        "phone": f(&idn.phone),
+                        "ssn": f(&idn.ssn),
+                        "username": f(&idn.username),
+                        "passportNumber": f(&idn.passport_number),
+                        "licenseNumber": f(&idn.license_number),
+                    });
+                }
                 let mut login = serde_json::Map::new();
-                if draft.kind != bw_proto::ItemKind::SecureNote {
+                if draft.kind == bw_proto::ItemKind::Login {
                     if let Some(u) = &draft.username {
                         login.insert("username".into(), json!(enc(u)));
                     }
@@ -521,10 +578,10 @@ impl Hub {
                         login.insert("uris".into(), json!(uris));
                     }
                 }
-                if !login.is_empty() || draft.kind != bw_proto::ItemKind::SecureNote {
+                if !login.is_empty() || draft.kind == bw_proto::ItemKind::Login {
                     // 純名稱 Login 也恆帶 "login":{}——VW 對 type 1 缺 login 物件回
                     // 400 "Data missing"（2026-11-09 實錄：drain 建無密碼項目 dead；
-                    // jslib create 同形）。
+                    // jslib create 同形）。Card/Identity 不帶 login（官方形）。
                     c["login"] = Value::Object(login);
                 }
                 c
@@ -1721,17 +1778,174 @@ mod tests {
         assert!(cipher2.get("key").is_some(), "新建恆自帶 item key 欄");
     }
 
+    /// 型別節 draft→body 線格式金標（PR1 子批 b）：kind Card/Identity 落
+    /// type 3/4、card 六欄／identity 十八欄以 item key 信封入節、login 缺席
+    /// （官方 jslib 同形）；空欄＝null 不落信封。
+    #[tokio::test]
+    async fn encrypt_draft_card_identity_wire_shape() {
+        let (hub, _d) = unlocked_hub("wire34").await;
+        let user = hub
+            .machine
+            .with_keys(|kb| kb.user_key().as_bytes().to_vec())
+            .unwrap();
+        let card = CipherDraft {
+            kind: bw_proto::ItemKind::Card,
+            name: "我的卡".into(),
+            card: Some(bw_proto::CardDraft {
+                cardholder_name: Some("Yoyo Lin".into()),
+                brand: Some("Visa".into()),
+                number: Some("4242424242424242".into()),
+                exp_month: Some("3".into()),
+                exp_year: Some("2032".into()),
+                code: Some("987".into()),
+            }),
+            ..Default::default()
+        };
+        let cipher = hub.encrypt_draft(&card, None).unwrap();
+        assert_eq!(cipher["type"], json!(3));
+        assert!(cipher.get("login").is_none(), "type 3 不帶 login（官方形）");
+        let item = dec_bytes(&user, cipher["key"].as_str().unwrap()).expect("key 欄可解");
+        for k in bw_proto::CARD_FIELDS {
+            let v = cipher["card"][k].as_str().unwrap_or_default();
+            assert!(v.starts_with("2."), "card.{k} 必須信封化，got {v:?}");
+        }
+        assert_eq!(
+            dec(&item, cipher["card"]["number"].as_str().unwrap()).as_deref(),
+            Some("4242424242424242")
+        );
+        // 空欄＝null（不憑空造信封）
+        let sparse = CipherDraft {
+            kind: bw_proto::ItemKind::Card,
+            name: "空卡".into(),
+            card: Some(bw_proto::CardDraft {
+                brand: Some("Visa".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let c2 = hub.encrypt_draft(&sparse, None).unwrap();
+        assert!(c2["card"]["number"].is_null());
+        assert!(c2["card"]["brand"].as_str().unwrap().starts_with("2."));
+
+        let idn = CipherDraft {
+            kind: bw_proto::ItemKind::Identity,
+            name: "身分證".into(),
+            identity: Some(bw_proto::IdentityDraft {
+                last_name: Some("Chen".into()),
+                email: Some("a@b.test".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let c3 = hub.encrypt_draft(&idn, None).unwrap();
+        assert_eq!(c3["type"], json!(4));
+        assert!(c3.get("login").is_none());
+        let item3 = dec_bytes(&user, c3["key"].as_str().unwrap()).expect("key 欄可解");
+        assert_eq!(
+            dec(&item3, c3["identity"]["lastName"].as_str().unwrap()).as_deref(),
+            Some("Chen")
+        );
+        assert!(c3["identity"]["city"].is_null(), "未填欄＝null");
+    }
+
     /// 非 UUID 的 folder_id 在入列前擋下（鏡像 folderId 只收合法 UUID 字串）。
     #[tokio::test]
     async fn create_rejects_non_uuid_folder() {
         let (hub, _d) = unlocked_hub("badfolder").await;
         let draft = CipherDraft {
             name: "x".into(),
-            folder_id: Some("not-a-uuid".into()),
+            folder_id: Some("nope".into()),
             ..Default::default()
         };
         let err = hub.write_create("s", &draft).await.unwrap_err();
         assert!(matches!(err, WtpError::Denied { .. }), "{err:?}");
+    }
+
+    /// 欄位級合併（PR1 子批 c）：A 改 card.number、B 改 card.expMonth 同存 →
+    /// 兩欄各自收斂、無整筆互贏（three_way 在 card.<f> 座標系不相交自動合併）。
+    #[tokio::test]
+    async fn patch_card_field_merges_disjoint() {
+        let (hub, _d) = unlocked_hub("cardmerge").await;
+        let user = hub
+            .machine
+            .with_keys(|kb| kb.user_key().as_bytes().to_vec())
+            .unwrap();
+        let id = Uuid::new_v4();
+        hub.store
+            .put_mirror(
+                id,
+                &json!({
+                    "id": id.to_string(), "type": 3, "name": enc(&user, "卡"),
+                    "card": {"number": enc(&user, "4111"), "expMonth": enc(&user, "1"),
+                             "brand": enc(&user, "Visa"), "code": enc(&user, "111")},
+                }),
+            )
+            .unwrap();
+        // A 改卡號
+        hub.write_patch(
+            "s",
+            id,
+            &[FieldEdit::Set {
+                path: "card.number".into(),
+                value: Some("4242424242424242".into()),
+            }],
+        )
+        .await
+        .unwrap();
+        let m = hub.store.item(id).unwrap().unwrap().enc_cipher;
+        assert_eq!(
+            dec(&user, m["card"]["number"].as_str().unwrap()).as_deref(),
+            Some("4242424242424242")
+        );
+        assert_eq!(
+            dec(&user, m["card"]["expMonth"].as_str().unwrap()).as_deref(),
+            Some("1"),
+            "未觸及欄存活"
+        );
+        assert_eq!(
+            dec(&user, m["card"]["brand"].as_str().unwrap()).as_deref(),
+            Some("Visa"),
+            "未觸及欄存活（brand）"
+        );
+        // touched 詞彙帶 card.number 路徑
+        let due = hub.store.take_due(16).unwrap();
+        assert!(
+            due.iter().any(|d| d.payload["touched"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t == "card.number")),
+            "touched 應含 card.number"
+        );
+        for d in &due {
+            hub.store.settle(d.id, bw_store::MutState::Applied).unwrap();
+        }
+        // 未知欄名擋在入列前
+        assert!(
+            hub.write_patch(
+                "s",
+                id,
+                &[FieldEdit::Set {
+                    path: "card.bogus".into(),
+                    value: Some("x".into()),
+                }]
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            hub.write_patch(
+                "s",
+                id,
+                &[FieldEdit::Set {
+                    path: "identity.lastName".into(),
+                    value: Some("Chen".into()),
+                }]
+            )
+            .await
+            .is_ok(),
+            "identity 節缺席時材料化寫入"
+        );
     }
 
     /// 批次 3 的陣列/型別操作：SetType 原位改 type 整數（不碰值信封）、
