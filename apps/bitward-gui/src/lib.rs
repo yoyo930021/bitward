@@ -210,6 +210,8 @@ pub fn App() -> impl IntoElement {
             shots::script_login(dir, core.clone());
         } else if std::env::var_os("NSH_GUI_SHOTS_LOGIN2FA").is_some() {
             shots::script_login2fa(dir, core.clone());
+        } else if std::env::var_os("NSH_GUI_SHOTS_2FA_DUO").is_some() {
+            shots::script_duo(dir, core.clone());
         } else if std::env::var_os("NSH_GUI_SHOTS_CANDID").is_some() {
             shots::script_cand(dir, core.clone());
         } else {

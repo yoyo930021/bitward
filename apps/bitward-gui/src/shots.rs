@@ -387,7 +387,99 @@ fn poll_2fa_unlocked(dir: PathBuf, core: AppCore, ms: u64) {
             "2FA 登入後錯誤列應清空，實際：{err_open:?}"
         );
         capture(&d, "shot-49-vault-after-2fa.png");
+        // PR3：解鎖成功後進設定頁驗「雙重驗證」管理分節實跑（真 VW 清單）。
+        let sc = core.clone();
+        at(ms + 400, move || sc.send(Cmd::OpenSettings));
+        poll_2fa_admin(dir, core, ms + 2600);
+    });
+}
+
+/// 管理面收尾拍：等 `TwoFactor:List` 回包（真 VW 上該帳號已開 Authenticator），
+/// 斷言清單在场＋渲染證據 shot-52，然後收工。
+fn poll_2fa_admin(dir: PathBuf, core: AppCore, ms: u64) {
+    let d = dir.clone();
+    let c = core.clone();
+    at(ms, move || {
+        let Some(states) = c.tf_states.get() else {
+            if ms < 70000 {
+                poll_2fa_admin(dir, core, ms + 1000);
+            } else {
+                eprintln!("2FA admin 分節 70 秒沒等到清單回包");
+                std::process::exit(1);
+            }
+            return;
+        };
+        assert!(
+            crate::twofa::enabled_of(&states, 0),
+            "VW 帳號應有已啟用 Authenticator，實際：{states:?}"
+        );
+        capture(&d, "shot-52-2fa-admin.png");
         at(ms + 600, quit);
+    });
+}
+
+/// Duo 島驗收流（`NSH_GUI_SHOTS_2FA_DUO`）：純 GUI 面定態測——合成挑戰
+/// （不碰真 Duo 雲）注入第二步 → 開模態 → 截圖 → 模擬回捕 token →
+/// 斷言碼欄成型且過 bw-proto 同源閘。`BW_TEST_DUO_REDIRECT=1` 走 redirect
+/// 態（auth_url 直載＋`code|state` 回捕）。
+pub fn script_duo(dir: PathBuf, core: AppCore) {
+    let redirect = std::env::var_os("BW_TEST_DUO_REDIRECT").is_some();
+    let c = core.clone();
+    at(3000, move || {
+        // 登入卡強制可見（本流不依賴 daemon 帳密態；挑戰列表是直接注入的）。
+        c.show_login.set(true);
+        let details = if redirect {
+            bw_proto::TwoFactorDetails::DuoRedirect {
+                auth_url: "https://duo.example.com/oauth/auth?tx=FIXTX".to_owned(),
+            }
+        } else {
+            bw_proto::TwoFactorDetails::DuoIframe {
+                host: "api-eval0.duosecurity.com".to_owned(),
+                signature: "FIXSIG".to_owned(),
+            }
+        };
+        c.send(Cmd::Login2faRequested(vec![bw_proto::TwoFactorProviderInfo {
+            provider: 2,
+            hint: None,
+            details: Some(details),
+        }]));
+    });
+    let c = core.clone();
+    at(3600, move || {
+        assert_eq!(c.login.provider.get(), 2, "Duo 是挑戰清單唯一因子,應被預選");
+        c.send(Cmd::OpenDuo);
+    });
+    let d = dir.clone();
+    let c = core.clone();
+    at(6200, move || {
+        assert!(c.login.duo_open.get(), "Duo 模態應已開啟");
+        capture(&d, if redirect { "shot-51-duo-redirect.png" } else { "shot-50-duo-iframe.png" });
+    });
+    let c = core.clone();
+    at(6800, move || {
+        c.send(Cmd::DuoCaptured(if redirect {
+            "CODE9x|STATE7y".to_owned()
+        } else {
+            "AUTH|aa.bb:APP|cc.dd".to_owned()
+        }));
+    });
+    let d = dir.clone();
+    let c = core.clone();
+    at(7400, move || {
+        assert!(!c.login.duo_open.get(), "回捕後模態必須關閉");
+        let code = c.login.code.get();
+        let want = if redirect { "CODE9x|STATE7y" } else { "AUTH|aa.bb:APP|cc.dd" };
+        assert_eq!(code, want, "回捕 token 必原樣入碼欄");
+        assert!(
+            bw_proto::TwoFactorProviderInfo::validate_token(2, &code).is_ok(),
+            "碼欄形態必須過 bw-proto Duo 閘：{code}"
+        );
+        let _ = d;
+        at(7900, quit);
+    });
+    at(90000, || {
+        eprintln!("duo island e2e 90 秒未完成（掛在哪一拍？）");
+        std::process::exit(1);
     });
 }
 

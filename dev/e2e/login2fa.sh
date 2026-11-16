@@ -130,7 +130,7 @@ pass "錯碼被拒且錯誤可懂"
 
 # ── GUI 兩步登入（NSH_GUI_SHOTS_LOGIN2FA）─────────────────────
 start_daemon "$DAG"
-rm -f "$OUT"/shot-4[89]-*2fa*.png
+rm -f "$OUT"/shot-4[89]-*2fa*.png "$OUT"/shot-5[012]-*2fa*.png "$OUT"/shot-5[01]-duo-*.png
 sleep $(( 31 - $(date +%s) % 30 ))
 set +e
 (cd apps/bitward-gui && NSH_GUI_SHOTS="$OUT" NSH_GUI_SHOTS_LOGIN2FA=1 \
@@ -139,7 +139,7 @@ BW_TEST_TOTP_SECRET="$SECRET" \
 BITWARD_GUI_SOCK="$DAG/s" nsh run --target macos)
 RC=$?
 set -e
-for n in 48-login-2fa-step 49-vault-after-2fa; do
+for n in 48-login-2fa-step 49-vault-after-2fa 52-2fa-admin; do
   [[ -f "$OUT/shot-$n.png" ]] || fail "缺 shot-$n.png（nsh exit $RC）"
 done
 [[ "$RC" == "0" ]] || fail "nsh exit $RC"
@@ -147,6 +147,68 @@ BITWARD_DATA_DIR="$DAG" ./target/debug/bitward --sock "$DAG/s" --json status \
   | jq -e '.state.Unlocked' >/dev/null || fail "GUI 2FA 登入後 daemon 非 Unlocked"
 G_ITEMS=$(BITWARD_DATA_DIR="$DAG" ./target/debug/bitward --sock "$DAG/s" --json status | jq '.items')
 [[ "$G_ITEMS" -ge 1 ]] || fail "GUI 2FA 登入後 items<1"
-pass "GUI 兩步登入入庫（shot-48/49、Unlocked、items=$G_ITEMS）"
+pass "GUI 兩步登入入庫＋管理分節實跑（shot-48/49/52、Unlocked、items=$G_ITEMS）"
+
+# ── PR3：管理面開停閉環（真 VW、CLI `bitward 2fa`）────────────────
+totp_of() { # $1=base32 secret → 當前 6 位碼
+  python3 -c "
+import base64,hmac,hashlib,struct,time
+key=base64.b32decode('$1'+'='*(-len('$1')%8))
+c=int(time.time()//30)
+h=hmac.new(key,struct.pack('>Q',c),hashlib.sha1).digest()
+o=h[-1]&0x0F
+print('%06d'%(((h[o]&0x7F)<<24|h[o+1]<<16|h[o+2]<<8|h[o+3])%10**6))"
+}
+LS() { B 2fa ls | jq -c '[.[] | select(.enabled) | .provider]'; }
+EN=$(LS); [[ "$EN" == "[0]" ]] || fail "管理面前提：ls 應 [0]，實際 $EN"
+echo "$WP" | B 2fa disable 0 >/dev/null || fail "停用 TOTP 失敗"
+EN=$(LS); [[ "$EN" == "[]" ]] || fail "停用後應空，實際 $EN"
+pass "管理面停用閉環（[0]→[]）"
+KEY=$(echo "$WP" | B 2fa totp-key | grep -oE '"secret"[: ]*"[A-Z2-7]{16,}"' | sed -E 's/.*"([A-Z2-7]+)"/\1/')
+[[ -n "$KEY" ]] || fail "totp-key 輸出取不到 secret"
+sleep $(( 31 - $(date +%s) % 30 ))
+printf '%s\n%s\n' "$WP" "$(totp_of "$KEY")" | B 2fa totp-enable "$KEY" >/dev/null \
+  || fail "重啟 TOTP 失敗"
+EN=$(LS); [[ "$EN" == "[0]" ]] || fail "啟用後應 [0]，實際 $EN"
+pass "管理面啟用閉環（[]→[0]，TOTP 全回環）"
+
+# 救援碼：get-recover 当场生成（VW 語意），斷言形態；不消耗（用了全清 2FA）。
+RC=$(echo "$WP" | B 2fa recovery | grep -oE '[A-Za-z0-9-]{24,44}' | head -1)
+[[ -n "$RC" ]] || fail "取不到救援碼形態"
+pass "救援碼已取得（${RC:0:4}…；消耗流留人工）"
+
+# YubiKey：CI 無真鑰＋VW 未配 Yubico 憑證→可懂錯誤即合格（記錄態）。
+if printf '%s\n%s\n' "$WP" "00000000000000000000000000000000000000000000" \
+     | B 2fa yubikey-add >/tmp/bitward-2fa-yk.out 2>&1; then
+  echo "note: YubiKey 登記竟成功（server 配了 Yubico 憑證）"
+else
+  grep -qiE 'yubikey|OTP|credential|502|invalid|驗證' /tmp/bitward-2fa-yk.out \
+    || fail "YubiKey 錯誤不可懂：$(cat /tmp/bitward-2fa-yk.out)"
+  echo "ok: YubiKey 無真鑰回可懂錯誤（記錄態；全閉環需人手觸碰）"
+fi
+
+# ── PR3：Duo 島（合成挑戰；iframe 全綠、redirect 記錄）────────────
+for mode in iframe redirect; do
+  set +e
+  if [[ "$mode" == "redirect" ]]; then
+    (cd apps/bitward-gui && NSH_GUI_SHOTS="$OUT" NSH_GUI_SHOTS_2FA_DUO=1 \
+     BW_TEST_DUO_REDIRECT=1 BITWARD_GUI_SOCK="$DAG/s" nsh run --target macos) \
+      >/tmp/bitward-2fa-duo-$mode.log 2>&1
+  else
+    (cd apps/bitward-gui && NSH_GUI_SHOTS="$OUT" NSH_GUI_SHOTS_2FA_DUO=1 \
+     BITWARD_GUI_SOCK="$DAG/s" nsh run --target macos) \
+      >/tmp/bitward-2fa-duo-$mode.log 2>&1
+  fi
+  RC=$?
+  set -e
+  if [[ "$mode" == "redirect" ]]; then shot=shot-51-duo-redirect.png; else shot=shot-50-duo-iframe.png; fi
+  [[ -f "$OUT/$shot" ]] || fail "Duo $mode 態缺 $shot（nsh exit $RC，log：$(tail -2 /tmp/bitward-2fa-duo-$mode.log)）"
+  [[ "$RC" == "0" ]] || fail "Duo $mode 態 nsh exit $RC"
+  if [[ "$mode" == "iframe" ]]; then
+    pass "Duo iframe 態全綠（模態渲染→回捕 AUTH…:APP…→碼欄過 bw-proto 閘）"
+  else
+    echo "ok: Duo redirect 態渲染＋code|state 回捕閉環（真實 Duo 雲往復需正式憑證，記錄）"
+  fi
+done
 
 echo "LOGIN2FA: ALL PASS（帳號 $EMAIL）"
