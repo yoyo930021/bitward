@@ -31,9 +31,32 @@ use nsh_platform_macos::objc2_foundation::{
 };
 
 unsafe extern "C" {
-    /// `ASAuthorizationAllSupportedPublicKeyCredentialDescriptorTransports()`
-    /// ＝標頭提供的 transports 全集合（usb/nfc/ble,免逐字串宣告）。
-    fn ASAuthorizationAllSupportedPublicKeyCredentialDescriptorTransports() -> *mut AnyObject;
+    /// 本 app 未連結 AuthenticationServices（框架走 NSBundle 動態載入）,
+    /// 符號改向全程序要：`dlsym(RTLD_DEFAULT, …)`（libSystem 恆有 dlsym,
+    /// TwoFA 紀律「libc 未再匯出 dlopen」的替代路）。
+    fn dlsym(handle: *mut std::ffi::c_void, symbol: *const std::ffi::c_char)
+    -> *mut std::ffi::c_void;
+}
+
+/// macOS `RTLD_DEFAULT`＝((void*)-2)。
+const RTLD_DEFAULT: *mut std::ffi::c_void = -2isize as *mut std::ffi::c_void;
+
+/// 取 `ASAuthorizationAllSupportedPublicKeyCredentialDescriptorTransports()`
+/// （標頭提供的 transports 全集合,usb/nfc/ble）；取不到＝回 None 由呼叫端
+/// 跳過 allowedCredentials 收窄（寧寬勿拒,伺服器仍會拒絕非清單鑰）。
+fn all_supported_transports() -> Option<Retained<NSArray<AnyObject>>> {
+    let name = std::ffi::CString::new(
+        "ASAuthorizationAllSupportedPublicKeyCredentialDescriptorTransports",
+    )
+    .ok()?;
+    unsafe {
+        let sym = dlsym(RTLD_DEFAULT, name.as_ptr());
+        if sym.is_null() {
+            return None;
+        }
+        let f: unsafe extern "C" fn() -> *mut NSArray<AnyObject> = std::mem::transmute(sym);
+        Retained::from_raw(f())
+    }
 }
 
 /// b64url（WebAuthn 水漬編碼,無填充）。
@@ -293,11 +316,7 @@ pub fn request_assertion(
             return;
         };
         // allowedCredentials：有清單才收窄（id 解碼失敗的跳過,寧寬勿拒）。
-        if !credential_ids.is_empty() {
-            let transports: Retained<NSArray<AnyObject>> = {
-                let p = ASAuthorizationAllSupportedPublicKeyCredentialDescriptorTransports();
-                Retained::from_raw(p as *mut NSArray<AnyObject>).expect("transports 全集合必在框架內")
-            };
+        if let Some(transports) = all_supported_transports().filter(|_| !credential_ids.is_empty()) {
             let mut objs: Vec<Retained<AnyObject>> = Vec::new();
             for id in &credential_ids {
                 let Some(bytes) = b64url_decode(id) else {

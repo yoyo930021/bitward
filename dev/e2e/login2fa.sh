@@ -130,7 +130,7 @@ pass "錯碼被拒且錯誤可懂"
 
 # ── GUI 兩步登入（NSH_GUI_SHOTS_LOGIN2FA）─────────────────────
 start_daemon "$DAG"
-rm -f "$OUT"/shot-4[89]-*2fa*.png "$OUT"/shot-5[012]-*2fa*.png "$OUT"/shot-5[01]-duo-*.png
+rm -f "$OUT"/shot-4[89]-*2fa*.png "$OUT"/shot-6[234]-*.png
 sleep $(( 31 - $(date +%s) % 30 ))
 set +e
 (cd apps/bitward-gui && NSH_GUI_SHOTS="$OUT" NSH_GUI_SHOTS_LOGIN2FA=1 \
@@ -139,7 +139,7 @@ BW_TEST_TOTP_SECRET="$SECRET" \
 BITWARD_GUI_SOCK="$DAG/s" nsh run --target macos)
 RC=$?
 set -e
-for n in 48-login-2fa-step 49-vault-after-2fa 52-2fa-admin; do
+for n in 48-login-2fa-step 49-vault-after-2fa 64-2fa-admin; do
   [[ -f "$OUT/shot-$n.png" ]] || fail "缺 shot-$n.png（nsh exit $RC）"
 done
 [[ "$RC" == "0" ]] || fail "nsh exit $RC"
@@ -201,7 +201,7 @@ for mode in iframe redirect; do
   fi
   RC=$?
   set -e
-  if [[ "$mode" == "redirect" ]]; then shot=shot-51-duo-redirect.png; else shot=shot-50-duo-iframe.png; fi
+  if [[ "$mode" == "redirect" ]]; then shot=shot-63-duo-redirect.png; else shot=shot-62-duo-iframe.png; fi
   [[ -f "$OUT/$shot" ]] || fail "Duo $mode 態缺 $shot（nsh exit $RC，log：$(tail -2 /tmp/bitward-2fa-duo-$mode.log)）"
   [[ "$RC" == "0" ]] || fail "Duo $mode 態 nsh exit $RC"
   if [[ "$mode" == "iframe" ]]; then

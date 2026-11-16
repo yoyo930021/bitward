@@ -204,6 +204,32 @@ dev/e2e/gui-login.sh   # 產 apps/bitward-gui/shot-44..47-*.png，全綠印 GUI-
 dev/e2e/login2fa.sh    # 產 shot-48/49，全綠印 LOGIN2FA: ALL PASS（需 docker＋python3＋jq）
 ```
 
+### 雙重驗證管理面與 Duo／安全金鑰島（PR3 下半场）
+
+設定頁新增「雙重驗證」分節（`twofa.rs`）：主密碼欄（只在送作瞬間經本機線，
+進鎖態即清；空欄本地先擋＝CLI stdin 同語意）＋已啟用清單（`TwoFactor:List`）
+＋四條流：**TOTP**（get-authenticator→otpauth URI 本機顯示可複製→驗證器現碼
+→啟用）、**Email** 兩步（send-email→信中碼→PUT email）、**YubiKey**（貼
+44 字 OTP→登記）、**救援碼**（get-recover 取回可複製；用後 2FA 全清警告），
+每因子可一鈕停用。Duo／WebAuthn 的**開停**屬各自雲端帳務與 attestation，
+分節標明「開停用 web vault；本客戶端支援登入時完成」。
+
+登入第二步（`lib.rs`＋`state.rs`）按 `FactorMode` 切換控件：驗證碼欄佔位
+現算；`DuoHandoff`→「開啟 Duo 驗證頁」模態——iframe 態本機殼頁嵌
+`https://{host}/frame/web/v1/auth?parent=..&tx={Signature}` 並經 nsh
+postMessage 橋收 `AUTH|…:APP|…`，redirect 態 `web_view(auth_url)` 直載、
+導航捕 `code|state`；`WebauthnAssertion`→「使用安全金鑰」起原生島
+（`webauthn.rs`：ASAuthorizationController＋SecurityKey provider，raw
+msg_send 逐條對 macOS 27.2 SDK 標頭，產物過 `validate_token(7)` 同源閘）。
+CLI 報「需在 GUI 完成」的因子（`usable_on` 無島面），在 GUI 一律可選可完成。
+
+e2e 延伸（同 `login2fa.sh`）：管理面 CLI 閉環（[0]→停用→[]→重啟→[0]）、
+救援碼形態、YubiKey 無真鑰記錄態、Duo 島合成挑戰——iframe 態全綠
+（`shot-62-duo-iframe.png`＋回捕入欄過閘）、redirect 態渲染記錄
+（`shot-63-duo-redirect.png`，真實 Duo 雲往復需正式憑證）、管理分節真 VW
+清單證據（`shot-64-2fa-admin.png`）。安全金鑰島需人手觸鑰，驗收走真機：
+插鑰→按「使用安全金鑰」→系統彈 Touch ID/PIN 面板→簽章自動入欄。
+
 注意：垃圾桶與資料夾需要 daemon 支援 `Query.deleted`／`Query.folder` 三態與
 `ListFolders`／`Vault:Restore`／`Vault:Purge`（主線三件套已落地）；批次 2c 的
 編輯欄位增刪改型與原子匯入需要 `FieldEdit::SetType/AppendField/RemoveField`

@@ -395,7 +395,7 @@ fn poll_2fa_unlocked(dir: PathBuf, core: AppCore, ms: u64) {
 }
 
 /// 管理面收尾拍：等 `TwoFactor:List` 回包（真 VW 上該帳號已開 Authenticator），
-/// 斷言清單在场＋渲染證據 shot-52，然後收工。
+/// 斷言清單在场＋渲染證據 shot-64，然後收工。
 fn poll_2fa_admin(dir: PathBuf, core: AppCore, ms: u64) {
     let d = dir.clone();
     let c = core.clone();
@@ -413,7 +413,7 @@ fn poll_2fa_admin(dir: PathBuf, core: AppCore, ms: u64) {
             crate::twofa::enabled_of(&states, 0),
             "VW 帳號應有已啟用 Authenticator，實際：{states:?}"
         );
-        capture(&d, "shot-52-2fa-admin.png");
+        capture(&d, "shot-64-2fa-admin.png");
         at(ms + 600, quit);
     });
 }
@@ -453,7 +453,7 @@ pub fn script_duo(dir: PathBuf, core: AppCore) {
     let c = core.clone();
     at(6200, move || {
         assert!(c.login.duo_open.get(), "Duo 模態應已開啟");
-        capture(&d, if redirect { "shot-51-duo-redirect.png" } else { "shot-50-duo-iframe.png" });
+        capture(&d, if redirect { "shot-63-duo-redirect.png" } else { "shot-62-duo-iframe.png" });
     });
     let c = core.clone();
     at(6800, move || {
