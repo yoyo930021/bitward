@@ -988,6 +988,226 @@ pub struct CipherDraft {
     /// 官方線格式 `login.uris[].match` 明文整數（見 `FieldEdit::SetUriMatch`）。
     #[serde(default)]
     pub uri_matches: Vec<Option<u8>>,
+    /// 卡片節明文草稿（type 3；僅 kind==Card 時有效）。欄名見 [`CARD_FIELDS`]，
+    /// 加密發生在 daemon `with_keys` 閉包（同 password 紀律，A11 不落 argv 預設）。
+    #[serde(default)]
+    pub card: Option<CardDraft>,
+    /// 身分節明文草稿（type 4；僅 kind==Identity 時有效）。欄名見 [`IDENTITY_FIELDS`]。
+    #[serde(default)]
+    pub identity: Option<IdentityDraft>,
+}
+
+/// 卡片節明文草稿（官方 `card` 六欄；None/空字串＝該欄不寫）。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CardDraft {
+    #[serde(default)]
+    pub cardholder_name: Option<String>,
+    #[serde(default)]
+    pub brand: Option<String>,
+    #[serde(default)]
+    pub number: Option<String>,
+    #[serde(default)]
+    pub exp_month: Option<String>,
+    #[serde(default)]
+    pub exp_year: Option<String>,
+    #[serde(default)]
+    pub code: Option<String>,
+}
+
+/// 身分節明文草稿（官方 `identity` 十八欄；None/空字串＝該欄不寫）。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityDraft {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub first_name: Option<String>,
+    #[serde(default)]
+    pub middle_name: Option<String>,
+    #[serde(default)]
+    pub last_name: Option<String>,
+    #[serde(default)]
+    pub address1: Option<String>,
+    #[serde(default)]
+    pub address2: Option<String>,
+    #[serde(default)]
+    pub address3: Option<String>,
+    #[serde(default)]
+    pub city: Option<String>,
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub postal_code: Option<String>,
+    #[serde(default)]
+    pub country: Option<String>,
+    #[serde(default)]
+    pub company: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub phone: Option<String>,
+    #[serde(default)]
+    pub ssn: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub passport_number: Option<String>,
+    #[serde(default)]
+    pub license_number: Option<String>,
+}
+
+impl CardDraft {
+    /// 線鍵名 → 欄位槽（CLI/GUI `k=v` 輸入端白名單；未知鍵回 None）。
+    #[must_use]
+    pub fn slot_mut(&mut self, key: &str) -> Option<&mut Option<String>> {
+        Some(match key {
+            "cardholderName" => &mut self.cardholder_name,
+            "brand" => &mut self.brand,
+            "number" => &mut self.number,
+            "expMonth" => &mut self.exp_month,
+            "expYear" => &mut self.exp_year,
+            "code" => &mut self.code,
+            _ => return None,
+        })
+    }
+}
+
+impl IdentityDraft {
+    /// 線鍵名 → 欄位槽（白名單同 [`CardDraft::slot_mut`]）。
+    #[must_use]
+    pub fn slot_mut(&mut self, key: &str) -> Option<&mut Option<String>> {
+        Some(match key {
+            "title" => &mut self.title,
+            "firstName" => &mut self.first_name,
+            "middleName" => &mut self.middle_name,
+            "lastName" => &mut self.last_name,
+            "address1" => &mut self.address1,
+            "address2" => &mut self.address2,
+            "address3" => &mut self.address3,
+            "city" => &mut self.city,
+            "state" => &mut self.state,
+            "postalCode" => &mut self.postal_code,
+            "country" => &mut self.country,
+            "company" => &mut self.company,
+            "email" => &mut self.email,
+            "phone" => &mut self.phone,
+            "ssn" => &mut self.ssn,
+            "username" => &mut self.username,
+            "passportNumber" => &mut self.passport_number,
+            "licenseNumber" => &mut self.license_number,
+            _ => return None,
+        })
+    }
+}
+
+/// 官方未加密匯出（`bw export --format json`）的 `card` 節 → 明文草稿。
+/// 空字串／null 欄跳過；全空回 None（不憑空造節）。CLI 與 GUI 匯入器共用。
+#[must_use]
+pub fn card_draft_from_export(section: Option<&serde_json::Value>) -> Option<CardDraft> {
+    let obj = section?.as_object()?;
+    let mut d = CardDraft::default();
+    for key in CARD_FIELDS {
+        if let Some(v) = obj.get(key).and_then(serde_json::Value::as_str)
+            && !v.is_empty()
+            && let Some(slot) = d.slot_mut(key)
+        {
+            slot.replace(v.to_owned());
+        }
+    }
+    (d != CardDraft::default()).then_some(d)
+}
+
+/// 官方未加密匯出的 `identity` 節 → 明文草稿（語意同 [`card_draft_from_export`]）。
+#[must_use]
+pub fn identity_draft_from_export(section: Option<&serde_json::Value>) -> Option<IdentityDraft> {
+    let obj = section?.as_object()?;
+    let mut d = IdentityDraft::default();
+    for key in IDENTITY_FIELDS {
+        if let Some(v) = obj.get(key).and_then(serde_json::Value::as_str)
+            && !v.is_empty()
+            && let Some(slot) = d.slot_mut(key)
+        {
+            slot.replace(v.to_owned());
+        }
+    }
+    (d != IdentityDraft::default()).then_some(d)
+}
+
+/// 卡片節 → 匯出 JSON（官方鍵名、空欄 null；語意同 [`card_draft_to_export`]）。
+#[must_use]
+pub fn card_view_to_export(v: &CardView) -> serde_json::Value {
+    serde_json::json!({
+        "cardholderName": v.cardholder_name,
+        "brand": v.brand,
+        "number": v.number,
+        "expMonth": v.exp_month,
+        "expYear": v.exp_year,
+        "code": v.code,
+    })
+}
+
+/// 身分節 → 匯出 JSON（語意同 [`card_view_to_export`]）。
+#[must_use]
+pub fn identity_view_to_export(v: &IdentityView) -> serde_json::Value {
+    serde_json::json!({
+        "title": v.title,
+        "firstName": v.first_name,
+        "middleName": v.middle_name,
+        "lastName": v.last_name,
+        "address1": v.address1,
+        "address2": v.address2,
+        "address3": v.address3,
+        "city": v.city,
+        "state": v.state,
+        "postalCode": v.postal_code,
+        "country": v.country,
+        "company": v.company,
+        "email": v.email,
+        "phone": v.phone,
+        "ssn": v.ssn,
+        "username": v.username,
+        "passportNumber": v.passport_number,
+        "licenseNumber": v.license_number,
+    })
+}
+
+/// 草稿節 → 匯出 JSON 節（官方鍵名、空欄 null）；None 節＝鍵缺席。
+#[must_use]
+pub fn card_draft_to_export(d: &Option<CardDraft>) -> Option<serde_json::Value> {
+    let d = d.as_ref()?;
+    Some(serde_json::json!({
+        "cardholderName": d.cardholder_name,
+        "brand": d.brand,
+        "number": d.number,
+        "expMonth": d.exp_month,
+        "expYear": d.exp_year,
+        "code": d.code,
+    }))
+}
+
+/// 身分草稿節 → 匯出 JSON（語意同 [`card_draft_to_export`]）。
+#[must_use]
+pub fn identity_draft_to_export(d: &Option<IdentityDraft>) -> Option<serde_json::Value> {
+    let d = d.as_ref()?;
+    Some(serde_json::json!({
+        "title": d.title,
+        "firstName": d.first_name,
+        "middleName": d.middle_name,
+        "lastName": d.last_name,
+        "address1": d.address1,
+        "address2": d.address2,
+        "address3": d.address3,
+        "city": d.city,
+        "state": d.state,
+        "postalCode": d.postal_code,
+        "country": d.country,
+        "company": d.company,
+        "email": d.email,
+        "phone": d.phone,
+        "ssn": d.ssn,
+        "username": d.username,
+        "passportNumber": d.passport_number,
+        "licenseNumber": d.license_number,
+    }))
 }
 
 /// 批次匯入的一筆（`VaultCall::Import` 載體）。draft 是**明文欄位結構**：
@@ -1006,7 +1226,9 @@ pub struct ImportItem {
 /// `name`、`notes`、`username`、`password`、`totp`、`uri.<n>`、`favorite`、
 /// `folderId`（明文 UUID 字串；None＝移出資料夾）、
 /// `field.<n>.name`／`field.<n>.value`（`<n>` 為 0 起 `fields[]` 索引）、
-/// `field.<n>.type`（值域 `text|hidden|boolean`，見 `SetType`）。
+/// `field.<n>.type`（值域 `text|hidden|boolean`，見 `SetType`）、
+/// `card.<欄名>`／`identity.<欄名>`（PR1 型別節：欄名＝官方線鍵名白名單，
+/// 值域見 `CARD_FIELDS`／`IDENTITY_FIELDS`；全欄 EncString，None＝清 null）。
 /// 增刪欄位走 `AppendField`／`RemoveField`（陣列形態變更，非 leaf 值編輯）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum FieldEdit {
