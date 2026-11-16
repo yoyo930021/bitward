@@ -1208,19 +1208,20 @@ fn poll_attachment_row(dir: PathBuf, core: AppCore, ms: u64) {
             c14.send(Cmd::OpenSend);
         });
         let c = core.clone();
-        at(ms + 16300, move || {
-            c.send(Cmd::ShowSendsTab(SendTab::Create));
-            c.send_form.text.set("E2E 接收頁範例".into());
-        });
+        at(ms + 16300, move || c.send(Cmd::ShowSendsTab(SendTab::Create)));
         let c = core.clone();
-        at(ms + 16700, move || c.send(Cmd::SubmitSend));
+        at(ms + 16700, move || c.send_form.text.set("E2E 接收頁範例".into()));
+        let c = core.clone();
+        at(ms + 17100, move || c.send(Cmd::SubmitSend));
         let c = core.clone();
         let d = dir.clone();
-        at(ms + 18300, move || {
-            let created = c
-                .send_created
-                .get()
-                .expect("Send 建立應成功（demo VW 在線、庫解鎖態）");
+        at(ms + 19000, move || {
+            let created = c.send_created.get().unwrap_or_else(|| {
+                panic!(
+                    "Send 建立應成功（demo VW 在線、庫解鎖態），表單錯誤：{:?}",
+                    c.send_form.error.get()
+                )
+            });
             let w = created
                 .get("webUrl")
                 .and_then(serde_json::Value::as_str)
