@@ -30,6 +30,9 @@ pub struct ImportRow {
     pub favorite: bool,
     pub tags: Vec<String>,
     pub fields: Vec<CipherField>,
+    /// 型別節（PR1）：官方未加密匯出的 card/identity 子物件（明文值）。
+    pub card: Option<bw_proto::CardDraft>,
+    pub identity: Option<bw_proto::IdentityDraft>,
 }
 
 /// 解析結果：可匯入列＋因缺名等跳過的筆數。
@@ -157,6 +160,10 @@ fn row_from(it: &serde_json::Value) -> Option<ImportRow> {
             .unwrap_or(false),
         tags,
         fields,
+        // 型別節（PR1）：官方未加密匯出把 card/identity 放子物件（明文值）；
+        // 扁平欄名（card.number 直接頂層）不支援——匯入源只用官方形態。
+        card: bw_proto::card_draft_from_export(it.get("card")),
+        identity: bw_proto::identity_draft_from_export(it.get("identity")),
     })
 }
 
@@ -196,6 +203,8 @@ pub fn to_items(rows: &[ImportRow]) -> Vec<ImportItem> {
                 favorite: r.favorite,
                 folder_id: r.folder_id.clone(),
                 fields: r.fields.clone(),
+                card: r.card.clone(),
+                identity: r.identity.clone(),
             },
             tags: r.tags.clone(),
         })

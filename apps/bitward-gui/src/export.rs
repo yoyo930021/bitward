@@ -6,9 +6,20 @@
 
 use std::path::PathBuf;
 
-use bw_proto::{Call, Query, Response, SortKey, VaultCall, View};
+use bw_proto::{Call, ItemKind, Query, Response, SortKey, VaultCall, View};
 
 use crate::btp::Session;
+
+/// `ItemKind` → 官方線格式整數（1 Login|2 SecureNote|3 Card|4 Identity）。
+/// 匯出檔型別欄用（import 端 `row_from` 按此反查；語意同 daemon `kind_wire`）。
+fn kind_wire(k: ItemKind) -> u8 {
+    match k {
+        ItemKind::Login => 1,
+        ItemKind::SecureNote => 2,
+        ItemKind::Card => 3,
+        ItemKind::Identity => 4,
+    }
+}
 
 #[derive(Clone)]
 pub struct ExportOutcome {
@@ -46,13 +57,22 @@ pub fn run(session: &Session) -> Result<ExportOutcome, String> {
         // 嵌進 JSON 值是這裡唯一無法清零的拷貝（serde_json::Value），
         // 迴圈結束即釋放，匯出完成後程序內不再持有。
         let password = view.password.map(zeroize::Zeroizing::new);
-        rows.push(serde_json::json!({
-            "name": view.meta.name,
-            "username": view.username,
-            "password": password.as_deref(),
-            "uri": view.meta.uris.first(),
-            "tags": view.meta.tags,
-        }));
+        // 型別節（PR1）：匯出補 type 與 card/identity 子物件（官方未加密匯出形態），
+        // 修掉舊版只寫帳密扁平欄導致卡片／身分欄丟失的洞。
+        let mut row = serde_json::Map::new();
+        row.insert("name".into(), serde_json::json!(view.meta.name));
+        row.insert("type".into(), serde_json::json!(kind_wire(view.meta.kind)));
+        row.insert("username".into(), serde_json::json!(view.username));
+        row.insert("password".into(), serde_json::json!(password.as_deref()));
+        row.insert("uri".into(), serde_json::json!(view.meta.uris.first()));
+        row.insert("tags".into(), serde_json::json!(view.meta.tags));
+        if let Some(c) = &view.card {
+            row.insert("card".into(), bw_proto::card_view_to_export(c));
+        }
+        if let Some(i) = &view.identity {
+            row.insert("identity".into(), bw_proto::identity_view_to_export(i));
+        }
+        rows.push(serde_json::Value::Object(row));
     }
     let path = download_path()?;
     let body = serde_json::to_vec_pretty(&rows).map_err(|e| e.to_string())?;

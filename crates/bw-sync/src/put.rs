@@ -15,6 +15,8 @@
 //! | `folderId` | `$.folderId` | 明文 UUID 字串（同 favorite 不落佔位）；`None` → `null`＝移出資料夾 |
 //! | `field.<id>.name` | `$.fields[i].name`（`fields[i].id == <id>`） | `<id>` 比對 `fields[].id`（字串或數字都接受，轉字串比） |
 //! | `field.<id>.value` | `$.fields[i].value`（同上） | 找不到該 id → 回錯 |
+//! | `card.<欄名>` | `$.card.<欄名>` | PR1 型別節；`<欄名>` 值域見 `bw_proto::CARD_FIELDS`（六欄），全 EncString |
+//! | `identity.<欄名>` | `$.identity.<欄名>` | PR1 型別節；`<欄名>` 值域見 `bw_proto::IDENTITY_FIELDS`（十八欄），全 EncString |
 //!
 //! `field.<n>.*` 亦接受**純數字索引**形態（`<n>` 為 0 起 `fields[]` 索引）：
 //! 官方 fields[] 本無 id 欄（jslib 以索引定址），鏡像若無 id 就以索引落點；
@@ -54,6 +56,9 @@ enum Path<'a> {
     Uri(u32),
     FieldName(&'a str),
     FieldValue(&'a str),
+    /// 型別節欄（PR1）：`card.<官方鍵名>`／`identity.<官方鍵名>`，全欄 EncString
+    CardField(&'a str),
+    IdentityField(&'a str),
 }
 
 fn parse_path(raw: &str) -> Result<Path<'_>, String> {
@@ -85,6 +90,21 @@ fn parse_path(raw: &str) -> Result<Path<'_>, String> {
             "name" => Ok(Path::FieldName(id)),
             "value" => Ok(Path::FieldValue(id)),
             other => Err(format!("unknown field leaf {other:?} in {raw:?}")),
+        };
+    }
+    // 型別節（PR1）：card.<f>／identity.<f>，欄名白名單＝官方線鍵名。
+    if let Some(f) = raw.strip_prefix("card.") {
+        return if bw_proto::CARD_FIELDS.contains(&f) {
+            Ok(Path::CardField(f))
+        } else {
+            Err(format!("unknown card field {f:?} in {raw:?}"))
+        };
+    }
+    if let Some(f) = raw.strip_prefix("identity.") {
+        return if bw_proto::IDENTITY_FIELDS.contains(&f) {
+            Ok(Path::IdentityField(f))
+        } else {
+            Err(format!("unknown identity field {f:?} in {raw:?}"))
         };
     }
     Err(format!("unknown field path: {raw:?}"))
@@ -178,6 +198,17 @@ pub fn build_put_body(
                     Some(v) => root.insert("folderId".to_owned(), Value::String(v.clone())),
                     None => root.insert("folderId".to_owned(), Value::Null),
                 };
+            }
+            Path::CardField(f) | Path::IdentityField(f) => {
+                // 型別節（PR1）：全欄 EncString → 佔位字串落 `$.card.<f>`／
+                // `$.identity.<f>`（節缺席＝ensure_object 材料化）；None＝清 null。
+                let key = if matches!(p, Path::CardField(_)) {
+                    "card"
+                } else {
+                    "identity"
+                };
+                let section = ensure_object(root, key)?;
+                section.insert(f.to_owned(), opt_value(value, &slot));
             }
             Path::FieldName(id) | Path::FieldValue(id) => {
                 let key = if matches!(p, Path::FieldName(_)) {
@@ -494,6 +525,31 @@ mod tests {
             out["fields"][0]["name"],
             json!(placeholder_for("field.0.name"))
         );
+    }
+
+    #[test]
+    fn card_identity_paths_placeholders_and_whitelist() {
+        // PR1 型別節：card.<f>／identity.<f> 落佔位字串（EncString），節缺席時
+        // ensure_object 材料化；未知欄名回錯。
+        let t = json!({
+            "type": 3, "name": "2.a|b|c",
+            "card": {"number": "2.old|old|old", "brand": null},
+        });
+        let out = build_put_body(&t, &merged(&[("card.number", Some("4242"))])).unwrap();
+        assert_eq!(out["card"]["number"], json!(placeholder_for("card.number")));
+        assert_eq!(out["card"]["brand"], Value::Null, "未觸及欄不動");
+        // identity 節缺席＝材料化後寫入
+        let out2 = build_put_body(&t, &merged(&[("identity.lastName", Some("Chen"))])).unwrap();
+        assert_eq!(
+            out2["identity"]["lastName"],
+            json!(placeholder_for("identity.lastName"))
+        );
+        // None＝清 null（不落佔位）
+        let out3 = build_put_body(&t, &merged(&[("card.number", None)])).unwrap();
+        assert!(out3["card"]["number"].is_null());
+        // 未知欄名回錯
+        assert!(build_put_body(&t, &merged(&[("card.bogus", Some("x"))])).is_err());
+        assert!(build_put_body(&t, &merged(&[("identity.bogus", Some("x"))])).is_err());
     }
 
     #[test]

@@ -175,6 +175,13 @@ enum Cmd {
         /// 自訂 boolean 欄 `k=v`（v ∈ true|false），可重複
         #[arg(long = "field?")]
         bool_fields: Vec<String>,
+        /// 卡片欄 `k=v`（k ∈ cardholderName|brand|number|expMonth|expYear|code），
+        /// 可重複；值 `-`＝從 stdin 讀一行（A11：卡號/CVV 不落 argv）
+        #[arg(long = "card")]
+        card_fields: Vec<String>,
+        /// 身分欄 `k=v`（k ∈ identity.api.ts 十八欄鍵名），可重複；值 `-`＝stdin
+        #[arg(long = "identity")]
+        identity_fields: Vec<String>,
     },
     /// 資料夾（官方 folders 語意：名稱 user key 加密）
     Folder {
@@ -1761,6 +1768,8 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             fields,
             hidden_fields,
             bool_fields,
+            card_fields,
+            identity_fields,
         } => {
             let password = if *password_stdin {
                 Some(read_line_stdin()?)
@@ -1770,15 +1779,50 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             let kind = match type_.as_str() {
                 "login" => ItemKind::Login,
                 "note" => ItemKind::SecureNote,
+                "card" => ItemKind::Card,
+                "identity" => ItemKind::Identity,
                 other => {
                     return Err(format!(
-                        "--type 僅支援 login|note（card/identity 留後續批次），got {other}"
+                        "--type 僅支援 login|note|card|identity，got {other}"
                     ));
                 }
             };
             let mut draft_fields = parse_field_pairs(fields, CipherFieldKind::Text)?;
             draft_fields.extend(parse_field_pairs(hidden_fields, CipherFieldKind::Hidden)?);
             draft_fields.extend(parse_field_pairs(bool_fields, CipherFieldKind::Boolean)?);
+            // 型別節（PR1）：`--card k=v`／`--identity k=v` 走官方鍵名白名單；
+            // 值 `-`＝stdin 一行（卡號/CVV 不落 argv，A11）。
+            let mut card = bw_proto::CardDraft::default();
+            for p in card_fields {
+                let (k, v) = p
+                    .split_once('=')
+                    .ok_or_else(|| format!("--card 需要 path=value，got {p}"))?;
+                let v = if v == "-" {
+                    read_line_stdin()?
+                } else {
+                    v.to_owned()
+                };
+                card.slot_mut(k)
+                    .ok_or_else(|| format!("未知 card 欄名 {k:?}（值域 cardholderName|brand|number|expMonth|expYear|code）"))?
+                    .replace(v);
+            }
+            let mut identity = bw_proto::IdentityDraft::default();
+            for p in identity_fields {
+                let (k, v) = p
+                    .split_once('=')
+                    .ok_or_else(|| format!("--identity 需要 path=value，got {p}"))?;
+                let v = if v == "-" {
+                    read_line_stdin()?
+                } else {
+                    v.to_owned()
+                };
+                identity
+                    .slot_mut(k)
+                    .ok_or_else(|| format!("未知 identity 欄名 {k:?}"))?
+                    .replace(v);
+            }
+            let has_card = card_fields.iter().next().is_some();
+            let has_identity = identity_fields.iter().next().is_some();
             Call::Vault(VaultCall::Create {
                 draft: CipherDraft {
                     kind,
@@ -1793,6 +1837,8 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                     favorite: false,
                     folder_id: folder.clone(),
                     fields: draft_fields,
+                    card: has_card.then_some(card),
+                    identity: has_identity.then_some(identity),
                 },
             })
         }
@@ -2212,11 +2258,14 @@ fn parse_import_item(c: &serde_json::Value) -> Result<ImportItem, String> {
     let kind = match c.get("type") {
         Some(serde_json::Value::Number(n)) => match n.as_i64().unwrap_or(1) {
             2 => ItemKind::SecureNote,
-            3 | 4 => return Err(format!("Card/Identity 型別本批不支援（type {}）", n)),
+            3 => ItemKind::Card,
+            4 => ItemKind::Identity,
             _ => ItemKind::Login,
         },
         Some(serde_json::Value::String(s)) => match s.as_str() {
             "note" | "securenote" => ItemKind::SecureNote,
+            "card" => ItemKind::Card,
+            "identity" => ItemKind::Identity,
             other => return Err(format!("未知 type {other:?}")),
         },
         _ => ItemKind::Login,
@@ -2315,6 +2364,9 @@ fn parse_import_item(c: &serde_json::Value) -> Result<ImportItem, String> {
                 .map(str::to_owned),
             fields,
             uri_matches,
+            // 型別節（PR1）：官方未加密匯出的 card/identity 子物件（明文值）
+            card: bw_proto::card_draft_from_export(c.get("card")),
+            identity: bw_proto::identity_draft_from_export(c.get("identity")),
         },
         tags,
     })
