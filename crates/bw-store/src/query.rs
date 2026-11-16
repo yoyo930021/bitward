@@ -72,10 +72,18 @@ impl Store {
             uri_host = Some(want);
         }
         if let Some(val) = q.value.as_deref().filter(|t| !t.is_empty()) {
-            // 值搜尋走明文索引欄（解鎖回填後才有資料）；大小寫敏感＝精確比對語意
-            sql.push_str(" AND (m.username_plain = ? OR m.password_plain = ?)");
+            // 值搜尋走明文索引欄（解鎖回填後才有資料）；大小寫敏感＝精確比對語意。
+            // PR1（Q4 准則做）：卡片末四碼與身分姓氏也進值搜尋（card_number_tail
+            // 精確對末四碼、identity_last_name 前綴配對姓氏）。
+            sql.push_str(
+                " AND (m.username_plain = ? OR m.password_plain = ?
+                       OR m.card_number_tail = ? OR m.identity_last_name LIKE ? ESCAPE '\\')",
+            );
             args.push(val.to_string());
             args.push(val.to_string());
+            args.push(val.to_string());
+            let esc = escape_like(val);
+            args.push(format!("{esc}%"));
         }
         if let Some(kind) = q.kind {
             sql.push_str(" AND m.kind = ?");

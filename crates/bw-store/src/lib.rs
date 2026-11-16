@@ -162,6 +162,15 @@ impl Store {
             // v8（Send 鏡像）：表在 V1，此處留掛鉤（同 v3/v4/v6 形態）
             conn.execute_batch(schema::V8)?;
         }
+        if version < 9 {
+            // v9（型別節值搜尋）：card_number_tail/identity_last_name 逐條 ALTER
+            // 容忍 Duplicate column（同 V2/V5/V7 紀律）；meta_fts 加欄走整組重建
+            // （FTS5 無 ALTER，見 schema::V9_FTS 註解，V5_FTS 先例）。
+            for stmt in schema::V9.split(';').filter(|s| !s.trim().is_empty()) {
+                let _ = conn.execute_batch(&format!("{stmt};"));
+            }
+            conn.execute_batch(schema::V9_FTS)?;
+        }
         if version < schema::SCHEMA_VERSION {
             conn.execute_batch(&format!(
                 "PRAGMA user_version = {};",

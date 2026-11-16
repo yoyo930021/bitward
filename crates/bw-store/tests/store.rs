@@ -588,6 +588,86 @@ fn push_tokens_put_list_remove_converge() {
     );
 }
 
+/// v8→v9 遷移（PR1 子批 d，Q4）：舊庫（三欄 FTS）升級後新增兩張型別節索引欄、
+/// meta_fts 整組重建收斂五欄形態，且值搜尋命中卡片末四碼／身分姓氏。
+#[test]
+fn v9_migration_adds_type_node_index_and_fts_rebuild() {
+    let (_d, path) = tmp_vault("v9migrate");
+    // 造 v8 舊庫：手工建三欄 meta_plain + 三欄 FTS + trigger，user_version=8。
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta_plain(
+               id TEXT PRIMARY KEY, name TEXT, uris TEXT NOT NULL DEFAULT '[]',
+               kind INTEGER, folder TEXT, org TEXT, favorite INTEGER NOT NULL DEFAULT 0,
+               updated_at TEXT, pending INTEGER NOT NULL DEFAULT 0,
+               username_plain TEXT, password_plain TEXT,
+               fields_plain TEXT NOT NULL DEFAULT '[]', deleted_at TEXT, archived_at TEXT);
+             CREATE VIRTUAL TABLE meta_fts USING fts5(
+               name, uris, fields_plain, content='meta_plain', content_rowid='rowid',
+               tokenize='unicode61');
+             CREATE TABLE ciphers(id TEXT PRIMARY KEY, enc_cipher BLOB NOT NULL, raw BLOB NOT NULL, rev TEXT, deleted INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE overlay(id TEXT PRIMARY KEY, tags TEXT NOT NULL DEFAULT '[]', pinned INTEGER NOT NULL DEFAULT 0, last_used INTEGER, sort_hint REAL);
+             CREATE TABLE outbox(seq INTEGER PRIMARY KEY AUTOINCREMENT, item TEXT NOT NULL, base_rev TEXT, payload BLOB NOT NULL, state TEXT NOT NULL, origin TEXT, created_at INTEGER NOT NULL, leased_at INTEGER);
+             CREATE TABLE audit(seq INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, session TEXT, action TEXT NOT NULL, item TEXT, field TEXT, sens INTEGER NOT NULL, outcome TEXT NOT NULL, bytes_out INTEGER NOT NULL, approval TEXT, epoch INTEGER NOT NULL, prev_hash TEXT NOT NULL, hash TEXT NOT NULL);
+             CREATE TABLE sessions(id TEXT PRIMARY KEY, principal TEXT NOT NULL, grants TEXT NOT NULL, epoch INTEGER NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER);
+             CREATE TABLE push_tokens(token TEXT PRIMARY KEY, platform TEXT NOT NULL, registered_at INTEGER NOT NULL);
+             CREATE TABLE blobs(ref TEXT PRIMARY KEY, size INTEGER NOT NULL, created_at INTEGER NOT NULL);
+             CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE orgs(id TEXT PRIMARY KEY, raw BLOB NOT NULL, name TEXT, key TEXT, public_key TEXT, enc_private_key TEXT, key_verified INTEGER NOT NULL DEFAULT 0, status INTEGER, atype INTEGER);
+             CREATE TABLE collections(id TEXT PRIMARY KEY, org TEXT NOT NULL, name TEXT, raw BLOB NOT NULL);
+             CREATE TABLE cipher_collections(cipher TEXT NOT NULL, collection TEXT NOT NULL, PRIMARY KEY(cipher,collection));
+             CREATE TABLE folders(id TEXT PRIMARY KEY, name TEXT, rev TEXT, raw BLOB NOT NULL);
+             CREATE TABLE attachments(id TEXT PRIMARY KEY, cipher TEXT NOT NULL, file_name TEXT, size INTEGER, size_name TEXT, key TEXT, url TEXT);
+             CREATE TABLE sends(id TEXT PRIMARY KEY, stype INTEGER NOT NULL, name TEXT, key TEXT, access_id TEXT, deletion_date TEXT, expiration_date TEXT, max_access_count INTEGER, access_count INTEGER NOT NULL DEFAULT 0, hide_email INTEGER NOT NULL DEFAULT 0, file_id TEXT, file_name TEXT, file_size INTEGER, rev TEXT, raw BLOB NOT NULL);
+             PRAGMA user_version = 8;",
+        )
+        .unwrap();
+        drop(conn);
+    }
+    // 開庫觸發遷移：user_version 8→9，兩欄 ALTER + FTS 五欄重建。
+    let store = Store::open(&path).unwrap();
+    let cid = Uuid::new_v4();
+    let iid = Uuid::new_v4();
+    store
+        .apply_sync(&json!({
+            "ciphers": [
+                cipher(&cid.to_string(), "2.card|c|m", "2026-11-16T00:00:00.000Z", false),
+                cipher(&iid.to_string(), "2.idn|i|m", "2026-11-16T00:00:00.000Z", false),
+            ]
+        }))
+        .unwrap();
+    // 明文索引回填：卡片末四碼 4242、身分姓氏 Chen。
+    store.set_plain_type_nodes(cid, Some("4242"), None).unwrap();
+    store.set_plain_type_nodes(iid, None, Some("Chen")).unwrap();
+    // 值搜尋命中卡片末四碼（精確）
+    let hits = store
+        .query(&Query {
+            value: Some("4242".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(hits.len(), 1, "卡片末四碼值搜尋");
+    assert_eq!(hits[0].id, cid);
+    // 值搜尋命中身分姓氏（前綴）
+    let hits = store
+        .query(&Query {
+            value: Some("Che".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(hits.len(), 1, "身分姓氏前綴值搜尋");
+    assert_eq!(hits[0].id, iid);
+    // FTS 重建後文字搜尋仍可用（name 欄命中）＋遷移沒破壞既有 trigger。
+    let hits = store
+        .query(&Query {
+            text: Some("2.card".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(hits.iter().any(|h| h.id == cid), "FTS 重建後文字搜尋存活");
+}
+
 #[test]
 fn schema_version_guard() {
     let (_d, path) = tmp_vault("version");

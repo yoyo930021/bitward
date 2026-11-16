@@ -97,6 +97,11 @@ pub struct FormOriginal {
     pub folder_id: Option<String>,
     /// 既有自訂欄位基準（編輯模式逐欄 diff；增刪不在此批）。
     pub fields: Vec<FieldDraft>,
+    /// 卡片節基準（PR1）：Masked 可見四欄＋遮罩欄恆 None（卡號/CVV 語意同
+    /// 密碼——空輸入＝不動基準）；非卡片型別＝None。
+    pub card: Option<bw_proto::CardDraft>,
+    /// 身分節基準（PR1，十八欄全明文）；非身分型別＝None。
+    pub identity: Option<bw_proto::IdentityDraft>,
 }
 
 /// 寫入完成後的落點。
@@ -691,13 +696,17 @@ pub struct FormFields {
     pub password: Signal<String>,
     pub uris: Signal<std::sync::Arc<Vec<UriDraft>>>,
     pub tags: Signal<String>,
-    /// 型別切換：本批僅 Login/SecureNote 可選，Card/Identity 佔位 disabled。
+    /// 型別切換：四型別全開放（PR1 解禁 Card/Identity）。
     pub kind: Signal<ItemKind>,
     /// 資料夾歸屬：""＝未歸屬；否則 ListFolders 的 id。
     pub folder_id: Signal<String>,
     pub notes: Signal<String>,
     /// 自訂欄位編輯列（順序即送出順序）。
     pub fields: Signal<Arc<Vec<FieldDraft>>>,
+    /// 卡片節六欄（PR1；kind==Card 才渲染，明文紀律同 password）。
+    pub card: CardFormFields,
+    /// 身分節十八欄（PR1；kind==Identity 才渲染）。
+    pub identity: IdentityFormFields,
     pub error: Signal<Option<String>>,
     pub original: Signal<Option<Arc<FormOriginal>>>,
     /// 產生器面板狀態（開合／長度／字元集開關）。
@@ -719,9 +728,258 @@ impl FormFields {
         self.folder_id.set(String::new());
         self.notes.set(String::new());
         self.fields.set(Arc::new(Vec::new()));
+        self.card.reset();
+        self.identity.reset();
         self.gen_panel.set(GenState::default());
         self.gen_draft.set(None);
     }
+}
+
+/// 卡片節編輯訊號組（PR1）：六欄明文只活在這些訊號與送出時的副本
+/// （同 `FormFields.password` 紀律）；欄序＝官方 `CARD_FIELDS`。
+#[derive(Clone)]
+pub struct CardFormFields {
+    pub cardholder_name: Signal<String>,
+    pub brand: Signal<String>,
+    pub number: Signal<String>,
+    pub exp_month: Signal<String>,
+    pub exp_year: Signal<String>,
+    pub code: Signal<String>,
+}
+
+/// 身分節編輯訊號組（PR1）：十八欄（同明文紀律）；欄序＝官方 `IDENTITY_FIELDS`。
+#[derive(Clone)]
+pub struct IdentityFormFields {
+    pub title: Signal<String>,
+    pub first_name: Signal<String>,
+    pub middle_name: Signal<String>,
+    pub last_name: Signal<String>,
+    pub address1: Signal<String>,
+    pub address2: Signal<String>,
+    pub address3: Signal<String>,
+    pub city: Signal<String>,
+    pub state: Signal<String>,
+    pub postal_code: Signal<String>,
+    pub country: Signal<String>,
+    pub company: Signal<String>,
+    pub email: Signal<String>,
+    pub phone: Signal<String>,
+    pub ssn: Signal<String>,
+    pub username: Signal<String>,
+    pub passport_number: Signal<String>,
+    pub license_number: Signal<String>,
+}
+
+macro_rules! card_form_accessors {
+    (masked [$($masked:ident),*] fields [$($field:ident),+]) => {
+        impl CardFormFields {
+            fn new() -> Self {
+                Self { $( $field: signal(String::new()), )+ }
+            }
+            fn reset(&self) { $( self.$field.set(String::new()); )+ }
+            /// 表單現值 → 明文草稿（trim；空欄＝None；全空＝None 不憑空造節）。
+            #[must_use]
+            pub fn draft(&self) -> Option<bw_proto::CardDraft> {
+                let d = bw_proto::CardDraft {
+                    $( $field: nonblank(&self.$field.get()), )+
+                };
+                (d != bw_proto::CardDraft::default()).then_some(d)
+            }
+            /// 編輯預填（PR1）：Masked 投影四欄原樣進訊號；卡號/CVV 是遮罩欄
+            /// ＝留空（語意同密碼：空輸入不動基準）。
+            fn prefill(&self, card: Option<&bw_proto::CardView>) {
+                let empty = bw_proto::CardView::default();
+                let c = card.unwrap_or(&empty);
+                $( self.$field.set(c.$field.clone().unwrap_or_default()); )+
+                $( self.$masked.set(String::new()); )+
+            }
+            /// 基準草稿：Masked 可見欄原樣、遮罩欄恆 None（diff 的 left 側）。
+            fn baseline(card: Option<&bw_proto::CardView>) -> Option<bw_proto::CardDraft> {
+                let c = card?;
+                let mut d = bw_proto::CardDraft {
+                    $( $field: c.$field.clone(), )+
+                };
+                $( d.$masked = None; )+
+                Some(d)
+            }
+        }
+    };
+}
+
+macro_rules! identity_form_accessors {
+    ($($field:ident),+ $(,)?) => {
+        impl IdentityFormFields {
+            fn new() -> Self {
+                Self { $( $field: signal(String::new()), )+ }
+            }
+            fn reset(&self) { $( self.$field.set(String::new()); )+ }
+            /// 表單現值 → 明文草稿（語意同 [`CardFormFields::draft`]）。
+            #[must_use]
+            pub fn draft(&self) -> Option<bw_proto::IdentityDraft> {
+                let d = bw_proto::IdentityDraft {
+                    $( $field: nonblank(&self.$field.get()), )+
+                };
+                (d != bw_proto::IdentityDraft::default()).then_some(d)
+            }
+            /// 編輯預填（PR1）：十八欄全明文（同 notes 紀律）。
+            fn prefill(&self, idn: Option<&bw_proto::IdentityView>) {
+                let empty = bw_proto::IdentityView::default();
+                let i = idn.unwrap_or(&empty);
+                $( self.$field.set(i.$field.clone().unwrap_or_default()); )+
+            }
+            /// 基準草稿（diff 的 left 側）。
+            fn baseline(idn: Option<&bw_proto::IdentityView>) -> Option<bw_proto::IdentityDraft> {
+                let i = idn?;
+                Some(bw_proto::IdentityDraft { $( $field: i.$field.clone(), )+ })
+            }
+        }
+    };
+}
+
+card_form_accessors!(
+    masked [number, code]
+    fields [cardholder_name, brand, number, exp_month, exp_year, code]
+);
+identity_form_accessors!(
+    title,
+    first_name,
+    middle_name,
+    last_name,
+    address1,
+    address2,
+    address3,
+    city,
+    state,
+    postal_code,
+    country,
+    company,
+    email,
+    phone,
+    ssn,
+    username,
+    passport_number,
+    license_number,
+);
+
+/// 型別節欄位 diff（PR1 子批 c 編輯態，純函數單測點）：逐欄基準 vs 現值出
+/// `card.<f>`／`identity.<f>` 的 `FieldEdit::Set`（路徑文法權威＝`bw_proto::FieldEdit`
+/// 文件）。遮罩欄（卡號/CVV）語意同密碼——現值空＝不動基準、非空＝Set；
+/// 其餘欄現值 None＋基準 Some＝Set(None) 清空。
+#[must_use]
+pub fn card_edits(base: &bw_proto::CardDraft, cur: &bw_proto::CardDraft) -> Vec<FieldEdit> {
+    let mut out = Vec::new();
+    let mut push = |key: &str, b: Option<&str>, c: Option<&str>, masked: bool| {
+        let changed = if masked { c.is_some() } else { c != b };
+        if changed {
+            out.push(FieldEdit::Set {
+                path: format!("card.{key}"),
+                value: c.map(str::to_owned),
+            });
+        }
+    };
+    push(
+        "cardholderName",
+        base.cardholder_name.as_deref(),
+        cur.cardholder_name.as_deref(),
+        false,
+    );
+    push("brand", base.brand.as_deref(), cur.brand.as_deref(), false);
+    push(
+        "number",
+        base.number.as_deref(),
+        cur.number.as_deref(),
+        true,
+    );
+    push(
+        "expMonth",
+        base.exp_month.as_deref(),
+        cur.exp_month.as_deref(),
+        false,
+    );
+    push(
+        "expYear",
+        base.exp_year.as_deref(),
+        cur.exp_year.as_deref(),
+        false,
+    );
+    push("code", base.code.as_deref(), cur.code.as_deref(), true);
+    out
+}
+
+/// 身分節 diff（語意同 [`card_edits`]；十八欄全明文，無遮罩欄）。
+#[must_use]
+pub fn identity_edits(
+    base: &bw_proto::IdentityDraft,
+    cur: &bw_proto::IdentityDraft,
+) -> Vec<FieldEdit> {
+    let mut out = Vec::new();
+    let mut push = |key: &str, b: Option<&str>, c: Option<&str>| {
+        if c != b {
+            out.push(FieldEdit::Set {
+                path: format!("identity.{key}"),
+                value: c.map(str::to_owned),
+            });
+        }
+    };
+    push("title", base.title.as_deref(), cur.title.as_deref());
+    push(
+        "firstName",
+        base.first_name.as_deref(),
+        cur.first_name.as_deref(),
+    );
+    push(
+        "middleName",
+        base.middle_name.as_deref(),
+        cur.middle_name.as_deref(),
+    );
+    push(
+        "lastName",
+        base.last_name.as_deref(),
+        cur.last_name.as_deref(),
+    );
+    push(
+        "address1",
+        base.address1.as_deref(),
+        cur.address1.as_deref(),
+    );
+    push(
+        "address2",
+        base.address2.as_deref(),
+        cur.address2.as_deref(),
+    );
+    push(
+        "address3",
+        base.address3.as_deref(),
+        cur.address3.as_deref(),
+    );
+    push("city", base.city.as_deref(), cur.city.as_deref());
+    push("state", base.state.as_deref(), cur.state.as_deref());
+    push(
+        "postalCode",
+        base.postal_code.as_deref(),
+        cur.postal_code.as_deref(),
+    );
+    push("country", base.country.as_deref(), cur.country.as_deref());
+    push("company", base.company.as_deref(), cur.company.as_deref());
+    push("email", base.email.as_deref(), cur.email.as_deref());
+    push("phone", base.phone.as_deref(), cur.phone.as_deref());
+    push("ssn", base.ssn.as_deref(), cur.ssn.as_deref());
+    push(
+        "username",
+        base.username.as_deref(),
+        cur.username.as_deref(),
+    );
+    push(
+        "passportNumber",
+        base.passport_number.as_deref(),
+        cur.passport_number.as_deref(),
+    );
+    push(
+        "licenseNumber",
+        base.license_number.as_deref(),
+        cur.license_number.as_deref(),
+    );
+    out
 }
 
 /// Send 新增表單（路線 5）。`text`/`password` 是明文欄——離開視角或送出成功
@@ -1249,6 +1507,8 @@ impl AppCore {
                 folder_id: signal(String::new()),
                 notes: signal(String::new()),
                 fields: signal(Arc::new(Vec::new())),
+                card: CardFormFields::new(),
+                identity: IdentityFormFields::new(),
                 error: signal(None),
                 original: signal_with(None, SignalEquals::Never),
                 gen_panel: signal(GenState::default()),
@@ -1577,6 +1837,9 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 })
                 .collect();
             core.form.fields.set(Arc::new(drafts.clone()));
+            // 型別節（PR1）：卡片/身分欄位預填（遮罩欄留空＝不動基準語意）。
+            core.form.card.prefill(row.card.as_ref());
+            core.form.identity.prefill(row.identity.as_ref());
             core.form.original.set(Some(Arc::new(FormOriginal {
                 name: row.meta.name.clone().unwrap_or_default(),
                 username: row.username.clone(),
@@ -1586,6 +1849,8 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 notes: row.notes.clone(),
                 folder_id: row.meta.folder_id.map(|f| f.to_string()),
                 fields: drafts,
+                card: CardFormFields::baseline(row.card.as_ref()),
+                identity: IdentityFormFields::baseline(row.identity.as_ref()),
             })));
         }
         Cmd::RequestReveal => {
@@ -3209,6 +3474,16 @@ fn submit_form(core: &AppCore) {
     let folder_id = nonblank(&core.form.folder_id.get());
     let notes = nonblank(&core.form.notes.get());
     let drafts = core.form.fields.get();
+    // 型別節現值（PR1）：建立按型別取用（切過型別不殘留他節欄）；
+    // 編輯態恆帶（全清空也要能被 diff 成 Set(None)）。
+    let card_draft = (kind == ItemKind::Card)
+        .then(|| core.form.card.draft())
+        .flatten();
+    let identity_draft = (kind == ItemKind::Identity)
+        .then(|| core.form.identity.draft())
+        .flatten();
+    let card_cur = core.form.card.draft().unwrap_or_default();
+    let identity_cur = core.form.identity.draft().unwrap_or_default();
     match route {
         Route::Create => {
             let fields: Vec<bw_proto::CipherField> = drafts
@@ -3250,6 +3525,8 @@ fn submit_form(core: &AppCore) {
                     favorite: false,
                     folder_id,
                     fields,
+                    card: card_draft,
+                    identity: identity_draft,
                 };
                 let err = match s.call(&Call::Vault(VaultCall::Create { draft })) {
                     Ok(Response::Ok) => {
@@ -3285,6 +3562,8 @@ fn submit_form(core: &AppCore) {
                 folder_id,
                 tags: &tags,
                 drafts: &drafts,
+                card: Some(&card_cur),
+                identity: Some(&identity_cur),
             };
             let (leaf, field_struct, match_tail, add, remove) = edit_delta(&orig, &input);
             if leaf.is_empty()
@@ -3518,6 +3797,10 @@ pub struct FormInput<'a> {
     pub folder_id: Option<String>,
     pub tags: &'a [String],
     pub drafts: &'a [FieldDraft],
+    /// 卡片節現值（PR1；None＝未填或他型別）。
+    pub card: Option<&'a bw_proto::CardDraft>,
+    /// 身分節現值（PR1）。
+    pub identity: Option<&'a bw_proto::IdentityDraft>,
 }
 
 /// `edit_delta` 的五元組返回：leaf 值批、結構批、新列判定批、標籤增、標籤刪。
@@ -3574,6 +3857,16 @@ pub fn edit_delta(orig: &FormOriginal, f: &FormInput<'_>) -> EditDelta {
     let (field_leaf, mut field_struct) = field_edits(&orig.fields, f.drafts);
     leaf.extend(field_leaf);
     field_struct.extend(u_struct);
+    // 型別節（PR1）：card.<f>／identity.<f> leaf 批（diff 語意見 card_edits）。
+    if let Some(cur) = f.card {
+        leaf.extend(card_edits(&orig.card.clone().unwrap_or_default(), cur));
+    }
+    if let Some(cur) = f.identity {
+        leaf.extend(identity_edits(
+            &orig.identity.clone().unwrap_or_default(),
+            cur,
+        ));
+    }
     let (add, remove) = diff_tags(&orig.tags, f.tags);
     (leaf, field_struct, u_match_tail, add, remove)
 }
@@ -3581,8 +3874,9 @@ pub fn edit_delta(orig: &FormOriginal, f: &FormInput<'_>) -> EditDelta {
 /// 表單是否「髒」（純函數，單測點）：正規化與 `submit_form` 完全一致
 /// （trim／nonblank／parse_tags），空白抖動不误報；有基準走 edit_delta
 /// 空判，無基準（新增）＝任一輸入非空／切過型別／有非空欄位行。
+/// `card`/`identity` 為型別節現值（PR1；None＝本呼叫不帶節資訊）。
 #[allow(clippy::too_many_arguments)]
-pub fn form_is_dirty(
+pub fn form_is_dirty_sections(
     orig: Option<&FormOriginal>,
     name: &str,
     username: &str,
@@ -3593,6 +3887,8 @@ pub fn form_is_dirty(
     folder_id: &str,
     kind: ItemKind,
     drafts: &[FieldDraft],
+    card: Option<&bw_proto::CardDraft>,
+    identity: Option<&bw_proto::IdentityDraft>,
 ) -> bool {
     let name = name.trim().to_owned();
     let username = nonblank(username);
@@ -3611,6 +3907,8 @@ pub fn form_is_dirty(
                 folder_id: folder,
                 tags: &tag_list,
                 drafts,
+                card,
+                identity,
             };
             let (leaf, field_struct, match_tail, add, remove) = edit_delta(o, &input);
             !(leaf.is_empty()
@@ -3635,9 +3933,30 @@ pub fn form_is_dirty(
     }
 }
 
+/// 不帶型別節的舊簽名（單測與非節表單路徑用；語意＝sections 恆 None）。
+#[allow(clippy::too_many_arguments)]
+pub fn form_is_dirty(
+    orig: Option<&FormOriginal>,
+    name: &str,
+    username: &str,
+    password: &str,
+    uris: &[UriDraft],
+    tags: &str,
+    notes: &str,
+    folder_id: &str,
+    kind: ItemKind,
+    drafts: &[FieldDraft],
+) -> bool {
+    form_is_dirty_sections(
+        orig, name, username, password, uris, tags, notes, folder_id, kind, drafts, None, None,
+    )
+}
+
 /// 讀訊號版髒判定（reduce 閘與 RequestCloseForm 共用）。
 pub fn form_dirty(core: &AppCore) -> bool {
-    form_is_dirty(
+    let card_cur = core.form.card.draft();
+    let identity_cur = core.form.identity.draft();
+    form_is_dirty_sections(
         core.form.original.get().as_deref(),
         &core.form.name.get(),
         &core.form.username.get(),
@@ -3648,6 +3967,8 @@ pub fn form_dirty(core: &AppCore) -> bool {
         &core.form.folder_id.get(),
         core.form.kind.get(),
         &core.form.fields.get(),
+        card_cur.as_ref(),
+        identity_cur.as_ref(),
     )
 }
 
@@ -4019,6 +4340,8 @@ mod tests {
             notes: None,
             folder_id: None,
             fields: vec![],
+            card: None,
+            identity: None,
         };
         let rows = [UriDraft {
             key: 0,
@@ -4410,5 +4733,106 @@ mod tests {
             epoch: 1,
             deadline_epoch_ms: None
         })));
+    }
+
+    /// 型別節編輯 diff（PR1）：card.<f>/identity.<f> 路徑、遮罩欄「空＝不動」
+    /// 語意、清空出 Set(None)、髒閘與 submit 同源（edit_delta）。
+    #[test]
+    fn card_identity_edits_and_dirty_gate() {
+        let base = bw_proto::CardDraft {
+            cardholder_name: Some("Yoyo".into()),
+            brand: Some("Visa".into()),
+            number: None, // 遮罩欄基準恆 None
+            exp_month: Some("3".into()),
+            exp_year: Some("2032".into()),
+            code: None,
+        };
+        // 只改lastName（非遮罩欄）→ 一筆 Set；卡號留空＝不動基準。
+        let cur = bw_proto::CardDraft {
+            cardholder_name: Some("Yoyo".into()),
+            brand: Some("Mastercard".into()),
+            number: None,
+            exp_month: None,
+            exp_year: Some("2032".into()),
+            code: Some("999".into()),
+        };
+        let edits = card_edits(&base, &cur);
+        let paths: Vec<String> = edits
+            .iter()
+            .map(|e| match e {
+                FieldEdit::Set { path, .. } => path.clone(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(paths, vec!["card.brand", "card.expMonth", "card.code"]);
+        for e in &edits {
+            if let FieldEdit::Set { path, value } = e {
+                if path == "card.expMonth" {
+                    assert_eq!(value.as_deref(), None, "清空＝Set(None)");
+                }
+                if path == "card.code" {
+                    assert_eq!(value.as_deref(), Some("999"));
+                }
+            }
+        }
+        // identity：單欄改只出一筆 Set（Lane 4 語意的純函數層）。
+        let ibase = bw_proto::IdentityDraft {
+            last_name: Some("Chen".into()),
+            city: Some("Taipei".into()),
+            ..Default::default()
+        };
+        let icur = bw_proto::IdentityDraft {
+            last_name: Some("Lin".into()),
+            city: Some("Taipei".into()),
+            ..Default::default()
+        };
+        let edits = identity_edits(&ibase, &icur);
+        assert_eq!(edits.len(), 1);
+        assert!(matches!(
+            &edits[0],
+            FieldEdit::Set { path, value }
+                if path == "identity.lastName" && value.as_deref() == Some("Lin")
+        ));
+        // 髒閘：卡片基準＋只動遮罩欄輸入＝髒；基準原值＝不髒。
+        let orig = FormOriginal {
+            name: "我的卡".into(),
+            username: None,
+            uris: vec![],
+            uri_matches: vec![],
+            tags: vec![],
+            notes: None,
+            folder_id: None,
+            fields: vec![],
+            card: Some(base.clone()),
+            identity: None,
+        };
+        assert!(!form_is_dirty_sections(
+            Some(&orig),
+            "我的卡",
+            "",
+            "",
+            &[],
+            "",
+            "",
+            "",
+            ItemKind::Card,
+            &[],
+            Some(&base.clone()),
+            None,
+        ));
+        assert!(form_is_dirty_sections(
+            Some(&orig),
+            "我的卡",
+            "",
+            "",
+            &[],
+            "",
+            "",
+            "",
+            ItemKind::Card,
+            &[],
+            Some(&cur),
+            None,
+        ));
     }
 }

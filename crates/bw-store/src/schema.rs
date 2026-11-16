@@ -1,5 +1,5 @@
 /// schema 版本；每次加表/改表就 +1 並在本檔補一段遷移 SQL。
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// v1→v2：值搜尋明文索引欄。舊庫 ALTER；新庫 V1 已含，Duplicate column 容忍。
 pub const V2: &str = "ALTER TABLE meta_plain ADD COLUMN username_plain TEXT;
@@ -57,6 +57,36 @@ pub const V7: &str = "ALTER TABLE meta_plain ADD COLUMN archived_at TEXT;";
 /// schema_version_guard 的可見性。
 pub const V8: &str = "";
 
+/// v8→v9（PR1 型別節值搜尋，Q4 准則做）：`meta_plain` 加卡片末四碼＋
+/// 身分姓氏明文索引欄（僅解鎖回填，§2.7 R3 明文只活在 0600 檔）。
+/// 逐條 ALTER 容忍 Duplicate column（同 V2/V5/V7 紀律）。
+pub const V9: &str = "ALTER TABLE meta_plain ADD COLUMN card_number_tail TEXT;
+ALTER TABLE meta_plain ADD COLUMN identity_last_name TEXT;";
+
+/// v9 第二段（必成，不容錯）：FTS5 不支援加欄，`meta_fts` 整組重建加入
+/// 兩張型別節索引欄（走 V5_FTS 先例——連帶 DROP 舊 trigger 免撞新表欄位數）。
+/// 新建庫 V1 已是五欄形態，這裡 drop+recreate 收斂同一結果（冪等）。
+pub const V9_FTS: &str = "DROP TRIGGER IF EXISTS meta_plain_ai;
+DROP TRIGGER IF EXISTS meta_plain_ad;
+DROP TRIGGER IF EXISTS meta_plain_au;
+DROP TABLE IF EXISTS meta_fts;
+CREATE VIRTUAL TABLE meta_fts USING fts5(
+  name, uris, fields_plain, card_number_tail, identity_last_name,
+  content='meta_plain', content_rowid='rowid',
+  tokenize='unicode61'
+);
+INSERT INTO meta_fts(meta_fts) VALUES('rebuild');
+CREATE TRIGGER meta_plain_ai AFTER INSERT ON meta_plain BEGIN
+  INSERT INTO meta_fts(rowid, name, uris, fields_plain, card_number_tail, identity_last_name) VALUES (new.rowid, new.name, new.uris, new.fields_plain, new.card_number_tail, new.identity_last_name);
+END;
+CREATE TRIGGER meta_plain_ad AFTER DELETE ON meta_plain BEGIN
+  INSERT INTO meta_fts(meta_fts, rowid, name, uris, fields_plain, card_number_tail, identity_last_name) VALUES('delete', old.rowid, old.name, old.uris, old.fields_plain, old.card_number_tail, old.identity_last_name);
+END;
+CREATE TRIGGER meta_plain_au AFTER UPDATE ON meta_plain BEGIN
+  INSERT INTO meta_fts(meta_fts, rowid, name, uris, fields_plain, card_number_tail, identity_last_name) VALUES('delete', old.rowid, old.name, old.uris, old.fields_plain, old.card_number_tail, old.identity_last_name);
+  INSERT INTO meta_fts(rowid, name, uris, fields_plain, card_number_tail, identity_last_name) VALUES (new.rowid, new.name, new.uris, new.fields_plain, new.card_number_tail, new.identity_last_name);
+END;";
+
 /// v1：鏡像（密文原樣）+ 明文 metadata 索引（FTS5）+ overlay + outbox +
 /// audit（append-only hash 鏈）+ sessions + blobs 登記 + meta。
 /// 來源：ARCHITECTURE §3.4；欄位語意見 crate NOTES.md。
@@ -83,7 +113,9 @@ CREATE TABLE IF NOT EXISTS meta_plain(
   password_plain TEXT,        -- 同上
   fields_plain TEXT NOT NULL DEFAULT '[]',  -- v5：自訂欄欄名明文（JSON array；值不入）
   deleted_at TEXT,             -- v5：垃圾桶條目的伺服器 deletedDate；未刪 NULL
-  archived_at TEXT             -- v7：封存條目的伺服器 archivedDate；未封存 NULL
+  archived_at TEXT,            -- v7：封存條目的伺服器 archivedDate；未封存 NULL
+  card_number_tail TEXT,       -- v9：卡片末四碼明文（PR1 值搜尋；僅解鎖回填）
+  identity_last_name TEXT      -- v9：身分姓氏明文（PR1 值搜尋；僅解鎖回填）
 );
 
 -- v3（P4b org 共享語意讀側）：/sync 的 organizations[] / collections[] 鏡像。
@@ -161,20 +193,20 @@ CREATE TABLE IF NOT EXISTS sends(
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS meta_fts USING fts5(
-  name, uris, fields_plain,
+  name, uris, fields_plain, card_number_tail, identity_last_name,
   content='meta_plain', content_rowid='rowid',
   tokenize='unicode61'
 );
 
 CREATE TRIGGER IF NOT EXISTS meta_plain_ai AFTER INSERT ON meta_plain BEGIN
-  INSERT INTO meta_fts(rowid, name, uris, fields_plain) VALUES (new.rowid, new.name, new.uris, new.fields_plain);
+  INSERT INTO meta_fts(rowid, name, uris, fields_plain, card_number_tail, identity_last_name) VALUES (new.rowid, new.name, new.uris, new.fields_plain, new.card_number_tail, new.identity_last_name);
 END;
 CREATE TRIGGER IF NOT EXISTS meta_plain_ad AFTER DELETE ON meta_plain BEGIN
-  INSERT INTO meta_fts(meta_fts, rowid, name, uris, fields_plain) VALUES('delete', old.rowid, old.name, old.uris, old.fields_plain);
+  INSERT INTO meta_fts(meta_fts, rowid, name, uris, fields_plain, card_number_tail, identity_last_name) VALUES('delete', old.rowid, old.name, old.uris, old.fields_plain, old.card_number_tail, old.identity_last_name);
 END;
 CREATE TRIGGER IF NOT EXISTS meta_plain_au AFTER UPDATE ON meta_plain BEGIN
-  INSERT INTO meta_fts(meta_fts, rowid, name, uris, fields_plain) VALUES('delete', old.rowid, old.name, old.uris, old.fields_plain);
-  INSERT INTO meta_fts(rowid, name, uris, fields_plain) VALUES (new.rowid, new.name, new.uris, new.fields_plain);
+  INSERT INTO meta_fts(meta_fts, rowid, name, uris, fields_plain, card_number_tail, identity_last_name) VALUES('delete', old.rowid, old.name, old.uris, old.fields_plain, old.card_number_tail, old.identity_last_name);
+  INSERT INTO meta_fts(rowid, name, uris, fields_plain, card_number_tail, identity_last_name) VALUES (new.rowid, new.name, new.uris, new.fields_plain, new.card_number_tail, new.identity_last_name);
 END;
 
 CREATE TABLE IF NOT EXISTS overlay(

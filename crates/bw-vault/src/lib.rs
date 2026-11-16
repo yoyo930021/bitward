@@ -264,6 +264,11 @@ pub struct PlainIndex {
     /// 自訂欄**欄名**（v5 三件套）。欄值是 Secret（§2.1 分級表
     /// `FieldValue`），hidden 欄值更不得落明文檔——這裡只收 name。
     pub field_names: Vec<String>,
+    /// 卡片末四碼明文（PR1 值搜尋，Q4 准則做）：僅 kind==Card 且有卡號時回填。
+    /// 卡號本體屬 Secret（`CardNumber`），明文索引只收末四碼（遮罩顯示同形）。
+    pub card_number_tail: Option<String>,
+    /// 身分姓氏明文（PR1 值搜尋）：僅 kind==Identity 且有 lastName 時回填。
+    pub identity_last_name: Option<String>,
 }
 
 /// 鏡像密文 → 明文索引欄。`dec` 形態同 [`flatten`]（信封字串 → 明文；
@@ -293,12 +298,34 @@ pub fn plain_index(cipher: &serde_json::Value, dec: &dyn Fn(&str) -> Option<Stri
                 .collect()
         })
         .unwrap_or_default();
+    // 型別節值搜尋（PR1，Q4）：卡片末四碼＋身分姓氏。走 conditionalEncString
+    // 寬容解密（明文欄原樣）；末四碼只取字串尾 4 字元（遮罩顯示同形，
+    // 不洩全號）。
+    let card_number_tail = cipher
+        .pointer("/card/number")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|s| dec_conditional(dec, s))
+        .map(|num| {
+            let chars: Vec<char> = num.chars().collect();
+            let n = chars.len();
+            if n <= 4 {
+                num
+            } else {
+                chars[n - 4..].iter().collect()
+            }
+        });
+    let identity_last_name = cipher
+        .pointer("/identity/lastName")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|s| dec_conditional(dec, s));
     PlainIndex {
         name: field(cipher.get("name")),
         uris,
         username: field(login.and_then(|l| l.get("username"))),
         password: field(login.and_then(|l| l.get("password"))),
         field_names,
+        card_number_tail,
+        identity_last_name,
     }
 }
 
@@ -841,7 +868,6 @@ mod tests {
         // card 節進座標系（PR1）；`x:` 不像信封＝conditionalEncString
         // 明文寬容態，原樣入欄
         assert_eq!(m["card.number"].as_deref(), Some("x:4242424242424242"));
-        assert!(!m.contains_key("number"), "不得落回裸鍵名");
         assert!(!m.contains_key("number"), "不得落回裸鍵名");
     }
 

@@ -475,8 +475,7 @@ fn credentials_section(
 /// 編輯態欄位組在 `form::card_fields_editor`（子批 b）。
 fn card_section(core: AppCore, copied: Signal<Option<&'static str>>, editing: bool) -> Vec<View> {
     if editing {
-        // 編輯欄位組（form::card_fields_editor）在子批 b 落地
-        return Vec::new();
+        return vec![form::card_fields_editor(core)];
     }
     let mut rows = Vec::new();
     let holder = detail_disp(&core, |d| {
@@ -629,8 +628,7 @@ fn identity_section(
     editing: bool,
 ) -> Vec<View> {
     if editing {
-        // 編輯欄位組（form::identity_fields_editor）在子批 b 落地
-        return Vec::new();
+        return vec![form::identity_fields_editor(core)];
     }
     let pick = |key: &'static str| -> Disp {
         let core = core.clone();

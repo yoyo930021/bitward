@@ -16,9 +16,10 @@ use crate::theme;
 use crate::ui;
 
 /// 欄位可見性（純函數，單測點）：帳密三欄（帳號/密碼/產生器/網址）僅
-/// 非 SecureNote 顯示；備註/標籤/自訂欄位/資料夾兩型別皆顯示。
+/// Login 顯示（PR1：Card/Identity 有自己的型別節欄位組，不再走登入形態）；
+/// 備註/標籤/自訂欄位/資料夾四型別皆顯示。
 pub fn shows_credentials(kind: ItemKind) -> bool {
-    kind != ItemKind::SecureNote
+    kind == ItemKind::Login
 }
 
 /// 右欄 inline 編輯器（新增／編輯共用，詳情 view↔edit 態翻轉）：
@@ -36,6 +37,10 @@ pub fn pane(core: AppCore) -> View {
     let tags = core.form.tags;
     let cred_cond = core.clone();
     let cred_build = core.clone();
+    let card_cond = core.clone();
+    let card_build = core.clone();
+    let idn_cond = core.clone();
+    let idn_build = core.clone();
     let note_cond = core.clone();
     let note_build = core.clone();
     view()
@@ -69,51 +74,65 @@ pub fn pane(core: AppCore) -> View {
                 ),
         )
         .child(view().h(px(1.0)).mx_8().bg(theme::HAIRLINE))
-        .child(scroll().flex_1().child(
-            view()
-                .flex_col()
-                .gap(px(theme::FORM_GAP))
-                .px_8()
-                .py_4()
-                .w_full()
-                .max_w(px(680.0))
-                .child(type_switcher(core.clone(), is_create))
-                .child(ui::form_field("名稱", "例：GitHub", name, false, move |v| {
-                    name.set(v)
-                }))
-                .child(folder_dropdown(core.clone()))
-                .child(when(
-                    move || shows_credentials(cred_cond.form.kind.get()),
-                    move || credentials_block(cred_build.clone()),
-                ))
-                .child(when(
-                    move || !shows_credentials(note_cond.form.kind.get()),
-                    move || {
-                        let notes = note_build.form.notes;
-                        ui::form_field(
-                            "備註",
-                            "筆記內容（明文進入 Outgoing 幀）",
-                            notes,
-                            false,
-                            move |v| notes.set(v),
-                        )
-                    },
-                ))
-                .child(custom_fields_editor(core.clone()))
-                .child(ui::form_field(
-                    "標籤",
-                    "逗號分隔，例：dev, 工作",
-                    tags,
-                    false,
-                    move |v| tags.set(v),
-                ))
-                .child(
-                    text(move || err_core.form.error.get().unwrap_or_default())
-                        .text_size(px(12.5))
-                        .line_height(px(18.0))
-                        .text_color(theme::DESTRUCTIVE),
-                ),
-        ))
+        .child(
+            scroll().flex_1().child(
+                view()
+                    .flex_col()
+                    .gap(px(theme::FORM_GAP))
+                    .px_8()
+                    .py_4()
+                    .w_full()
+                    .max_w(px(680.0))
+                    .child(type_switcher(core.clone(), is_create))
+                    .child(ui::form_field(
+                        "名稱",
+                        "例：GitHub",
+                        name,
+                        false,
+                        move |v| name.set(v),
+                    ))
+                    .child(folder_dropdown(core.clone()))
+                    .child(when(
+                        move || shows_credentials(cred_cond.form.kind.get()),
+                        move || credentials_block(cred_build.clone()),
+                    ))
+                    .child(when(
+                        move || card_cond.form.kind.get() == ItemKind::Card,
+                        move || card_fields_editor(card_build.clone()),
+                    ))
+                    .child(when(
+                        move || idn_cond.form.kind.get() == ItemKind::Identity,
+                        move || identity_fields_editor(idn_build.clone()),
+                    ))
+                    .child(when(
+                        move || !shows_credentials(note_cond.form.kind.get()),
+                        move || {
+                            let notes = note_build.form.notes;
+                            ui::form_field(
+                                "備註",
+                                "筆記內容（明文進入 Outgoing 幀）",
+                                notes,
+                                false,
+                                move |v| notes.set(v),
+                            )
+                        },
+                    ))
+                    .child(custom_fields_editor(core.clone()))
+                    .child(ui::form_field(
+                        "標籤",
+                        "逗號分隔，例：dev, 工作",
+                        tags,
+                        false,
+                        move |v| tags.set(v),
+                    ))
+                    .child(
+                        text(move || err_core.form.error.get().unwrap_or_default())
+                            .text_size(px(12.5))
+                            .line_height(px(18.0))
+                            .text_color(theme::DESTRUCTIVE),
+                    ),
+            ),
+        )
 }
 
 /// 密碼欄提示（依 Route）；抽出以保持 `when` 閉包單純。
@@ -342,8 +361,8 @@ fn uri_match_panel(
         .child(ui::card(rows).w(px(theme::KIND_MENU_W)))
 }
 
-/// 型別切換列：建立時可選 登入／加密筆記；Card/Identity 佔位 disabled
-/// （daemon 未支援）。編輯模式型別不可改（FieldEdit 無 type 路徑）。
+/// 型別切換列：建立時可選 登入／加密筆記／卡片／身分（PR1 解禁四型別）。
+/// 編輯模式型別不可改（FieldEdit 無 type 路徑）。
 pub(crate) fn type_switcher(core: AppCore, is_create: bool) -> View {
     let kind = core.form.kind;
     let l_core = core.clone();
@@ -381,19 +400,135 @@ pub(crate) fn type_switcher(core: AppCore, is_create: bool) -> View {
                 ))
                 .child(type_chip(
                     "卡片",
-                    || false,
-                    false,
-                    Some("daemon 尚未支援卡片型別"),
+                    move || kind.get() == ItemKind::Card,
+                    is_create,
+                    if is_create {
+                        None
+                    } else {
+                        Some("型別於建立後不可更改")
+                    },
                     move || c_core.form.kind.set(ItemKind::Card),
                 ))
                 .child(type_chip(
                     "身分",
-                    || false,
-                    false,
-                    Some("daemon 尚未支援身分別"),
+                    move || kind.get() == ItemKind::Identity,
+                    is_create,
+                    if is_create {
+                        None
+                    } else {
+                        Some("型別於建立後不可更改")
+                    },
                     move || i_core.form.kind.set(ItemKind::Identity),
                 )),
         )
+}
+
+/// 卡片欄位組（PR1 子批 b）：六欄官方序，卡號/CVV secure 輸入（明文只進
+/// 訊號與送出副本，同 password 紀律）。建立與編輯共用同一份（單源）。
+pub(crate) fn card_fields_editor(core: AppCore) -> View {
+    let c = core.form.card;
+    view()
+        .flex_col()
+        .gap(px(theme::FORM_GAP))
+        .child(ui::form_field(
+            "持卡人",
+            "卡面姓名",
+            c.cardholder_name,
+            false,
+            {
+                let c = c.cardholder_name;
+                move |v| c.set(v)
+            },
+        ))
+        .child(ui::form_field("品牌", "例：Visa", c.brand, false, {
+            let c = c.brand;
+            move |v| c.set(v)
+        }))
+        .child(ui::form_field(
+            "卡號",
+            "完整卡號（明文只進本機線）",
+            c.number,
+            true,
+            {
+                let c = c.number;
+                move |v| c.set(v)
+            },
+        ))
+        .child(
+            view()
+                .flex_row()
+                .items_end()
+                .gap_2()
+                .child(
+                    ui::form_field("有效月份", "1–12", c.exp_month, false, {
+                        let c = c.exp_month;
+                        move |v| c.set(v)
+                    })
+                    .flex_1(),
+                )
+                .child(
+                    ui::form_field("有效年份", "例：2032", c.exp_year, false, {
+                        let c = c.exp_year;
+                        move |v| c.set(v)
+                    })
+                    .flex_1(),
+                ),
+        )
+        .child(ui::form_field(
+            "安全碼（CVV）",
+            "卡面三／四位",
+            c.code,
+            true,
+            {
+                let c = c.code;
+                move |v| c.set(v)
+            },
+        ))
+}
+
+/// 身分欄位組（PR1 子批 b）：十八欄三組（姓名／地址／聯絡與證件），
+/// 建立與編輯共用同一份（單源）。
+pub(crate) fn identity_fields_editor(core: AppCore) -> View {
+    let i = core.form.identity;
+    let field = |label: &'static str, ph: &'static str, sig: nsh_core::prelude::Signal<String>| {
+        ui::form_field(label, ph, sig, false, move |v| sig.set(v))
+    };
+    view()
+        .flex_col()
+        .gap(px(theme::FORM_GAP))
+        .child(ui::section_title("姓名"))
+        .child(field("稱謂", "例：Mr.", i.title))
+        .child(
+            view()
+                .flex_row()
+                .items_end()
+                .gap_2()
+                .child(field("姓", "", i.last_name).flex_1())
+                .child(field("中間名", "", i.middle_name).flex_1())
+                .child(field("名", "", i.first_name).flex_1()),
+        )
+        .child(ui::section_title("地址"))
+        .child(field("地址 1", "", i.address1))
+        .child(field("地址 2", "", i.address2))
+        .child(field("地址 3", "", i.address3))
+        .child(
+            view()
+                .flex_row()
+                .items_end()
+                .gap_2()
+                .child(field("城市", "", i.city).flex_1())
+                .child(field("州／省", "", i.state).flex_1())
+                .child(field("郵遞區號", "", i.postal_code).flex_1()),
+        )
+        .child(field("國家", "", i.country))
+        .child(ui::section_title("聯絡與證件"))
+        .child(field("公司", "", i.company))
+        .child(field("Email", "", i.email))
+        .child(field("電話", "", i.phone))
+        .child(field("身份證號", "", i.ssn))
+        .child(field("使用者名稱", "", i.username))
+        .child(field("護照號碼", "", i.passport_number))
+        .child(field("駕照號碼", "", i.license_number))
 }
 
 /// 型別膠囊：disabled 時灰字＋tooltip，不接 onPressed。
@@ -1018,8 +1153,8 @@ mod tests {
     fn secure_note_hides_credential_fields() {
         assert!(shows_credentials(ItemKind::Login));
         assert!(!shows_credentials(ItemKind::SecureNote));
-        // 佔位型別走登入形態（尚未開放，但可見性預設與登入同）。
-        assert!(shows_credentials(ItemKind::Card));
-        assert!(shows_credentials(ItemKind::Identity));
+        // PR1：Card/Identity 有自己的型別節欄位組，不走登入形態。
+        assert!(!shows_credentials(ItemKind::Card));
+        assert!(!shows_credentials(ItemKind::Identity));
     }
 }

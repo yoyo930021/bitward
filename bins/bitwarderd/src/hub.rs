@@ -1345,6 +1345,12 @@ impl Hub {
             let _ =
                 self.store
                     .set_plain_secrets(*id, idx.username.as_deref(), idx.password.as_deref());
+            // 型別節值搜尋（PR1 子批 d）：卡片末四碼＋身分姓氏。
+            let _ = self.store.set_plain_type_nodes(
+                *id,
+                idx.card_number_tail.as_deref(),
+                idx.identity_last_name.as_deref(),
+            );
         }
         Ok(())
     }

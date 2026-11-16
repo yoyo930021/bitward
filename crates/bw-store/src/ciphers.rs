@@ -182,6 +182,23 @@ impl Store {
         Ok(())
     }
 
+    /// 型別節值搜尋明文索引（PR1 子批 d，Q4 准則做）：卡片末四碼＋身分姓氏。
+    /// 僅解鎖回填時呼叫（同 set_plain_secrets 紀律，0600 檔承載）；非型別節
+    /// 項目呼叫端傳 None＝清 null。
+    pub fn set_plain_type_nodes(
+        &self,
+        id: ItemId,
+        card_number_tail: Option<&str>,
+        identity_last_name: Option<&str>,
+    ) -> StoreResult<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "UPDATE meta_plain SET card_number_tail = ?2, identity_last_name = ?3 WHERE id = ?1",
+            rusqlite::params![id.to_string(), card_number_tail, identity_last_name],
+        )?;
+        Ok(())
+    }
+
     pub fn item(&self, id: ItemId) -> StoreResult<Option<CipherRow>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let row = conn
