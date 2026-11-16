@@ -379,14 +379,9 @@ enum TagCmd {
 #[derive(Subcommand)]
 enum AttachCmd {
     /// 上傳檔案（≤32MiB；離線自動入佇列收斂）
-    Add {
-        item: String,
-        path: String,
-    },
+    Add { item: String, path: String },
     /// 列附件（元資料；需解鎖——檔名是信封字串）
-    Ls {
-        item: String,
-    },
+    Ls { item: String },
     /// 下載到檔案（`-`＝stdout）
     Get {
         item: String,
@@ -948,9 +943,15 @@ async fn run() -> Result<(), String> {
         eprintln!("AutoType: 準備倒數 3 秒後注入按鍵，請切到目標視窗");
     }
     let rid = 1u64;
-    write_client(&mut wr, &ClientMsg::Invoke { rid, call: call.clone() })
-        .await
-        .map_err(|e| e.to_string())?;
+    write_client(
+        &mut wr,
+        &ClientMsg::Invoke {
+            rid,
+            call: call.clone(),
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     let mut reply = await_reply(&mut rd, rid).await?;
     if matches!(args.cmd, Cmd::Login { .. }) {
         reply = login_2fa_rounds(&mut rd, &mut wr, &call, reply, rid).await?;
@@ -969,16 +970,16 @@ async fn run() -> Result<(), String> {
                 // 附件內容寫檔不走 stdout（二進位；`-`＝stdout 供管線）
                 if out == "-" {
                     use std::io::Write as _;
-                    std::io::stdout().write_all(bytes).map_err(|e| e.to_string())?;
+                    std::io::stdout()
+                        .write_all(bytes)
+                        .map_err(|e| e.to_string())?;
                 } else {
                     std::fs::write(out, bytes).map_err(|e| format!("寫檔失敗：{e}"))?;
                     println!("ok ({} bytes)", bytes.len());
                 }
                 return Ok(());
             }
-            if matches!(args.cmd, Cmd::ChangePassword)
-                && matches!(resp, Response::Ok)
-                && !args.json
+            if matches!(args.cmd, Cmd::ChangePassword) && matches!(resp, Response::Ok) && !args.json
             {
                 println!("主密碼已變更");
             } else if !args.json
@@ -1115,11 +1116,7 @@ async fn login_2fa_rounds(
             } else {
                 "此因子尚未支援，請改選其他因子"
             };
-            eprintln!(
-                "{}：{}（{why}）",
-                TwoFactorProviderInfo::label(pick),
-                pick
-            );
+            eprintln!("{}：{}（{why}）", TwoFactorProviderInfo::label(pick), pick);
             reply = Ok(Response::TwoFactorRequest {
                 providers: providers.clone(),
             });
@@ -1356,6 +1353,14 @@ async fn hub_cmd(cmd: &HubCmd, data_dir: &Path, json: bool) -> Result<(), String
                 println!("{}", serde_json::to_string_pretty(&rows).unwrap());
                 return Ok(());
             }
+            println!(
+                "{:<12} {:<44} {:<8} {:<14} {}",
+                "HUB",
+                "URL",
+                "DEFAULT",
+                "LAST_SEEN",
+                if *probe { "PROBE" } else { "" }.trim_end()
+            );
             for r in &rows {
                 let seen = match r["last_seen"].as_u64() {
                     Some(ms) => format!("{}s ago", chrono_now_ms().saturating_sub(ms) / 1000),
@@ -1528,7 +1533,9 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             // 提示與警告走 stderr，stdout 留給結果行（機器可讀慣例）。
             // 強度閘不在此重複實作——daemon（hub::MIN_MASTER_PASSWORD）是唯一
             // 真相源，短碼由它拒絕、錯誤原文經 Reply 回程顯示。
-            eprintln!("請依序輸入現有主密碼、新主密碼（至少 12 字元）；注意：改密後其他裝置需重新登入");
+            eprintln!(
+                "請依序輸入現有主密碼、新主密碼（至少 12 字元）；注意：改密後其他裝置需重新登入"
+            );
             let current = read_line_stdin()?;
             let new = read_line_stdin()?;
             Call::Auth(AuthCall::ChangePassword {
@@ -1537,6 +1544,37 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             })
         }
         Cmd::Status => Call::Admin(AdminCall::Diagnostics),
+        Cmd::TwoFactor { cmd } => Call::TwoFactor(match cmd {
+            TwoFactorCmd::Ls => TwoFactorCall::List,
+            TwoFactorCmd::TotpKey => TwoFactorCall::GetAuthenticator {
+                master_password: Some(read_line_stdin()?),
+            },
+            TwoFactorCmd::TotpEnable { key } => TwoFactorCall::EnableAuthenticator {
+                master_password: Some(read_line_stdin()?),
+                token: read_line_stdin()?,
+                key: key.clone(),
+            },
+            TwoFactorCmd::Recovery => TwoFactorCall::GetRecoveryCode {
+                master_password: Some(read_line_stdin()?),
+            },
+            TwoFactorCmd::EmailSend { email } => TwoFactorCall::EmailSendCode {
+                master_password: Some(read_line_stdin()?),
+                email: email.clone(),
+            },
+            TwoFactorCmd::EmailVerify { email, token } => TwoFactorCall::EmailVerify {
+                master_password: Some(read_line_stdin()?),
+                email: email.clone(),
+                token: token.clone(),
+            },
+            TwoFactorCmd::YubikeyAdd => TwoFactorCall::EnableYubikey {
+                master_password: Some(read_line_stdin()?),
+                otp: read_line_stdin()?,
+            },
+            TwoFactorCmd::Disable { provider } => TwoFactorCall::Disable {
+                master_password: Some(read_line_stdin()?),
+                provider: *provider,
+            },
+        }),
         Cmd::Settings { cmd } => match cmd {
             SettingsCmd::Show => Call::Admin(AdminCall::GetSettings),
             SettingsCmd::Set { payload } => {
@@ -1760,9 +1798,9 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
         }
         Cmd::Folder { cmd } => match cmd {
             FolderCmd::Ls => Call::Vault(VaultCall::ListFolders),
-            FolderCmd::Create { name } => Call::Vault(VaultCall::CreateFolder {
-                name: name.clone(),
-            }),
+            FolderCmd::Create { name } => {
+                Call::Vault(VaultCall::CreateFolder { name: name.clone() })
+            }
             FolderCmd::Delete { id } => Call::Vault(VaultCall::DeleteFolder { id: parse_id(id)? }),
         },
         Cmd::Archive { id, on } => Call::Vault(VaultCall::SetArchived {
@@ -1815,7 +1853,9 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                     "text" => CipherFieldKind::Text,
                     "hidden" => CipherFieldKind::Hidden,
                     "boolean" => CipherFieldKind::Boolean,
-                    other => return Err(format!("--set-type 值域 text|hidden|boolean，got {other}")),
+                    other => {
+                        return Err(format!("--set-type 值域 text|hidden|boolean，got {other}"));
+                    }
                 };
                 edits.push(FieldEdit::SetType { index, kind });
             }
@@ -1970,7 +2010,9 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                 ("history", Some(i)) => bw_proto::Reports::CipherHistory { id: parse_id(i)? },
                 ("history", None) => return Err("reports history 需要 --id".into()),
                 other => {
-                    return Err(format!("reports 子命令值域 reuse|weak|history，got {other:?}"));
+                    return Err(format!(
+                        "reports 子命令值域 reuse|weak|history，got {other:?}"
+                    ));
                 }
             };
             Call::Vault(VaultCall::Reports { sub })
@@ -2008,8 +2050,7 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                         .file_name()
                         .map(|s| s.to_string_lossy().into_owned())
                         .unwrap_or_else(|| path.clone());
-                    let bytes =
-                        std::fs::read(path).map_err(|e| format!("讀不到分享檔：{e}"))?;
+                    let bytes = std::fs::read(path).map_err(|e| format!("讀不到分享檔：{e}"))?;
                     (
                         name.clone(),
                         bw_proto::SendContent::File { file_name, bytes },
@@ -2121,10 +2162,7 @@ fn parse_id(s: &str) -> Result<ItemId, String> {
 
 /// `--field k=v` / `--field! k=v` / `--field? k=v`：官方自訂欄。
 /// boolean 欄值域 true|false（與 jslib 同形存字串）。
-fn parse_field_pairs(
-    pairs: &[String],
-    kind: CipherFieldKind,
-) -> Result<Vec<CipherField>, String> {
+fn parse_field_pairs(pairs: &[String], kind: CipherFieldKind) -> Result<Vec<CipherField>, String> {
     pairs
         .iter()
         .map(|s| {
@@ -2153,7 +2191,11 @@ fn parse_import_items(v: &serde_json::Value) -> Result<Vec<ImportItem>, String> 
     let arr = v
         .as_array()
         .cloned()
-        .or_else(|| v.get("items").and_then(serde_json::Value::as_array).cloned())
+        .or_else(|| {
+            v.get("items")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+        })
         .ok_or_else(|| "需要 JSON 陣列或 {\"items\":[...]}".to_string())?;
     arr.iter().map(parse_import_item).collect()
 }
@@ -2180,7 +2222,10 @@ fn parse_import_item(c: &serde_json::Value) -> Result<ImportItem, String> {
         _ => ItemKind::Login,
     };
     // 官方匯出把帳密放 login 子物件；扁平形態直接讀頂層欄
-    let login = c.get("login").cloned().unwrap_or_else(|| serde_json::json!({}));
+    let login = c
+        .get("login")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
     let pick = |key: &str| -> Option<String> {
         c.get(key)
             .or_else(|| login.get(key))
@@ -2227,9 +2272,14 @@ fn parse_import_item(c: &serde_json::Value) -> Result<ImportItem, String> {
                     let name = f.get("name").and_then(serde_json::Value::as_str)?;
                     Some(CipherField {
                         name: name.to_owned(),
-                        value: f.get("value").and_then(serde_json::Value::as_str).map(str::to_owned),
+                        value: f
+                            .get("value")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned),
                         kind: CipherFieldKind::from_wire(
-                            f.get("type").and_then(serde_json::Value::as_i64).unwrap_or(0),
+                            f.get("type")
+                                .and_then(serde_json::Value::as_i64)
+                                .unwrap_or(0),
                         ),
                     })
                 })
@@ -2418,7 +2468,11 @@ fn print_response(resp: &Response, json: bool) {
 /// hidden 欄值缺席時以 ••• 代（daemon 未在該視窗返回值＝金鑰不可見）。
 fn format_item(v: &ItemView) -> String {
     let mut out = String::new();
-    out.push_str(&format!("{}  {}\n", v.meta.id, v.meta.name.clone().unwrap_or_default()));
+    out.push_str(&format!(
+        "{}  {}\n",
+        v.meta.id,
+        v.meta.name.clone().unwrap_or_default()
+    ));
     out.push_str(&format!("type: {:?}\n", v.meta.kind));
     if let Some(f) = &v.meta.folder_id {
         out.push_str(&format!("folder: {f}\n"));
@@ -2733,7 +2787,9 @@ fn emit_accessed(accessed: Accessed, out: Option<&str>, json: bool) -> Result<()
         } => {
             let path = out.unwrap_or(&file_name).to_owned();
             if path == "-" {
-                std::io::stdout().write_all(&bytes).map_err(|e| e.to_string())?;
+                std::io::stdout()
+                    .write_all(&bytes)
+                    .map_err(|e| e.to_string())?;
             } else {
                 std::fs::write(&path, &bytes).map_err(|e| format!("寫檔失敗：{e}"))?;
                 if json {
@@ -2827,14 +2883,29 @@ mod access_tests {
     #[test]
     fn url_parse_official_shape_and_errors() {
         let seed = seed_key();
-        let url = format!("http://127.0.0.1:9/#/send/ACC-IDA/{}", bw_crypto::b64url(seed.as_bytes()));
+        let url = format!(
+            "http://127.0.0.1:9/#/send/ACC-IDA/{}",
+            bw_crypto::b64url(seed.as_bytes())
+        );
         let (base, aid, k) = parse_send_url(&url).unwrap();
         assert_eq!(base, "http://127.0.0.1:9/");
         assert_eq!(aid, "ACC-IDA");
         assert_eq!(k.as_bytes(), seed.as_bytes());
-        assert!(parse_send_url("http://x/#/send/A/AAAAAAAAAAAAAAAAAAAA").unwrap_err().contains("16"));
-        assert!(parse_send_url("http://x/send/A/B").unwrap_err().contains("片段"));
-        assert!(parse_send_url("http://x/#/vault/AAECAwQFBgcICQoLDA0ODw").unwrap_err().contains("send"));
+        assert!(
+            parse_send_url("http://x/#/send/A/AAAAAAAAAAAAAAAAAAAA")
+                .unwrap_err()
+                .contains("16")
+        );
+        assert!(
+            parse_send_url("http://x/send/A/B")
+                .unwrap_err()
+                .contains("片段")
+        );
+        assert!(
+            parse_send_url("http://x/#/vault/AAECAwQFBgcICQoLDA0ODw")
+                .unwrap_err()
+                .contains("send")
+        );
     }
 
     #[tokio::test]
@@ -2842,15 +2913,23 @@ mod access_tests {
         let seed = seed_key();
         let aid = "ACC-ERR";
         let mk = |status: u16| {
-            let routes = vec![("/api/sends/access/ACC-ERR", status, "{}".to_string(), "application/json")];
+            let routes = vec![(
+                "/api/sends/access/ACC-ERR",
+                status,
+                "{}".to_string(),
+                "application/json",
+            )];
             mock_server(routes)
         };
-        let url_for = |base: &str| format!("{base}/#/send/{aid}/{}", bw_crypto::b64url(seed.as_bytes()));
+        let url_for =
+            |base: &str| format!("{base}/#/send/{aid}/{}", bw_crypto::b64url(seed.as_bytes()));
         // 401 → 需密碼文案
         let e = access_send(&url_for(&mk(401)), None).await.unwrap_err();
         assert!(e.contains("取用密碼"), "{e}");
         // 400 → 錯密碼文案
-        let e = access_send(&url_for(&mk(400)), Some("nope")).await.unwrap_err();
+        let e = access_send(&url_for(&mk(400)), Some("nope"))
+            .await
+            .unwrap_err();
         assert!(e.contains("不正確"), "{e}");
         // 404 → 不可用文案（過期／耗盡／刪除合併態）
         let e = access_send(&url_for(&mk(404)), None).await.unwrap_err();
@@ -2873,15 +2952,16 @@ mod access_tests {
             "text": {"text": enc(ck.as_slice(), "敏感文字 42"), "hidden": false},
             "object": "send-access",
         });
-        let base = mock_server(vec![
-            (
-                "/api/sends/access/ACC-OK",
-                200,
-                body.to_string(),
-                "application/json",
-            ),
-        ]);
-        let url = format!("{base}/#/send/ACC-OK/{}", bw_crypto::b64url(seed.as_bytes()));
+        let base = mock_server(vec![(
+            "/api/sends/access/ACC-OK",
+            200,
+            body.to_string(),
+            "application/json",
+        )]);
+        let url = format!(
+            "{base}/#/send/ACC-OK/{}",
+            bw_crypto::b64url(seed.as_bytes())
+        );
         match access_send(&url, None).await.unwrap() {
             Accessed::Text { name, text } => {
                 assert_eq!(name, "分享標題");
@@ -2908,13 +2988,23 @@ mod access_tests {
         });
         let file_resp = "{\"url\":\"/blob/FID1\"}".to_owned(); // 相對路徑：absolute 補全
         let base = mock_server(vec![
-            ("/api/sends/access/ACC-FILE", 200, acc.to_string(), "application/json"),
+            (
+                "/api/sends/access/ACC-FILE",
+                200,
+                acc.to_string(),
+                "application/json",
+            ),
             ("/access/file/FID1", 200, file_resp, "application/json"),
             ("/blob/FID1", 200, env.clone(), "application/octet-stream"),
         ]);
-        let url = format!("{base}/#/send/ACC-FILE/{}", bw_crypto::b64url(seed.as_bytes()));
+        let url = format!(
+            "{base}/#/send/ACC-FILE/{}",
+            bw_crypto::b64url(seed.as_bytes())
+        );
         match access_send(&url, None).await.unwrap() {
-            Accessed::File { file_name, bytes, .. } => {
+            Accessed::File {
+                file_name, bytes, ..
+            } => {
                 assert_eq!(file_name, "blob.bin");
                 assert_eq!(bytes, payload, "解密位元組應逐字等於原檔");
             }

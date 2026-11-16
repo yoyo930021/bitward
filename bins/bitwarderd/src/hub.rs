@@ -157,7 +157,9 @@ impl Hub {
             // 支援）恒 FileKeyStore——註解既有承諾的代碼化（trunk 在 ubuntu 自 14b
             // 起編不過，本 job 的 linux-check CI 根治）。
             #[cfg(not(target_os = "macos"))]
-            std::sync::Arc::new(FileKeyStore::new(data_dir.join("keys")).map_err(|e| e.to_string())?)
+            std::sync::Arc::new(
+                FileKeyStore::new(data_dir.join("keys")).map_err(|e| e.to_string())?,
+            )
         };
         // 固定 label：首次登入時 account.json 還不存在，若用 email 作 label
         // 會造成封存與載入路徑不一致（A7b 實測教訓）。多帳號（P6）再拆 per-account。
@@ -333,9 +335,7 @@ impl Hub {
             needs_reauth: {
                 let server = self.server.read().await;
                 self.machine.needs_reauth()
-                    || server
-                        .as_ref()
-                        .is_some_and(|h| h.client.needs_relogin())
+                    || server.as_ref().is_some_and(|h| h.client.needs_relogin())
             },
             proto: PROTO_VERSION,
             orgs: self.store.org_count().unwrap_or(0),
@@ -769,6 +769,8 @@ impl Hub {
                     TwoFactorProviderInfo::label(tf.provider)
                 )));
             }
+            let token =
+                TwoFactorProviderInfo::validate_token(tf.provider, &tf.token).map_err(denied)?;
             login = login.two_factor(
                 TwoFactorProviderType::from_i32(tf.provider),
                 token,
@@ -844,6 +846,126 @@ impl Hub {
         Ok(Response::Status(self.status_info().await))
     }
 
+    /// 服務端 2FA 管理面（PR3 子批 b）：`/two-factor/*` 端點代理。
+    ///
+    /// 需要「已登入」（有 bearer token）但**不需要解鎖態**：因子是帳號在伺服器的
+    /// 狀態，驗身由 `PasswordOrOtpData` 的主密碼 hash 完成。派生在 daemon（金鑰派生
+    /// 的家在 bw-crypto，bw-server 只收已算好的 hash——依賴方向紀律同 §3），
+    /// 主密碼明文只走本機線（紀律同 `AuthCall::Login`/`ChangePassword`，A11）。
+    async fn two_factor_manage(&self, call: &TwoFactorCall) -> DispatchResult {
+        use TwoFactorCall as T;
+        let acc = self
+            .account
+            .read()
+            .await
+            .clone()
+            .ok_or(WtpError::NotFound)?;
+        let guard = self.server.read().await;
+        let h = guard.as_ref().ok_or(WtpError::NotFound)?;
+        let client = &h.client;
+        // 需要驗身的端點：主密碼 → masterPasswordHash（錯密碼由伺服器裁判）。
+        let hash_of = |pw: &Option<String>| -> Result<String, WtpError> {
+            let pw = pw
+                .as_deref()
+                .ok_or_else(|| denied("此操作需要主密碼（經本機線送，不落 argv）"))?;
+            let mk = bw_crypto::master_key(pw, &acc.email, kdf_params(&acc))
+                .map_err(|_| denied("主密碼無法派生金鑰"))?;
+            Ok(bw_crypto::master_password_hash(&mk, pw).as_b64().to_owned())
+        };
+        match call {
+            T::List => {
+                let states = client.two_factor_list().await.map_err(map_server_err)?;
+                Ok(Response::TwoFactorStates(states))
+            }
+            T::GetAuthenticator { master_password } => {
+                let hash = hash_of(master_password)?;
+                let key = client
+                    .two_factor_authenticator_key(&hash)
+                    .await
+                    .map_err(map_server_err)?;
+                // otpauth URI 在本機組（伺服器只給 key）：issuer 用伺服器 URL、
+                // label 用帳號 email，與官方 web vault 同形態。
+                let uri = bw_server::two_factor::otpauth_uri(&key.key, &acc.email, &acc.server);
+                Ok(Response::TwoFactorTotp {
+                    secret: key.key,
+                    key_uri: Some(uri),
+                })
+            }
+            T::EnableAuthenticator {
+                master_password,
+                token,
+                key,
+            } => {
+                let hash = hash_of(master_password)?;
+                let token = TwoFactorProviderInfo::validate_token(0, token).map_err(denied)?;
+                client
+                    .two_factor_enable_authenticator(&hash, key, &token)
+                    .await
+                    .map_err(map_server_err)?;
+                Ok(Response::Ok)
+            }
+            T::Disable {
+                master_password,
+                provider,
+            } => {
+                // 停用不限白名單（4=U2f 遺留條目也要能清），但編號得是已知因子。
+                if !matches!(provider, 0..=8) {
+                    return Err(denied(format!("未知因子編號 {provider}")));
+                }
+                let hash = hash_of(master_password)?;
+                client
+                    .two_factor_disable(&hash, *provider)
+                    .await
+                    .map_err(map_server_err)?;
+                Ok(Response::Ok)
+            }
+            T::GetRecoveryCode { master_password } => {
+                let hash = hash_of(master_password)?;
+                let code = client
+                    .two_factor_recovery_code(&hash)
+                    .await
+                    .map_err(map_server_err)?;
+                Ok(Response::TwoFactorRecoveryCode(code))
+            }
+            T::EmailSendCode {
+                master_password,
+                email,
+            } => {
+                let hash = hash_of(master_password)?;
+                client
+                    .two_factor_send_email_code(&hash, email)
+                    .await
+                    .map_err(map_server_err)?;
+                Ok(Response::Ok)
+            }
+            T::EmailVerify {
+                master_password,
+                email,
+                token,
+            } => {
+                let hash = hash_of(master_password)?;
+                let token = TwoFactorProviderInfo::validate_token(1, token).map_err(denied)?;
+                client
+                    .two_factor_verify_email(&hash, email, &token)
+                    .await
+                    .map_err(map_server_err)?;
+                Ok(Response::Ok)
+            }
+            T::EnableYubikey {
+                master_password,
+                otp,
+            } => {
+                let hash = hash_of(master_password)?;
+                let otp = TwoFactorProviderInfo::validate_token(3, otp).map_err(denied)?;
+                client
+                    .two_factor_enable_yubikey(&hash, &otp, false)
+                    .await
+                    .map_err(map_server_err)?;
+                Ok(Response::Ok)
+            }
+        }
+    }
+
     /// 改主密碼（切片 A 契約 2）。順序即收斂策略：
     ///
     /// 1. 解鎖態閘（改密要拿 user key 驗私鑰鏈）；強度閘 12 字（契約 2c）。
@@ -891,7 +1013,9 @@ impl Hub {
             })
             .unwrap_or(false);
         if !chain_ok {
-            return Err(denied("金鑰鏈不完整（封存私鑰解不開），請先鎖庫以現有密碼重新解鎖"));
+            return Err(denied(
+                "金鑰鏈不完整（封存私鑰解不開），請先鎖庫以現有密碼重新解鎖",
+            ));
         }
         // 驗 current：先本地（舊 master key 解 protected user key 信封並與
         // 解封態金鑰包一致）；本地不過**不直接拒**——信封可能過期（上次改密
@@ -933,8 +1057,7 @@ impl Hub {
                     ))
                     .await
                     .map_err(|e| match e {
-                        ServerError::Http { status: 400, .. }
-                        | ServerError::Rejected(_) => {
+                        ServerError::Http { status: 400, .. } | ServerError::Rejected(_) => {
                             denied("現有密碼不正確（伺服器拒絕重登入）")
                         }
                         other => map_server_err(other),
@@ -948,9 +1071,10 @@ impl Hub {
         if !local_ok {
             // 本地已判不了，伺服器的 400 原文就是最終答案。
             post.map_err(|e| match e {
-                ServerError::Http { status: 400, detail } => {
-                    denied(format!("現有密碼不正確（伺服器拒絕：{detail}）"))
-                }
+                ServerError::Http {
+                    status: 400,
+                    detail,
+                } => denied(format!("現有密碼不正確（伺服器拒絕：{detail}）")),
                 other => map_server_err(other),
             })?;
         } else {
@@ -968,9 +1092,11 @@ impl Hub {
                 self.device.clone(),
             ))
             .await
-            .map_err(|e| drift(format!(
-                "遠端密碼已改，但新密碼重登入失敗（{e}）；請以新密碼重跑 change-password 收斂"
-            )))?;
+            .map_err(|e| {
+                drift(format!(
+                    "遠端密碼已改，但新密碼重登入失敗（{e}）；請以新密碼重跑 change-password 收斂"
+                ))
+            })?;
         drop(server);
         if bundle.keys.as_ref().and_then(|k| k.key.as_deref()) != Some(wrapped_new.as_str()) {
             return Err(drift(
@@ -990,9 +1116,11 @@ impl Hub {
             .submit(UnlockMaterial::MasterPassword(Zeroizing::new(
                 new.to_owned(),
             )))
-            .map_err(|e| drift(format!(
-                "遠端密碼已改，但新密碼本地自查失敗（{e}）；請重跑 change-password 收斂"
-            )))?;
+            .map_err(|e| {
+                drift(format!(
+                    "遠端密碼已改，但新密碼本地自查失敗（{e}）；請重跑 change-password 收斂"
+                ))
+            })?;
         acc.protected_user_key = wrapped_new;
         acc.access_token = Some(bundle.access_token.clone());
         if let Some(r) = bundle.refresh_token.clone() {
@@ -1211,12 +1339,12 @@ impl Hub {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            let _ = self
-                .store
-                .set_plain_meta(*id, idx.name.as_deref(), &idx.uris, &idx.field_names);
-            let _ = self
-                .store
-                .set_plain_secrets(*id, idx.username.as_deref(), idx.password.as_deref());
+            let _ =
+                self.store
+                    .set_plain_meta(*id, idx.name.as_deref(), &idx.uris, &idx.field_names);
+            let _ =
+                self.store
+                    .set_plain_secrets(*id, idx.username.as_deref(), idx.password.as_deref());
         }
         Ok(())
     }
@@ -1588,9 +1716,9 @@ fn action_tag(c: &Call) -> String {
         }) => "Vault.Attachment.Delete",
         Call::Vault(VaultCall::SetArchived { .. }) => "Vault.SetArchived",
         Call::Vault(VaultCall::GetIcon { .. }) => "Vault.GetIcon",
-        Call::Vault(VaultCall::Reports { sub: bw_proto::Reports::PasswordReuse }) => {
-            "Vault.Reports.PasswordReuse"
-        }
+        Call::Vault(VaultCall::Reports {
+            sub: bw_proto::Reports::PasswordReuse,
+        }) => "Vault.Reports.PasswordReuse",
         Call::Vault(VaultCall::Reports {
             sub: bw_proto::Reports::WeakPasswords,
         }) => "Vault.Reports.WeakPasswords",
@@ -1664,9 +1792,7 @@ fn sensitivity_of_call(c: &Call, resp: Option<&Response>) -> bw_proto::Sensitivi
     let secret_out = match resp {
         Some(Response::Secret(_)) | Some(Response::AttachmentBytes(_)) => true,
         Some(Response::Item(Some(v))) => {
-            v.password.is_some()
-                || v.notes.is_some()
-                || v.fields.iter().any(|f| f.value.is_some())
+            v.password.is_some() || v.notes.is_some() || v.fields.iter().any(|f| f.value.is_some())
         }
         _ => false,
     };
@@ -1712,7 +1838,10 @@ fn sensitivity_of_call(c: &Call, resp: Option<&Response>) -> bw_proto::Sensitivi
         // Password 明文入程——皆 Secret 級（seed 屬金鑰材料，§2.1 表同 UserKey）；
         // List 只回元資料＋解密名稱（Identity 級，同鏡像列表）、Remove 只摘列
         Call::Vault(VaultCall::Send {
-            sub: bw_proto::SendOp::Create { .. } | bw_proto::SendOp::Get { .. } | bw_proto::SendOp::Password { .. },
+            sub:
+                bw_proto::SendOp::Create { .. }
+                | bw_proto::SendOp::Get { .. }
+                | bw_proto::SendOp::Password { .. },
         }) => Secret,
         Call::Vault(VaultCall::Send { .. }) => Identity,
         Call::Use(UseCall::TotpCode { .. })
@@ -1770,7 +1899,10 @@ mod tests {
         let token = "0123456789ABCDEF0123456789ABCDEF";
         let m = mask_push_token(token);
         assert!(m.starts_with("01234567…"), "前 8 字元保留：{m}");
-        assert!(m.ends_with(&sha256_hex(token)[..12]), "尾段為 sha256 前 12 碼：{m}");
+        assert!(
+            m.ends_with(&sha256_hex(token)[..12]),
+            "尾段為 sha256 前 12 碼：{m}"
+        );
         assert!(!m.contains(token), "完整 token 不得外洩進清單出口");
     }
 
@@ -1860,7 +1992,9 @@ mod tests {
             .dispatch(&sess, &Call::Push(PushCall::ListPush))
             .await
             .unwrap();
-        let Response::Json(v) = resp else { panic!("expect Json") };
+        let Response::Json(v) = resp else {
+            panic!("expect Json")
+        };
         assert_eq!(v.as_array().map(Vec::len), Some(0));
     }
 
@@ -1872,6 +2006,169 @@ mod tests {
 
     /// PR3 管理面分派：未登入快速拒、缺主密碼給可懂原因、清單與取碼走真代理路徑
     /// （本地 mock server 記 method/path/body，斷言 `/two-factor/*` 出線形態）。
+    #[tokio::test]
+    async fn two_factor_management_dispatch_and_gates() {
+        let hub = bare_hub().await;
+        let sess = hub.new_session(
+            "2fa-mgmt".into(),
+            SessionKind::Interactive,
+            bw_agent::GrantSet::default_full(),
+            None,
+            json!({"kind": "local"}),
+        );
+        let err = hub
+            .dispatch(&sess, &Call::TwoFactor(TwoFactorCall::List))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, WtpError::NotFound),
+            "未登入（無 client）應 NotFound，got {err:?}"
+        );
+
+        let (url, hits) = spawn_two_factor_mock();
+        let client = std::sync::Arc::new(Client::with_options(&url, Hub::sync_options()).unwrap());
+        client.set_access_token("AT").await;
+        *hub.server.write().await = Some(ServerHandle { client });
+        *hub.account.write().await = Some(AccountRecord {
+            server: url.clone(),
+            email: "a@b.test".into(),
+            access_token: Some("AT".into()),
+            refresh_token: None,
+            kdf: 0,
+            kdf_iterations: bw_crypto::MIN_PBKDF2_ITERATIONS as u64,
+            kdf_memory: None,
+            kdf_parallelism: None,
+            protected_user_key: "2.a|b|c".into(),
+            keys_fingerprint: None,
+            enc_private_key: None,
+        });
+
+        let resp = hub
+            .dispatch(&sess, &Call::TwoFactor(TwoFactorCall::List))
+            .await
+            .unwrap();
+        match resp {
+            Response::TwoFactorStates(v) => assert_eq!(
+                v.iter().map(|s| s.provider).collect::<Vec<_>>(),
+                vec![0, 8],
+                "清單只留伺服器列出的啟用因子"
+            ),
+            other => panic!("形態不符：{other:?}"),
+        }
+
+        let err = hub
+            .dispatch(
+                &sess,
+                &Call::TwoFactor(TwoFactorCall::GetRecoveryCode {
+                    master_password: None,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, WtpError::Denied { grant_gap } if grant_gap.contains("主密碼")),
+            "缺主密碼應給可懂原因，got {err:?}"
+        );
+
+        let resp = hub
+            .dispatch(
+                &sess,
+                &Call::TwoFactor(TwoFactorCall::GetRecoveryCode {
+                    master_password: Some("pw".into()),
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(&resp, Response::TwoFactorRecoveryCode(Some(c)) if c == "y3xv4t6z"),
+            "{resp:?}"
+        );
+
+        let resp = hub
+            .dispatch(
+                &sess,
+                &Call::TwoFactor(TwoFactorCall::GetAuthenticator {
+                    master_password: Some("pw".into()),
+                }),
+            )
+            .await
+            .unwrap();
+        match resp {
+            Response::TwoFactorTotp { secret, key_uri } => {
+                assert_eq!(secret, "JBSWY3DPEHPK3PXP");
+                let uri = key_uri.expect("daemon 應組出 otpauth URI");
+                assert!(uri.starts_with("otpauth://totp/"), "{uri}");
+                assert!(uri.contains("secret=JBSWY3DPEHPK3PXP"), "{uri}");
+                assert!(uri.contains("a%40b.test"), "label 需 percent 編碼：{uri}");
+            }
+            other => panic!("形態不符：{other:?}"),
+        }
+        // 主密碼明文不得出線：只送 hash（body 內不含 "pw" 原值以外的洩漏）。
+        let seen = hits.lock().unwrap().join("\n");
+        assert!(seen.contains("POST /api/two-factor/get-recover"), "{seen}");
+        assert!(
+            seen.contains("masterPasswordHash=") || seen.contains("masterPasswordHash\":"),
+            "驗身欄必須是 hash：{seen}"
+        );
+        assert!(!seen.contains("\"pw\""), "主密碼明文不得進請求體：{seen}");
+    }
+
+    /// 極小 mock：`/two-factor/*` 三端點固定應答，並記錄每筆請求行＋body。
+    fn spawn_two_factor_mock() -> (String, std::sync::Arc<Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let hits_c = hits.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut sock) = stream else { continue };
+                let mut reader = BufReader::new(sock.try_clone().unwrap());
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() {
+                    continue;
+                }
+                let mut it = line.split_whitespace();
+                let method = it.next().unwrap_or("").to_owned();
+                let path = it.next().unwrap_or("").to_owned();
+                let mut len = 0usize;
+                loop {
+                    let mut h = String::new();
+                    if reader.read_line(&mut h).is_err() || h.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(rest) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = rest.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; len];
+                if len > 0 {
+                    let _ = reader.read_exact(&mut body);
+                }
+                hits_c.lock().unwrap().push(format!(
+                    "{method} {path} body={}",
+                    String::from_utf8_lossy(&body)
+                ));
+                let resp_body = if path.ends_with("/get-recover") {
+                    "{\"code\":\"y3xv4t6z\",\"object\":\"twoFactorRecover\"}"
+                } else if path.ends_with("/get-authenticator") {
+                    "{\"enabled\":false,\"key\":\"JBSWY3DPEHPK3PXP\",\"object\":\"twoFactorAuthenticator\"}"
+                } else {
+                    "{\"data\":[{\"enabled\":true,\"type\":0},{\"enabled\":true,\"type\":8}],\"object\":\"list\"}"
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{resp_body}",
+                    resp_body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes());
+                let _ = sock.flush();
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), hits)
+    }
+
+    /// 解析器三態：有 key（解包得 item key）／無 key（歸屬鑰直解）／
+    /// 解包失敗（None，不誤退回）；共享兩形態（org 包 item key 的兩段鏈）。
     #[tokio::test]
     async fn cipher_decrypt_key_three_states() {
         let (hub, _d) = crate::passkey::tests::unlocked_hub("keyres1").await;
@@ -1898,11 +2195,8 @@ mod tests {
             Some(user.as_slice()),
             "無 key 欄 → user key 直解（反向相容舊項目）"
         );
-        let foreign_wrap = bw_crypto::encrypt_bytes_key(
-            &(0u8..64).collect::<Vec<u8>>(),
-            &item,
-        )
-        .unwrap();
+        let foreign_wrap =
+            bw_crypto::encrypt_bytes_key(&(0u8..64).collect::<Vec<u8>>(), &item).unwrap();
         assert_eq!(
             resolve(json!({"type": 1, "key": foreign_wrap, "name": "2.a|b|c"})),
             None,
@@ -1930,8 +2224,7 @@ mod tests {
         // 共享（有 key）：org key 包 item key——成員鏈條兩段都要對。
         let item2: Vec<u8> = (10u8..74).collect();
         let wrapped2 = bw_crypto::encrypt_bytes_key(orgkey.as_bytes(), &item2).unwrap();
-        let shared2 =
-            json!({"type": 1, "organizationId": org.to_string(), "key": wrapped2, "name": "2.a|b|c"});
+        let shared2 = json!({"type": 1, "organizationId": org.to_string(), "key": wrapped2, "name": "2.a|b|c"});
         let got = hub
             .machine
             .with_keys(|kb| {
@@ -1971,7 +2264,11 @@ mod tests {
             .unwrap();
         hub.reindex_one(id).unwrap();
         let meta = hub.store.meta(id).unwrap().unwrap();
-        assert_eq!(meta.name.as_deref(), Some("GitHub"), "item key 層名稱必須回填");
+        assert_eq!(
+            meta.name.as_deref(),
+            Some("GitHub"),
+            "item key 層名稱必須回填"
+        );
         assert_eq!(meta.uris, vec!["https://github.com".to_string()]);
         let v = hub.project_one(id, View::Reveal).unwrap().unwrap();
         assert_eq!(v.password.as_deref(), Some("s3cret-ik"));
@@ -2047,7 +2344,10 @@ mod tests {
             None,
             json!({"kind": "local"}),
         );
-        let bare = Call::Auth(AuthCall::Unlock { biometric: false, password: None });
+        let bare = Call::Auth(AuthCall::Unlock {
+            biometric: false,
+            password: None,
+        });
         let bad = Call::Auth(AuthCall::Unlock {
             biometric: false,
             password: Some("wrong-password-xyz".into()),
@@ -2056,7 +2356,10 @@ mod tests {
             biometric: false,
             password: Some("test-master-pw".into()),
         });
-        let bio = Call::Auth(AuthCall::Unlock { biometric: true, password: None });
+        let bio = Call::Auth(AuthCall::Unlock {
+            biometric: true,
+            password: None,
+        });
         // 預設嚴格模式（lock_on_sleep_restart=true）：裸解鎖不再一鍵放行。
         hub.machine.lock(LockReason::User);
         let err = hub.dispatch(&sess, &bare).await.unwrap_err();
@@ -2079,7 +2382,12 @@ mod tests {
         // 對密碼 → 解鎖成功（離線 PSK MAC，不打網路）。
         let resp = hub.dispatch(&sess, &good).await.unwrap();
         assert!(
-            { let Response::Status(i) = &resp else { panic!("應回 Status"); }; matches!(i.state, bw_proto::UnlockStateView::Unlocked { .. }) },
+            {
+                let Response::Status(i) = &resp else {
+                    panic!("應回 Status");
+                };
+                matches!(i.state, bw_proto::UnlockStateView::Unlocked { .. })
+            },
             "對密碼應解鎖：{resp:?}"
         );
         // 自動解鎖 opt-in（lock_on_sleep_restart=false）：裸解鎖照放行。
@@ -2087,7 +2395,12 @@ mod tests {
         hub.settings.lock().unwrap().lock_on_sleep_restart = false;
         let resp = hub.dispatch(&sess, &bare).await.unwrap();
         assert!(
-            { let Response::Status(i) = &resp else { panic!("應回 Status"); }; matches!(i.state, bw_proto::UnlockStateView::Unlocked { .. }) },
+            {
+                let Response::Status(i) = &resp else {
+                    panic!("應回 Status");
+                };
+                matches!(i.state, bw_proto::UnlockStateView::Unlocked { .. })
+            },
             "opt-in 模式裸解鎖應通行：{resp:?}"
         );
     }
