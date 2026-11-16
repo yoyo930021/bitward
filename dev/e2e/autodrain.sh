@@ -125,7 +125,7 @@ BITWARD_DATA_DIR=$PWD/$DATA ./target/debug/bitwarderd --data-dir "$DATA" --sock 
 PID=$!
 rm -f "$DATA/cli_session"
 for _ in $(seq 1 20); do [[ -S "$DATA/s" ]] && break; sleep 0.2; done
-D unlock >/dev/null
+echo "$WP" | D unlock --password-stdin >/dev/null || fail "重啟後 unlock 失敗（14a 嚴格模式需主密碼）"
 D sync >/dev/null || fail "過期 token 重啟後 sync 未自癒（401 收口失效？）"
 NEW_ACCESS=$(jq -r .access_token "$DATA/account.json")
 [[ "$NEW_ACCESS" != "expired.garbage.token" ]] || fail "自動續期未落盤 account.json"

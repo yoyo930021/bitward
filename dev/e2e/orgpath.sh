@@ -332,7 +332,7 @@ DAEMON_B=$!
 for i in $(seq 1 20); do [[ -S "$SOCK_B" ]] && break; sleep 0.2; done
 [[ -S "$SOCK_B" ]] || fail "B daemon 重啟 socket 未就緒"
 rm -f "$DATA_B/cli_session"   # 重啟後記憶體 session 消失；取新 session
-BB unlock >/dev/null
+echo "$WP" | BB unlock --password-stdin >/dev/null || fail "B 重啟後 unlock 失敗（14a 嚴格模式需主密碼）"
 FINAL_PW="Sh@red-Pw-9z!x"
 BB edit "$CIPHER_ID" --set password="$FINAL_PW" >/dev/null
 for i in $(seq 1 60); do [[ "$(BB outbox | jq "$PENDING")" == "0" ]] && break; sleep 1; done

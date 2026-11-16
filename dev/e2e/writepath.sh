@@ -140,7 +140,10 @@ grep -a "$SECRET" "$DA/vault.db" && fail "寫入後主密洩盤" || true
 grep -a "notify-me" "$DB/vault.db" >/dev/null || true  # metadata 明文索引允許
 pass "寫入路徑未洩主密碼到盤"
 
-# A7b：kill -9 daemon → 重啟 → DeviceAssertion 解鎖不重跑 KDF（<300ms；PBKDF2 600k 本身就要 ~0.5s+）
+# A7b：kill -9 daemon → 重啟 → 不重跑 KDF 即恢復解鎖（<300ms；PBKDF2 600k 本身就要 ~0.5s+）。
+# 14a 嚴格模式後裸解鎖需 lock_on_sleep_restart=false（自動解鎖 opt-in）——本斷言測的
+# 正是該形態：重啟自動解鎖走封存 stretched key，unlock 呼叫落 AlreadyUnlocked 快路徑。
+A settings set '{"lock_on_sleep_restart": false}' >/dev/null
 kill -9 "$PID_A" 2>/dev/null || true
 sleep 0.5
 BITWARD_DATA_DIR=$PWD/$DA ./target/debug/bitwarderd --data-dir "$DA" --sock "$DA/s" >>"$DA/log2" 2>&1 & PID_A=$!
