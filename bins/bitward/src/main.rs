@@ -2492,6 +2492,57 @@ fn format_item(v: &ItemView) -> String {
     if let Some(n) = &v.notes {
         out.push_str(&format!("notes: {n}\n"));
     }
+    // 型別節（PR1）：card/identity 欄按投影可見性輸出（卡號/CVV 僅 Reveal 帶全值）
+    if let Some(c) = &v.card {
+        if let Some(x) = &c.cardholder_name {
+            out.push_str(&format!("card.cardholderName: {x}\n"));
+        }
+        if let Some(x) = &c.brand {
+            out.push_str(&format!("card.brand: {x}\n"));
+        }
+        if let Some(x) = &c.number {
+            out.push_str(&format!("card.number: {x}\n"));
+        } else if let Some(x) = &c.number_masked {
+            out.push_str(&format!("card.number: {x}\n"));
+        }
+        if let Some(x) = &c.exp_month {
+            out.push_str(&format!("card.expMonth: {x}\n"));
+        }
+        if let Some(x) = &c.exp_year {
+            out.push_str(&format!("card.expYear: {x}\n"));
+        }
+        if let Some(x) = &c.code {
+            out.push_str(&format!("card.code: {x}\n"));
+        } else if c.code_masked.is_some() {
+            out.push_str("card.code: ••••\n");
+        }
+    }
+    if let Some(i) = &v.identity {
+        for (key, val) in [
+            ("title", &i.title),
+            ("firstName", &i.first_name),
+            ("middleName", &i.middle_name),
+            ("lastName", &i.last_name),
+            ("address1", &i.address1),
+            ("address2", &i.address2),
+            ("address3", &i.address3),
+            ("city", &i.city),
+            ("state", &i.state),
+            ("postalCode", &i.postal_code),
+            ("country", &i.country),
+            ("company", &i.company),
+            ("email", &i.email),
+            ("phone", &i.phone),
+            ("ssn", &i.ssn),
+            ("username", &i.username),
+            ("passportNumber", &i.passport_number),
+            ("licenseNumber", &i.license_number),
+        ] {
+            if let Some(x) = val {
+                out.push_str(&format!("identity.{key}: {x}\n"));
+            }
+        }
+    }
     for f in &v.fields {
         let val = match (&f.value, f.kind) {
             (Some(x), _) => x.clone(),

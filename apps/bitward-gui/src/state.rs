@@ -538,7 +538,7 @@ pub enum Cmd {
         id: ItemId,
         row: Arc<ItemView>,
     },
-    Revealed(Option<String>),
+    Revealed(Arc<ItemView>),
     TotpLoaded {
         code: String,
         valid_for_secs: u32,
@@ -1057,7 +1057,8 @@ pub struct AppCore {
     pub notice: Signal<Option<String>>,
     pub detail: Signal<Option<Arc<ItemView>>>,
     /// Reveal 視窗的完整投影（None＝未顯示明文）。卡號/CVV 與密碼共用這條
-    pub revealed: Signal<Option<String>>,
+    /// reveal 語彙（PR1）：詳情節按 `revealed` 覆蓋 Masked 的遮罩欄。
+    pub revealed: Signal<Option<Arc<ItemView>>>,
     pub totp: Signal<Option<String>>,
     /// TOTP 倒數三件組：視窗秒數、取碼時刻、1s tick（App 的引擎計時器驅動，
     /// 只用於詳情重繪與到期重取，不是背景任務）。
@@ -1597,7 +1598,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 return;
             }
             core.ipc(move |s| match s.call(&get(id, View::Reveal)) {
-                Ok(Response::Item(Some(row))) => Cmd::Revealed(row.password),
+                Ok(Response::Item(Some(row))) => Cmd::Revealed(Arc::new(*row)),
                 Ok(Response::Item(None)) => Cmd::Failed {
                     err: "找不到該項目".into(),
                 },
@@ -1607,9 +1608,9 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 Err(e) => Cmd::Failed { err: e.display() },
             });
         }
-        Cmd::Revealed(pw) => {
+        Cmd::Revealed(view) => {
             core.settle();
-            core.revealed.set(Some(pw.unwrap_or_default()));
+            core.revealed.set(Some(view));
         }
         Cmd::RequestTotp => {
             let Route::Detail(id) = core.route.get() else {

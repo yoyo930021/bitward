@@ -52,6 +52,12 @@
   值是假的、形態是真的；**A2 號稱的「官方雲那份」目前是這種等級，不是逐位元組录製。**
 - `sync_client_credentials_vw_1.37.2.json` — API key token 讀 `/sync` 成功。
 - `ciphers_create_request_vw.json` / `ciphers_create_vw_1.37.2.json` / `ciphers_get_vw_1.37.2.json` / `ciphers_update_request_vw.json` / `ciphers_update_vw_1.37.2.json` / `ciphers_list_vw_1.37.2.json` — CRUD 請求與回應成對。
+- `ciphers_get_card_vw_1.37.2.json` — type 3 釘選樣本（PR1）：官方 web vault 建立請求形態
+  （clients `card.api.ts` 六欄全 EncString）經 VW 1.37.2 落庫抽取；信封以固定鑰加密
+  （item key＝`bytes 120..184`、user key＝`192..256`，`key` 欄包 base64 後的 item key），
+  供 `bitwarderd` 解密單測直接復現。形態證據、值是拋棄式假機密。
+- `ciphers_get_identity_vw_1.37.2.json` — type 4 釘選樣本（PR1）：clients `identity.api.ts`
+  十八欄形態，同上固定鑰。
 - `ciphers_patch_request_vw.json` / `ciphers_patch_vw_1.37.2.json` — `PUT /ciphers/{id}/partial` 只吃 `folderId`/`favorite`。
 - `ciphers_patch_password_422_vw.json` — 同端點送 `password` → 422（HTML）。
 - `ciphers_soft_delete_put_vw_1.37.2.json`、`ciphers_get_deleted_vw_1.37.2.json`（軟刪後 `deletedDate` 有值）、`ciphers_restore_vw_1.37.2.json`（`PUT .../restore` 成功）、`ciphers_restore_post_404_vw.json`（`POST .../restore` 是 route-not-found）。

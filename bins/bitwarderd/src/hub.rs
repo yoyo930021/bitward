@@ -524,10 +524,10 @@ impl Hub {
                 Ok(Response::Items(rows))
             }
             Call::Vault(VaultCall::Get { id, view }) => {
-                if *view == View::Reveal {
-                    self.audit_reveal(*id, "Reveal.Get")?;
-                }
                 let v = self.project_one(*id, *view)?;
+                if *view == View::Reveal {
+                    self.audit_reveal(*id, "Reveal.Get", v.as_ref())?;
+                }
                 Ok(Response::Item(v.map(Box::new)))
             }
             Call::Vault(VaultCall::Create { draft }) => self.write_create(session, draft).await,
@@ -1429,9 +1429,22 @@ impl Hub {
             };
             // 附件元資料（批次 4a）：鏡像列＋檔名解密走同一個 dec 座標系
             let attachments = self.attachment_projection(id, &d);
-            (username, password, notes, fields, attachments)
+            // 型別節（PR1）：card/identity 欄走 conditionalEncString 寬容解密
+            // （舊客戶端留明文態原樣可讀）；卡號/CVV 按視窗給遮罩或全值。
+            let card = project_card(&row.enc_cipher, &d, reveal);
+            let identity = project_identity(&row.enc_cipher, &d);
+            (
+                username,
+                password,
+                notes,
+                fields,
+                attachments,
+                card,
+                identity,
+            )
         });
-        let (username, password, notes, fields, attachments) = dec.map_err(denied)?;
+        let (username, password, notes, fields, attachments, card, identity) =
+            dec.map_err(denied)?;
         let v = match view {
             View::Masked => ItemView::metadata(base)
                 .masked(username, password.as_deref().map(mask_tail), false)
@@ -1442,7 +1455,7 @@ impl Hub {
                 .with_details(notes, fields, attachments),
             View::Metadata => ItemView::metadata(base),
         };
-        Ok(Some(v))
+        Ok(Some(v.with_card_identity(card, identity)))
     }
 
     /// AutoType：明文只進 blocking 執行緒化作按鍵事件，回應僅含計數（§2.1 出口紀律）。
@@ -1547,8 +1560,21 @@ impl Hub {
         })
     }
 
-    fn audit_reveal(&self, id: ItemId, action: &str) -> Result<(), WtpError> {
-        self.audit_reveal_line(None, id, action)
+    fn audit_reveal(
+        &self,
+        id: ItemId,
+        action: &str,
+        view: Option<&ItemView>,
+    ) -> Result<(), WtpError> {
+        // 敏感度座標消費（PR1）：逐欄記 Reveal 實際暴露的遮罩欄——
+        // Login→Password、Card→CardNumber/CardCode。Masked 已帶的欄
+        // （notes/username/identity 十八欄）不重複記；無遮罩欄＝不虛構座標
+        // （主審計行仍由 audit_call 帶 Secret 級＋bytes_out 覆蓋）。
+        let coords = revealed_coordinates(view);
+        for c in coords {
+            self.audit_reveal_line(None, id, action, serde_json::to_value(&c).ok())?;
+        }
+        Ok(())
     }
 
     fn audit_reveal_ref(&self, session: &str, uri: &str, resp: &Response) -> Result<(), WtpError> {
@@ -1566,13 +1592,14 @@ impl Hub {
         _s: Option<&str>,
         id: ItemId,
         action: &str,
+        field: Option<Value>,
     ) -> Result<(), WtpError> {
         let _ = self.store.audit_append(&AuditRecord {
             ts: self.store.now_ms().to_string(),
             session: None,
             action: action.to_owned(),
             item: Some(id.to_string()),
-            field: Some(json!("Password")),
+            field,
             sens: bw_proto::Sensitivity::Secret,
             outcome: "ok".into(),
             bytes_out: 0,
@@ -1581,6 +1608,25 @@ impl Hub {
         });
         Ok(())
     }
+}
+
+/// Reveal 回應實際暴露的遮罩欄座標（§2.1 FieldPath；PR1 首次消費點）。
+fn revealed_coordinates(view: Option<&ItemView>) -> Vec<bw_proto::FieldPath> {
+    use bw_proto::FieldPath;
+    let Some(v) = view else { return Vec::new() };
+    let mut coords = Vec::new();
+    if v.password.is_some() {
+        coords.push(FieldPath::Password);
+    }
+    if let Some(c) = &v.card {
+        if c.number.is_some() {
+            coords.push(FieldPath::CardNumber);
+        }
+        if c.code.is_some() {
+            coords.push(FieldPath::CardCode);
+        }
+    }
+    coords
 }
 
 fn mask_tail(pw: &str) -> String {
@@ -1593,6 +1639,91 @@ fn mask_tail(pw: &str) -> String {
         .rev()
         .collect();
     format!("••••{tail}")
+}
+
+/// 卡號遮罩態：末四碼可見、其餘點號（官方詳情頁語意）。
+fn mask_card_number(num: &str) -> String {
+    let chars: Vec<char> = num.chars().collect();
+    let n = chars.len();
+    if n <= 4 {
+        return "••••".to_owned();
+    }
+    let tail: String = chars[n - 4..].iter().collect();
+    format!("••••{tail}")
+}
+
+/// 鏡像 `$.card` 節 → 投影（PR1 讀側）。欄位全 EncString 走欄位解密器，
+/// conditionalEncString 寬容（[`bw_vault::dec_conditional`]：有信封前綴才解，
+/// 否則明文原樣）。缺 card 節回 None（非卡片型別／伺服器未帶）。
+/// 遮罩紀律同 password：Masked 只給 `number_masked`/`code_masked`，
+/// Reveal 才給 `number`/`code` 全值。
+fn project_card(
+    cipher: &Value,
+    dec: &dyn Fn(&str) -> Option<String>,
+    reveal: bool,
+) -> Option<bw_proto::CardView> {
+    let obj = cipher.get("card").and_then(Value::as_object)?;
+    let field = |key: &str| {
+        obj.get(key)
+            .and_then(Value::as_str)
+            .and_then(|s| bw_vault::dec_conditional(dec, s))
+    };
+    let number = field("number");
+    let code = field("code");
+    let (number_full, number_masked) = match number {
+        Some(n) if reveal => (Some(n), None),
+        Some(n) => (None, Some(mask_card_number(&n))),
+        None => (None, None),
+    };
+    let (code_full, code_masked) = match code {
+        Some(c) if reveal => (Some(c), None),
+        Some(_) => (None, Some("••••".to_owned())),
+        None => (None, None),
+    };
+    Some(bw_proto::CardView {
+        cardholder_name: field("cardholderName"),
+        brand: field("brand"),
+        exp_month: field("expMonth"),
+        exp_year: field("expYear"),
+        number: number_full,
+        number_masked,
+        code: code_full,
+        code_masked,
+    })
+}
+
+/// 鏡像 `$.identity` 節 → 投影（PR1 讀側）。十八欄全 EncString＋
+/// conditionalEncString 寬容；無遮罩欄（官方詳情頁解鎖即讀，同 notes 紀律）。
+fn project_identity(
+    cipher: &Value,
+    dec: &dyn Fn(&str) -> Option<String>,
+) -> Option<bw_proto::IdentityView> {
+    let obj = cipher.get("identity").and_then(Value::as_object)?;
+    let field = |key: &str| {
+        obj.get(key)
+            .and_then(Value::as_str)
+            .and_then(|s| bw_vault::dec_conditional(dec, s))
+    };
+    Some(bw_proto::IdentityView {
+        title: field("title"),
+        first_name: field("firstName"),
+        middle_name: field("middleName"),
+        last_name: field("lastName"),
+        address1: field("address1"),
+        address2: field("address2"),
+        address3: field("address3"),
+        city: field("city"),
+        state: field("state"),
+        postal_code: field("postalCode"),
+        country: field("country"),
+        company: field("company"),
+        email: field("email"),
+        phone: field("phone"),
+        ssn: field("ssn"),
+        username: field("username"),
+        passport_number: field("passportNumber"),
+        license_number: field("licenseNumber"),
+    })
 }
 
 fn flag(v: &Value, k: &str) -> bool {
@@ -1792,7 +1923,12 @@ fn sensitivity_of_call(c: &Call, resp: Option<&Response>) -> bw_proto::Sensitivi
     let secret_out = match resp {
         Some(Response::Secret(_)) | Some(Response::AttachmentBytes(_)) => true,
         Some(Response::Item(Some(v))) => {
-            v.password.is_some() || v.notes.is_some() || v.fields.iter().any(|f| f.value.is_some())
+            // 型別節（PR1）：card/identity 欄是 Secret 級明文出口（§2.1 分級表）
+            v.password.is_some()
+                || v.notes.is_some()
+                || v.fields.iter().any(|f| f.value.is_some())
+                || v.card.is_some()
+                || v.identity.is_some()
         }
         _ => false,
     };
@@ -2165,6 +2301,95 @@ mod tests {
             }
         });
         (format!("http://127.0.0.1:{port}"), hits)
+    }
+
+    /// 釘選 fixture（crates/bw-server/fixtures/ciphers_get_{card,identity}_vw_1.37.2.json，
+    /// 官方 web vault 請求形態 × VW 落庫抽取）解密單測：card 六欄、identity 十八欄
+    /// 全走既有欄位解密器；Masked 給末四碼遮罩＋CVV 點號、Reveal 出全值；
+    /// conditionalEncString 明文寬容態另測。
+    #[test]
+    fn card_identity_fixtures_decrypt_and_mask() {
+        let item: Vec<u8> = (120u8..184).collect();
+        let dec = |s: &str| {
+            bw_crypto::decrypt_bytes_with_key(&item, s)
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok())
+        };
+        let dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../crates/bw-server/fixtures"
+        );
+        let card: Value = serde_json::from_slice(
+            &std::fs::read(format!("{dir}/ciphers_get_card_vw_1.37.2.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(card["type"], json!(3));
+        let masked = project_card(&card, &dec, false).expect("card 節在");
+        assert_eq!(masked.cardholder_name.as_deref(), Some("Yoyo Lin"));
+        assert_eq!(masked.brand.as_deref(), Some("Visa"));
+        assert_eq!(masked.exp_month.as_deref(), Some("3"));
+        assert_eq!(masked.exp_year.as_deref(), Some("2032"));
+        assert_eq!(
+            masked.number_masked.as_deref(),
+            Some("••••4242"),
+            "末四碼遮罩"
+        );
+        assert_eq!(masked.number, None, "Masked 不帶全卡號");
+        assert_eq!(masked.code_masked.as_deref(), Some("••••"));
+        assert_eq!(masked.code, None, "Masked 不帶 CVV");
+        let revealed = project_card(&card, &dec, true).expect("card 節在");
+        assert_eq!(revealed.number.as_deref(), Some("4242424242424242"));
+        assert_eq!(revealed.code.as_deref(), Some("987"));
+        assert_eq!(revealed.number_masked, None, "Reveal 改帶全值、遮罩欄退場");
+
+        let idn: Value = serde_json::from_slice(
+            &std::fs::read(format!("{dir}/ciphers_get_identity_vw_1.37.2.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(idn["type"], json!(4));
+        let i = project_identity(&idn, &dec).expect("identity 節在");
+        assert_eq!(i.title.as_deref(), Some("Dr."));
+        assert_eq!(i.first_name.as_deref(), Some("Ming"));
+        assert_eq!(i.last_name.as_deref(), Some("Chen"));
+        assert_eq!(i.address1.as_deref(), Some("100 Roosevelt Ave"));
+        assert_eq!(i.city.as_deref(), Some("Taipei"));
+        assert_eq!(i.postal_code.as_deref(), Some("100"));
+        assert_eq!(i.country.as_deref(), Some("TW"));
+        assert_eq!(i.email.as_deref(), Some("ming@example.test"));
+        assert_eq!(i.ssn.as_deref(), Some("A234567890"));
+        assert_eq!(i.username.as_deref(), Some("mingc"));
+        assert_eq!(i.passport_number.as_deref(), Some("N12345678"));
+        assert_eq!(i.middle_name.as_deref(), Some("T"));
+        // null 欄＝None（官方 18 欄中此檔 6 欄為 null）
+        assert_eq!(i.address2, None);
+        assert_eq!(i.license_number, None);
+    }
+
+    /// conditionalEncString 寬容：欄值不像信封（舊客戶端明文態）＝原樣可讀，
+    /// 不誤標為解不開。
+    #[test]
+    fn card_projection_tolerates_plaintext_fields() {
+        let item: Vec<u8> = (120u8..184).collect();
+        let dec = |s: &str| {
+            bw_crypto::decrypt_bytes_with_key(&item, s)
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok())
+        };
+        let enc = |pt: &str| bw_crypto::encrypt_bytes_key(&item, pt.as_bytes()).unwrap();
+        let cipher = json!({
+            "type": 3,
+            "card": {
+                "number": enc("4111111111111234"),
+                "expMonth": "12",
+                "expYear": "2030",
+                "code": null,
+            },
+        });
+        let v = project_card(&cipher, &dec, true).expect("card 節在");
+        assert_eq!(v.number.as_deref(), Some("4111111111111234"));
+        assert_eq!(v.exp_month.as_deref(), Some("12"), "明文 expMonth 原樣可讀");
+        assert_eq!(v.exp_year.as_deref(), Some("2030"));
+        assert_eq!(v.code, None);
     }
 
     /// 解析器三態：有 key（解包得 item key）／無 key（歸屬鑰直解）／

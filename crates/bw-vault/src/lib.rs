@@ -12,6 +12,8 @@
 
 use std::collections::BTreeMap;
 
+use bw_proto::{CARD_FIELDS, IDENTITY_FIELDS};
+
 /// 明文欄位表。None ＝ 該欄為空/清除。favorite 以 "true"/"false" 進入。
 pub type FieldMap = BTreeMap<String, Option<String>>;
 
@@ -45,6 +47,30 @@ pub fn wire_of_type_word(word: &str) -> Option<u8> {
         "hidden" => Some(1),
         "boolean" => Some(2),
         _ => None,
+    }
+}
+
+/// 值是否形如信封字串 `<type>.<iv>|<ct>[|<mac>]`（首段單位數字＋點）。
+/// 官方 `conditionalEncString`（clients `domain/card.ts` 的 expMonth/expYear、
+/// 舊客戶端殘留明文欄）判定的同口徑：像信封才交解密器，否則視作明文。
+#[must_use]
+pub fn looks_like_enc_string(s: &str) -> bool {
+    match s.split_once('.') {
+        Some((head, _)) => head.len() == 1 && head.as_bytes()[0].is_ascii_digit(),
+        None => false,
+    }
+}
+
+/// `conditionalEncString` 寬容解密：形態像信封才走 `dec`（解不開＝None，
+/// 容忍漂移同 strict 路徑）；不像信封＝舊客戶端明文，原樣回傳。
+/// 卡片／身分節專用（六＋十八欄官方標 conditionalEncString；帳密三欄恆信封，
+/// 仍走 strict `dec`）。
+#[must_use]
+pub fn dec_conditional(dec: &dyn Fn(&str) -> Option<String>, raw: &str) -> Option<String> {
+    if looks_like_enc_string(raw) {
+        dec(raw)
+    } else {
+        Some(raw.to_owned())
     }
 }
 
@@ -197,6 +223,22 @@ pub fn flatten(cipher: &serde_json::Value, dec: &dyn Fn(&str) -> Option<String>)
             m.insert(k, v);
         }
     }
+    // 型別節（PR1）：card 六欄／identity 十八欄全 EncString，走 conditionalEncString
+    // 寬容解密（舊客戶端可能留明文，官方同口徑）。路徑文法 `card.<官方鍵名>`／
+    // `identity.<官方鍵名>`——三處共用座標系（FieldEdit 文件為權威定義）。
+    for (section, fields) in [
+        ("card", &CARD_FIELDS[..]),
+        ("identity", &IDENTITY_FIELDS[..]),
+    ] {
+        if let Some(obj) = cipher.get(section).and_then(serde_json::Value::as_object) {
+            for f in fields {
+                if let Some(v) = obj.get(*f).and_then(serde_json::Value::as_str) {
+                    let path = format!("{section}.{f}");
+                    m.insert(path, dec_conditional(dec, v));
+                }
+            }
+        }
+    }
     // put_enc 的最後使用點在上方 fields 迴圈；此處 m 的可變借用已釋放。
     for (k, v) in match_keys {
         m.insert(k, v);
@@ -291,7 +333,30 @@ pub fn apply_merged(
                     );
                 }
                 p => {
-                    if let Some(rest) = p.strip_prefix("uri.")
+                    if let Some(rest) = p
+                        .strip_prefix("card.")
+                        .or_else(|| p.strip_prefix("identity."))
+                    {
+                        // 型別節（PR1）：`card.<f>`／`identity.<f>` 全 EncString 欄，
+                        // 寫回 `$.card.<f>`／`$.identity.<f>`（節缺席＝材料化後寫入，
+                        // 同 login_set 紀律；None＝清 null）。欄名白名單由呼叫端
+                        // （daemon write_patch 預驗／put.rs parse_path）將關。
+                        let root_key = if p.starts_with("card.") {
+                            "card"
+                        } else {
+                            "identity"
+                        };
+                        let section =
+                            obj_of(obj.entry(root_key).or_insert_with(|| serde_json::json!({})));
+                        match value {
+                            Some(v) => {
+                                section.insert(rest.into(), serde_json::json!(enc_of(v)));
+                            }
+                            None => {
+                                section.insert(rest.into(), serde_json::Value::Null);
+                            }
+                        }
+                    } else if let Some(rest) = p.strip_prefix("uri.")
                         && let Some(idx_s) = rest.strip_suffix(".match")
                         && let Some(idx) = idx_s.parse::<usize>().ok()
                     {
@@ -766,16 +831,168 @@ mod tests {
                 "totp": "x:seed",
                 "uris": [{"uri": "x:https://a.test", "match": null}]
             },
-            "card": { "number": "x:4111" }
+            "card": { "number": "x:4242424242424242" }
         });
         let m = flatten(&cipher, &fake_dec);
         assert_eq!(m["name"].as_deref(), Some("github"));
         assert_eq!(m["username"].as_deref(), Some("user"));
         assert_eq!(m["uri.0"].as_deref(), Some("https://a.test"));
         assert_eq!(m["favorite"].as_deref(), Some("true"));
-        // card.* 不在 P2 路徑文法內
-        assert!(!m.contains_key("card.number"));
-        assert!(!m.contains_key("number"));
+        // card 節進座標系（PR1）；`x:` 不像信封＝conditionalEncString
+        // 明文寬容態，原樣入欄
+        assert_eq!(m["card.number"].as_deref(), Some("x:4242424242424242"));
+        assert!(!m.contains_key("number"), "不得落回裸鍵名");
+        assert!(!m.contains_key("number"), "不得落回裸鍵名");
+    }
+
+    #[test]
+    fn flatten_card_identity_sections_full_field_sets_and_plaintext_tolerance() {
+        // 釘選 fixture 形態（crates/bw-server/fixtures/ciphers_get_{card,identity}_vw_1.37.2.json
+        // 的欄名結構）：六欄＋十八欄全進座標系。測試信封＝`2.<plain>`、
+        // 無前綴值＝舊客戶端明文態（conditionalEncString 寬容，原樣入欄不解密）。
+        let dec = |s: &str| s.strip_prefix("2.").map(str::to_owned);
+        let cipher = serde_json::json!({
+            "type": 3,
+            "card": {
+                "cardholderName": "2.Yoyo Lin", "brand": "2.Visa",
+                "number": "2.4242424242424242", "expMonth": "3",
+                "expYear": "2032", "code": "2.987",
+            },
+            "identity": {
+                "title": "2.Dr.", "firstName": "2.Ming", "middleName": null,
+                "lastName": "2.Chen", "address1": "2.100 Roosevelt Ave",
+                "address2": null, "address3": null, "city": "2.Taipei",
+                "state": null, "postalCode": "2.100", "country": "2.TW",
+                "company": null, "email": "2.ming@example.test", "phone": null,
+                "ssn": "2.A234567890", "username": "2.mingc",
+                "passportNumber": "2.N12345678", "licenseNumber": null,
+            },
+        });
+        let m = flatten(&cipher, &dec);
+        for f in CARD_FIELDS {
+            assert!(m.contains_key(&format!("card.{f}")), "card.{f} 缺欄");
+        }
+        assert_eq!(
+            m["card.expMonth"].as_deref(),
+            Some("3"),
+            "明文寬容：無信封前綴原樣入欄"
+        );
+        assert_eq!(m["card.number"].as_deref(), Some("4242424242424242"));
+        for f in [
+            "title",
+            "firstName",
+            "lastName",
+            "address1",
+            "city",
+            "postalCode",
+            "country",
+            "email",
+            "ssn",
+            "username",
+            "passportNumber",
+        ] {
+            assert!(
+                m.contains_key(&format!("identity.{f}")),
+                "identity.{f} 缺欄"
+            );
+        }
+        assert_eq!(m["identity.lastName"].as_deref(), Some("Chen"));
+        // null 值＝鍵缺席（同 fields value 紀律：未設值不與清空混淆）
+        assert!(!m.contains_key("identity.middleName"));
+        assert!(!m.contains_key("identity.state"));
+    }
+
+    #[test]
+    fn three_way_merges_disjoint_card_fields() {
+        // 雙裝置併發（Lane 5 同形）：A 改 card.number、B 改 card.expMonth →
+        // 不同鍵自動合併，兩欄各自收斂、無整筆互贏。
+        let base = map(&[
+            ("name", Some("c")),
+            ("card.number", Some("4111")),
+            ("card.expMonth", Some("1")),
+        ]);
+        let ours = map(&[
+            ("name", Some("c")),
+            ("card.number", Some("4242")),
+            ("card.expMonth", Some("1")),
+        ]);
+        let theirs = map(&[
+            ("name", Some("c")),
+            ("card.number", Some("4111")),
+            ("card.expMonth", Some("9")),
+        ]);
+        match three_way(&base, &ours, &theirs) {
+            Merge::Push(push) => {
+                assert_eq!(push.get("card.number").unwrap().as_deref(), Some("4242"));
+                assert!(!push.contains_key("card.expMonth"), "theirs 已改的不動");
+            }
+            other => panic!("expect Push, got {other:?}"),
+        }
+        // 同欄相撞：兩端都改 card.number 且不同值 → 衝突收件匣
+        let mut theirs2 = base.clone();
+        theirs2.insert("card.number".into(), Some("5555".to_string()));
+        match three_way(&base, &ours, &theirs2) {
+            Merge::Conflict { fields } => assert!(fields.contains(&"card.number".to_string())),
+            other => panic!("expect Conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_merged_writes_card_identity_paths() {
+        let enc = |s: &str| format!("2.{s}");
+        let theirs = serde_json::json!({
+            "type": 4,
+            "name": "2:n",
+            "identity": {"lastName": "2:old", "city": null},
+        });
+        let mut merged = FieldMap::new();
+        merged.insert("identity.lastName".into(), Some("new".into()));
+        merged.insert("identity.email".into(), Some("a@b.test".into()));
+        let out = apply_merged(&theirs, &merged, &enc);
+        assert_eq!(out["identity"]["lastName"], json!("2.new"));
+        assert_eq!(out["identity"]["email"], json!("2.a@b.test"), "缺欄補寫");
+        assert_eq!(out["identity"]["city"], Value::Null, "未觸及欄不動");
+        assert_eq!(out["name"], "2:n", "未觸及頂層欄不動");
+        // card 節缺席＝材料化後寫入
+        let mut m2 = FieldMap::new();
+        m2.insert("card.number".into(), Some("424242".into()));
+        let out2 = apply_merged(&serde_json::json!({"type": 3, "name": "2.n"}), &m2, &enc);
+        assert_eq!(out2["card"]["number"], json!("2.424242"));
+        // None 清空落 null
+        let mut m3 = FieldMap::new();
+        m3.insert("identity.lastName".into(), None);
+        let out3 = apply_merged(&theirs, &m3, &enc);
+        assert!(out3["identity"]["lastName"].is_null());
+    }
+
+    #[test]
+    fn lossless_roundtrip_card_identity_proptest() {
+        // 無損往返（不變量 8 的型別節版）：flatten 全欄 → apply_merged 原樣寫回
+        // → 再 flatten 值域相同；未觸及欄位的密文位元組不動。
+        use proptest::prelude::*;
+        let vals = "[a-z0-9]{1,8}";
+        proptest!(|(
+            number in vals, code in vals, holder in vals,
+            last in vals, city in vals,
+        )| {
+            let cipher = serde_json::json!({
+                "type": 3, "name": "2.n",
+                "card": {"cardholderName": format!("2.{holder}"), "brand": null,
+                         "number": format!("2.{number}"), "expMonth": "1",
+                         "expYear": "2030", "code": format!("2.{code}")},
+                "identity": {"firstName": null, "lastName": format!("2.{last}"),
+                             "city": format!("2.{city}")},
+            });
+            let dec = |s: &str| s.strip_prefix("2.").map(str::to_owned);
+            let enc = |s: &str| format!("2.{s}");
+            let flat = flatten(&cipher, &dec);
+            let out = apply_merged(&cipher, &flat, &enc);
+            let re = flatten(&out, &dec);
+            prop_assert_eq!(flat.clone(), re);
+            // 未觸及欄（brand:null、firstName:null）保持 null 不被材料化成信封
+            prop_assert!(out["card"]["brand"].is_null());
+            prop_assert!(out["identity"]["firstName"].is_null());
+        });
     }
 
     #[test]

@@ -1,0 +1,42 @@
+{
+  "archivedDate": null,
+  "attachments": null,
+  "bankAccount": null,
+  "card": {
+    "brand": "2.AAAAAAAAAAAAAAAAAAAABA==|Aru0q5oShrGAPmf8h1BRCw==|7y4oR2uTDDZ8jxX/CTizmVOYX72KQZOC2w7JAhSm740=",
+    "cardholderName": "2.AAAAAAAAAAAAAAAAAAAAAw==|x/LhPfwgAsv26yGlV6QlHg==|bTtaNutyY+sSxaK0s49ixchmL7uhwK98tlM44RQRFnU=",
+    "code": "2.AAAAAAAAAAAAAAAAAAAACA==|hrslMFQUQ9ec0nS8ubPcsA==|vYcp0+tWmSdHmuBXLIEeWT1dnsya7syIjLTp19Fm6hQ=",
+    "expMonth": "2.AAAAAAAAAAAAAAAAAAAABg==|WpjkbtpNmmipbA8A/SnOaA==|AxhVHK635YHIZs71AQoKi/LL8JM6HLqMU7Glc+zKLeM=",
+    "expYear": "2.AAAAAAAAAAAAAAAAAAAABw==|TMcbp3+OWIRFypjZzkjHxQ==|k58hqlzfUVg2C8iNxQ0lrOG1tSWIvbzw0TNKEPrCZ/I=",
+    "number": "2.AAAAAAAAAAAAAAAAAAAABQ==|t0VjTEeGx1nzJJJ5coBmOtDlwdOvVgvCJkYQpXnPoaM=|M0l/LlZhbTHfkqRYXYQKJLh3VTahKZEn3ylebEOrw3k="
+  },
+  "collectionIds": [],
+  "creationDate": "2026-11-16T00:00:00.0000000Z",
+  "deletedDate": null,
+  "driversLicense": null,
+  "edit": true,
+  "favorite": false,
+  "fields": [],
+  "folderId": null,
+  "id": "3c3a1f2e-0000-4000-8000-0000000000c3",
+  "identity": null,
+  "key": "2.AAAAAAAAAAAAAAAAAAAAAA==|tExl59yyNqqzugLeWHgGqugtvC/jyouYcdFT1ePqnOwfV0IP8j0G+gH5LvQJ5FiPsVbh1mQ5YzSArUIf9JHK81RGJq10uwNdHEZkK8QMWvg=|PWlbtUys84UeNGfLlAnfZb+en+ZiSJjsZchtYBA8NZM=",
+  "login": null,
+  "name": "2.AAAAAAAAAAAAAAAAAAAAAQ==|Sv4r+Ncm92cuB3vhi9Zw/Q==|0sFAwowTY6POmoZ5HBHb5Ap7mmnJW0G9EkWIyYoD0A0=",
+  "notes": "2.AAAAAAAAAAAAAAAAAAAAAg==|YEaNpV1Qi3lwhv2Vh63EkRmBGIMviDljeozLlhX3Og8=|Cd/opqzoO/aPMG+udpINHtkBplpV2YCMtAJjdF29hWw=",
+  "object": "cipherDetails",
+  "organizationId": null,
+  "organizationUseTotp": true,
+  "passport": null,
+  "passwordHistory": [],
+  "permissions": {
+    "delete": true,
+    "restore": true
+  },
+  "reprompt": 0,
+  "revisionDate": "2026-11-16T00:00:00.0000000Z",
+  "secureNote": null,
+  "sshKey": null,
+  "type": 3,
+  "viewPassword": true
+}

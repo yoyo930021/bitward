@@ -29,57 +29,107 @@ pub fn pane(core: AppCore) -> View {
     let totp_cond = core.clone();
     let pk_cond = core.clone();
     let hist_cond = core.clone();
+    let cred_cond = core.clone();
+    let cred_build = core.clone();
+    let card_cond = core.clone();
+    let card_build = core.clone();
+    let idn_cond = core.clone();
+    let idn_build = core.clone();
     view()
         .flex_col()
         .flex_1()
         .child(identity_header(core.clone(), editing))
         .child(view().h(px(1.0)).mx_8().bg(theme::HAIRLINE))
-        .child(scroll().flex_1().child(
-            view()
-                .flex_col()
-                .gap_5()
-                .px_8()
-                .py_4()
-                .w_full()
-                .max_w(px(680.0))
-                .child(section("帳密", credentials_section(core.clone(), copied, editing)))
-                .child(when(
-                    move || {
-                        state::totp_section_shown(
-                            totp_cond.totp.get().as_deref(),
-                            totp_cond.totp_error.get().as_deref(),
-                        )
-                    },
-                    {
-                        let totp_build = core.clone();
-                        move || section("驗證碼", totp_section(totp_build.clone(), copied))
-                    },
-                ))
-                .child(section("備註", notes_section(core.clone(), copied, editing)))
-                .child(section("自訂欄位", custom_fields_section(core.clone(), copied, editing)))
-                .child(section_dyn("附件", {
-                    let ac = core.clone();
-                    move || attachments_rows(ac.clone())
-                }))
-                .child(when(
-                    // 「有才渲染」：無 passkey 的項目整節缺席（不像附件恆帶上傳器）。
-                    move || !pk_cond.passkeys.get().is_empty(),
-                    {
-                        let pk_build = core.clone();
-                        move || section("Passkeys", passkey_rows(pk_build.clone()))
-                    },
-                ))
-                .child(when(
-                    // 歷史節（路線 4）：有版本才渲染。回包 `supported:false`
-                    // （VW 等未實裝 history 路由的 server）→ versions 恆空 → 缺席。
-                    move || !crate::reports::history_versions(&hist_cond.history.get()).is_empty(),
-                    {
-                        let hist_build = core.clone();
-                        move || section("歷史", history_rows(hist_build.clone()))
-                    },
-                ))
-                .child(section("資訊", info_section(core.clone(), copied))),
-        ))
+        .child(
+            scroll().flex_1().child(
+                view()
+                    .flex_col()
+                    .gap_5()
+                    .px_8()
+                    .py_4()
+                    .w_full()
+                    .max_w(px(680.0))
+                    .child(when(
+                        // 帳密節僅 Login 型別（PR1 型別分支：card/identity 無 login 欄）
+                        move || {
+                            cred_cond
+                                .detail
+                                .get()
+                                .is_some_and(|d| d.meta.kind == bw_proto::ItemKind::Login)
+                        },
+                        move || {
+                            section(
+                                "帳密",
+                                credentials_section(cred_build.clone(), copied, editing),
+                            )
+                        },
+                    ))
+                    .child(when(
+                        move || {
+                            card_cond
+                                .detail
+                                .get()
+                                .is_some_and(|d| d.meta.kind == bw_proto::ItemKind::Card)
+                        },
+                        move || section("卡片", card_section(card_build.clone(), copied, editing)),
+                    ))
+                    .child(when(
+                        move || {
+                            idn_cond
+                                .detail
+                                .get()
+                                .is_some_and(|d| d.meta.kind == bw_proto::ItemKind::Identity)
+                        },
+                        move || {
+                            section("身分", identity_section(idn_build.clone(), copied, editing))
+                        },
+                    ))
+                    .child(when(
+                        move || {
+                            state::totp_section_shown(
+                                totp_cond.totp.get().as_deref(),
+                                totp_cond.totp_error.get().as_deref(),
+                            )
+                        },
+                        {
+                            let totp_build = core.clone();
+                            move || section("驗證碼", totp_section(totp_build.clone(), copied))
+                        },
+                    ))
+                    .child(section(
+                        "備註",
+                        notes_section(core.clone(), copied, editing),
+                    ))
+                    .child(section(
+                        "自訂欄位",
+                        custom_fields_section(core.clone(), copied, editing),
+                    ))
+                    .child(section_dyn("附件", {
+                        let ac = core.clone();
+                        move || attachments_rows(ac.clone())
+                    }))
+                    .child(when(
+                        // 「有才渲染」：無 passkey 的項目整節缺席（不像附件恆帶上傳器）。
+                        move || !pk_cond.passkeys.get().is_empty(),
+                        {
+                            let pk_build = core.clone();
+                            move || section("Passkeys", passkey_rows(pk_build.clone()))
+                        },
+                    ))
+                    .child(when(
+                        // 歷史節（路線 4）：有版本才渲染。回包 `supported:false`
+                        // （VW 等未實裝 history 路由的 server）→ versions 恆空 → 缺席。
+                        move || {
+                            !crate::reports::history_versions(&hist_cond.history.get()).is_empty()
+                        },
+                        {
+                            let hist_build = core.clone();
+                            move || section("歷史", history_rows(hist_build.clone()))
+                        },
+                    ))
+                    .child(section("資訊", info_section(core.clone(), copied))),
+            ),
+        )
 }
 
 /// 詳情載入中（右欄尚未收到 Get 回包）。
@@ -236,8 +286,10 @@ fn identity_header(core: AppCore, editing: bool) -> View {
                         .gap_1p5()
                         .cursor_pointer()
                         .on_press(move || {
-                            if let Some(uri) =
-                                uri_open.detail.get().and_then(|d| d.meta.uris.first().cloned())
+                            if let Some(uri) = uri_open
+                                .detail
+                                .get()
+                                .and_then(|d| d.meta.uris.first().cloned())
                             {
                                 drop(open_url(uri));
                             }
@@ -275,11 +327,15 @@ fn identity_header(core: AppCore, editing: bool) -> View {
                             restore.send(Cmd::RestoreItem(id));
                         }
                     }))
-                    .child(ui::button("永久刪除", ui::Btn::Destructive, move || {
-                        if let Route::Detail(id) = purge.route.get() {
-                            purge.send(Cmd::AskPurge(id));
-                        }
-                    }))
+                    .child(ui::button(
+                        "永久刪除",
+                        ui::Btn::Destructive,
+                        move || {
+                            if let Route::Detail(id) = purge.route.get() {
+                                purge.send(Cmd::AskPurge(id));
+                            }
+                        },
+                    ))
                     .child(
                         // daemon 語意：垃圾桶內禁直接封存（422）→ UI 前置擋下。
                         ui::button("封存", ui::Btn::Ghost, || {})
@@ -316,8 +372,12 @@ fn identity_header(core: AppCore, editing: bool) -> View {
                         // 已封存項目改「取消封存」；其餘給「封存」入口（批次 C）。
                         if archived {
                             ui::button("取消封存", ui::Btn::Ghost, move || {
-                                if let (Some(id), Route::Detail(_)) = (item_id, unarch.route.get()) {
-                                    unarch.send(Cmd::SetArchived { id, archived: false });
+                                if let (Some(id), Route::Detail(_)) = (item_id, unarch.route.get())
+                                {
+                                    unarch.send(Cmd::SetArchived {
+                                        id,
+                                        archived: false,
+                                    });
                                 }
                             })
                         } else {
@@ -346,11 +406,7 @@ fn identity_header(core: AppCore, editing: bool) -> View {
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::SURFACE_RAISED))
                 .on_press(move || close_core.send(Cmd::OpenList))
-                .child(
-                    text("✕")
-                        .text_size(px(12.0))
-                        .text_color(theme::TEXT_MUTED),
-                ),
+                .child(text("✕").text_size(px(12.0)).text_color(theme::TEXT_MUTED)),
         )
 }
 
@@ -360,9 +416,19 @@ fn detail_disp(core: &AppCore, f: impl Fn(&bw_proto::ItemView) -> String + 'stat
     Rc::new(move || c.detail.get().map(|d| f(&d)).unwrap_or_default())
 }
 
+/// 通用：從 revealed（Reveal 覆蓋投影）訊號取顯示閉包。
+fn revealed_disp(core: &AppCore, f: impl Fn(&bw_proto::ItemView) -> String + 'static) -> Disp {
+    let c = core.clone();
+    Rc::new(move || c.revealed.get().map(|v| f(&v)).unwrap_or_default())
+}
+
 /// 帳密節（官方 Login credentials＋Autofill options 合併）：帳號/密碼/網址/標籤。
 /// 編輯態＝同節同序、值塊就地變輸入框（`edit_field`／`uris_editor`）。
-fn credentials_section(core: AppCore, copied: Signal<Option<&'static str>>, editing: bool) -> Vec<View> {
+fn credentials_section(
+    core: AppCore,
+    copied: Signal<Option<&'static str>>,
+    editing: bool,
+) -> Vec<View> {
     if editing {
         return vec![
             edit_field("帳號", "使用者名稱或電子信箱", core.form.username, false),
@@ -388,11 +454,273 @@ fn credentials_section(core: AppCore, copied: Signal<Option<&'static str>>, edit
         }
     });
     vec![
-        field("帳號", username.clone(), vec![ui::copy_button(username, "帳號", copied, core.settings)]),
+        field(
+            "帳號",
+            username.clone(),
+            vec![ui::copy_button(username, "帳號", copied, core.settings)],
+        ),
         password_field(core.clone(), copied),
-        field("網址", uris.clone(), vec![ui::copy_button(uris, "網址", copied, core.settings)]),
+        field(
+            "網址",
+            uris.clone(),
+            vec![ui::copy_button(uris, "網址", copied, core.settings)],
+        ),
         field("標籤", tags, Vec::new()),
     ]
+}
+
+/// 卡片節（type 3，PR1 讀側）：官方六欄序——持卡人／品牌／卡號／有效期限／CVV。
+/// 卡號與 CVV 預設遮罩（Masked 投影帶 `number_masked`/`code_masked`），
+/// 「顯示」走既有 `RequestReveal` 語彙（Get(Reveal) 覆蓋全值＋複製鈕）。
+/// 編輯態欄位組在 `form::card_fields_editor`（子批 b）。
+fn card_section(core: AppCore, copied: Signal<Option<&'static str>>, editing: bool) -> Vec<View> {
+    if editing {
+        // 編輯欄位組（form::card_fields_editor）在子批 b 落地
+        return Vec::new();
+    }
+    let mut rows = Vec::new();
+    let holder = detail_disp(&core, |d| {
+        d.card
+            .as_ref()
+            .and_then(|c| c.cardholder_name.clone())
+            .unwrap_or_else(|| "—".into())
+    });
+    rows.push(field(
+        "持卡人",
+        holder.clone(),
+        vec![ui::copy_button(holder, "持卡人", copied, core.settings)],
+    ));
+    let brand = detail_disp(&core, |d| {
+        d.card
+            .as_ref()
+            .and_then(|c| c.brand.clone())
+            .unwrap_or_else(|| "—".into())
+    });
+    rows.push(field(
+        "品牌",
+        brand.clone(),
+        vec![ui::copy_button(brand, "品牌", copied, core.settings)],
+    ));
+    rows.push(masked_field(
+        "卡號",
+        &core,
+        copied,
+        detail_disp(&core, |d| {
+            d.card
+                .as_ref()
+                .and_then(|c| c.number_masked.clone())
+                .unwrap_or_else(|| "••••••••••••".into())
+        }),
+        revealed_disp(&core, |v| {
+            v.card
+                .as_ref()
+                .and_then(|c| c.number.clone())
+                .unwrap_or_default()
+        }),
+    ));
+    let expiry = detail_disp(&core, |d| {
+        match d
+            .card
+            .as_ref()
+            .map(|c| (c.exp_month.clone(), c.exp_year.clone()))
+        {
+            Some((Some(m), Some(y))) => format!("{m} / {y}"),
+            _ => "—".into(),
+        }
+    });
+    rows.push(field("有效期限", expiry, Vec::new()));
+    rows.push(masked_field(
+        "安全碼（CVV）",
+        &core,
+        copied,
+        detail_disp(&core, |d| {
+            d.card
+                .as_ref()
+                .and_then(|c| c.code_masked.clone())
+                .unwrap_or_else(|| "••••".into())
+        }),
+        revealed_disp(&core, |v| {
+            v.card
+                .as_ref()
+                .and_then(|c| c.code.clone())
+                .unwrap_or_default()
+        }),
+    ));
+    rows
+}
+
+/// 遮罩欄（卡號/CVV 語彙，同密碼欄的預設遮罩＋reveal）：`masked` 讀 Masked
+/// 投影訊號、`full` 讀 revealed 覆蓋訊號；未 revealed 不給複製鈕。
+fn masked_field(
+    label_text: &'static str,
+    core: &AppCore,
+    copied: Signal<Option<&'static str>>,
+    masked: Disp,
+    full: Disp,
+) -> View {
+    let shown_cond = core.clone();
+    let toggle = core.clone();
+    let copy_cond = core.clone();
+    let settings = core.settings;
+    let full_revealed = full.clone();
+    view().flex_col().gap_1().child(label(label_text)).child(
+        view()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(
+                view()
+                    .flex_1()
+                    .px_3()
+                    .py_2()
+                    .rounded(px(theme::RADIUS_BLOCK))
+                    .bg(theme::SURFACE)
+                    .child(
+                        when(
+                            move || shown_cond.revealed.get().is_some(),
+                            move || {
+                                let f = full.clone();
+                                text(move || f())
+                                    .text_size(px(theme::TEXT_FIELD_VALUE))
+                                    .font_family(ui::mono_font())
+                                    .text_color(theme::TEXT_PRIMARY)
+                                    .number_of_lines(1)
+                            },
+                        )
+                        .otherwise(move || {
+                            let m = masked.clone();
+                            text(move || m())
+                                .text_size(px(theme::TEXT_FIELD_VALUE))
+                                .text_color(theme::TEXT_PRIMARY)
+                                .number_of_lines(1)
+                        }),
+                    ),
+            )
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(ui::text_button_dyn(
+                        move || {
+                            if toggle.revealed.get().is_some() {
+                                "隱藏".to_owned()
+                            } else {
+                                "顯示".to_owned()
+                            }
+                        },
+                        move || toggle.send(Cmd::RequestReveal),
+                    ))
+                    .child(when(
+                        move || copy_cond.revealed.get().is_some(),
+                        move || {
+                            ui::copy_button(full_revealed.clone(), label_text, copied, settings)
+                        },
+                    )),
+            ),
+    )
+}
+
+/// 身分節（type 4，PR1 讀側）：官方十八欄三組——姓名／地址／聯絡與證件。
+/// 全欄解鎖即可讀（同 notes 紀律，無遮罩欄）；編輯態走 `form::identity_fields_editor`。
+fn identity_section(
+    core: AppCore,
+    copied: Signal<Option<&'static str>>,
+    editing: bool,
+) -> Vec<View> {
+    if editing {
+        // 編輯欄位組（form::identity_fields_editor）在子批 b 落地
+        return Vec::new();
+    }
+    let pick = |key: &'static str| -> Disp {
+        let core = core.clone();
+        detail_disp(&core, move |d| {
+            d.identity
+                .as_ref()
+                .and_then(|i| identity_field(i, key))
+                .unwrap_or_else(|| "—".into())
+        })
+    };
+    let row = |label_text: &'static str, key: &'static str| -> Option<View> {
+        let present = core
+            .detail
+            .get()
+            .and_then(|d| d.identity.clone())
+            .is_some_and(|i| identity_field(&i, key).is_some());
+        let value = pick(key);
+        let trailing = if present {
+            vec![ui::copy_button(
+                value.clone(),
+                label_text,
+                copied,
+                core.settings,
+            )]
+        } else {
+            Vec::new()
+        };
+        Some(field(label_text, value, trailing))
+    };
+    let mut rows: Vec<View> = Vec::new();
+    rows.push(view().child(ui::section_title("姓名")));
+    for (label_text, key) in [
+        ("稱謂", "title"),
+        ("姓", "lastName"),
+        ("名", "firstName"),
+        ("中間名", "middleName"),
+    ] {
+        rows.extend(row(label_text, key));
+    }
+    rows.push(view().child(ui::section_title("地址")));
+    for (label_text, key) in [
+        ("地址 1", "address1"),
+        ("地址 2", "address2"),
+        ("地址 3", "address3"),
+        ("城市", "city"),
+        ("州／省", "state"),
+        ("郵遞區號", "postalCode"),
+        ("國家", "country"),
+    ] {
+        rows.extend(row(label_text, key));
+    }
+    rows.push(view().child(ui::section_title("聯絡與證件")));
+    for (label_text, key) in [
+        ("公司", "company"),
+        ("Email", "email"),
+        ("電話", "phone"),
+        ("身份證號", "ssn"),
+        ("使用者名稱", "username"),
+        ("護照號碼", "passportNumber"),
+        ("駕照號碼", "licenseNumber"),
+    ] {
+        rows.extend(row(label_text, key));
+    }
+    rows
+}
+
+/// 身分欄按線鍵名取值（詳情渲染與列構造共用；鍵名＝`IDENTITY_FIELDS` 原樣）。
+fn identity_field(i: &bw_proto::IdentityView, key: &str) -> Option<String> {
+    let v: Option<&Option<String>> = match key {
+        "title" => Some(&i.title),
+        "firstName" => Some(&i.first_name),
+        "middleName" => Some(&i.middle_name),
+        "lastName" => Some(&i.last_name),
+        "address1" => Some(&i.address1),
+        "address2" => Some(&i.address2),
+        "address3" => Some(&i.address3),
+        "city" => Some(&i.city),
+        "state" => Some(&i.state),
+        "postalCode" => Some(&i.postal_code),
+        "country" => Some(&i.country),
+        "company" => Some(&i.company),
+        "email" => Some(&i.email),
+        "phone" => Some(&i.phone),
+        "ssn" => Some(&i.ssn),
+        "username" => Some(&i.username),
+        "passportNumber" => Some(&i.passport_number),
+        "licenseNumber" => Some(&i.license_number),
+        _ => None,
+    };
+    v.and_then(|o| o.clone())
 }
 
 /// 資訊節：類型/更新時間／同步狀態/識別碼（官方 Item history 对应物）。
@@ -421,7 +749,12 @@ fn info_section(core: AppCore, copied: Signal<Option<&'static str>>) -> Vec<View
 /// 備註節：notes 明文（Masked 視窗即帶全文；Metadata 下鍵不存在）。
 fn notes_section(core: AppCore, copied: Signal<Option<&'static str>>, editing: bool) -> Vec<View> {
     if editing {
-        return vec![edit_field("備註", "筆記內容（明文進入 Outgoing 幀）", core.form.notes, false)];
+        return vec![edit_field(
+            "備註",
+            "筆記內容（明文進入 Outgoing 幀）",
+            core.form.notes,
+            false,
+        )];
     }
     let notes = detail_disp(&core, |d| d.notes.clone().unwrap_or_else(|| "—".into()));
     let copy = notes.clone();
@@ -435,7 +768,11 @@ fn notes_section(core: AppCore, copied: Signal<Option<&'static str>>, editing: b
 /// 自訂欄位節：pane 每次 detail 重建時快照（Reveal 不改欄集）。
 /// 布爾欄渲染成開關樣（非純文字）；hidden 欄值僅 Reveal 出、Masked 下
 /// 顯示點號佔位且不給複製鈕。
-fn custom_fields_section(core: AppCore, copied: Signal<Option<&'static str>>, editing: bool) -> Vec<View> {
+fn custom_fields_section(
+    core: AppCore,
+    copied: Signal<Option<&'static str>>,
+    editing: bool,
+) -> Vec<View> {
     if editing {
         return vec![form::custom_fields_editor(core)];
     }
@@ -443,11 +780,7 @@ fn custom_fields_section(core: AppCore, copied: Signal<Option<&'static str>>, ed
         return Vec::new();
     };
     if d.fields.is_empty() {
-        return vec![block(
-            || "（無自訂欄位）".to_owned(),
-            false,
-            Vec::new(),
-        )];
+        return vec![block(|| "（無自訂欄位）".to_owned(), false, Vec::new())];
     }
     d.fields
         .iter()
@@ -515,7 +848,11 @@ fn attachments_rows(core: AppCore) -> Vec<View> {
         .iter()
         .map(|a| att_row(core.clone(), item_id, a))
         .collect();
-    rows.push(upload_editor(core.clone(), item_id, d.meta.organization_id.is_some()));
+    rows.push(upload_editor(
+        core.clone(),
+        item_id,
+        d.meta.organization_id.is_some(),
+    ));
     rows
 }
 
@@ -623,12 +960,18 @@ fn history_rows(core: AppCore) -> Vec<View> {
                 )
         })
         .collect();
-    if report.get("restoreSupported").and_then(serde_json::Value::as_bool) != Some(true) {
-        rows.push(view().child(
-            text("版本還原：此伺服器不提供還原端點，歷史為唯讀")
-                .text_size(px(theme::TEXT_PAGE_SUB))
-                .text_color(theme::TEXT_MUTED),
-        ));
+    if report
+        .get("restoreSupported")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        rows.push(
+            view().child(
+                text("版本還原：此伺服器不提供還原端點，歷史為唯讀")
+                    .text_size(px(theme::TEXT_PAGE_SUB))
+                    .text_color(theme::TEXT_MUTED),
+            ),
+        );
     }
     rows
 }
@@ -702,21 +1045,20 @@ fn upload_editor(core: AppCore, item_id: bw_proto::ItemId, is_org: bool) -> View
             move || !open.get() && gate.is_none(),
             move || {
                 let o = open;
-                view().flex_row().child(ui::button(
-                    "附加檔案",
-                    ui::Btn::Ghost,
-                    move || o.update(|v| *v = true),
-                ))
+                view()
+                    .flex_row()
+                    .child(ui::button("附加檔案", ui::Btn::Ghost, move || {
+                        o.update(|v| *v = true)
+                    }))
             },
         ))
         .child(when(
             move || !open.get() && gate.is_some(),
             move || {
-                view()
-                    .flex_row()
-                    .child(ui::button("附加檔案", ui::Btn::Ghost, move || {}).tooltip(
-                        ui::tooltip_card(gate.unwrap_or("即將推出")),
-                    ))
+                view().flex_row().child(
+                    ui::button("附加檔案", ui::Btn::Ghost, move || {})
+                        .tooltip(ui::tooltip_card(gate.unwrap_or("即將推出"))),
+                )
             },
         ))
         .child(when(
@@ -766,11 +1108,8 @@ fn upload_editor(core: AppCore, item_id: bw_proto::ItemId, is_org: bool) -> View
                             Ok(s) => {
                                 view().child(text(s).text_size(px(12.0)).text_color(theme::SUCCESS))
                             }
-                            Err(e) => view().child(
-                                text(e)
-                                    .text_size(px(12.0))
-                                    .text_color(theme::DESTRUCTIVE),
-                            ),
+                            Err(e) => view()
+                                .child(text(e).text_size(px(12.0)).text_color(theme::DESTRUCTIVE)),
                         }
                     }))
             },
@@ -787,81 +1126,84 @@ fn password_field(core: AppCore, copied: Signal<Option<&'static str>>) -> View {
     let copy_cond = core.clone();
     let copy_build = core.clone();
     let toggle = core.clone();
-    view()
-        .flex_col()
-        .gap_1()
-        .child(label("密碼"))
-        .child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(
-                    view()
-                        .flex_1()
-                        .px_3()
-                        .py_2()
-                        .rounded(px(theme::RADIUS_BLOCK))
-                        .bg(theme::SURFACE)
-                        .child(
-                            when(
-                                move || shown_cond.revealed.get().is_some(),
-                                move || {
-                                    let c = shown_build.clone();
-                                    text(move || match c.revealed.get() {
-                                        Some(pw) if pw.is_empty() => "（此項目沒有密碼）".to_owned(),
-                                        Some(pw) => pw,
-                                        None => String::new(),
-                                    })
-                                    .text_size(px(theme::TEXT_FIELD_VALUE))
-                                    .font_family(ui::mono_font())
-                                    .text_color(theme::TEXT_PRIMARY)
-                                    .number_of_lines(1)
-                                                                    },
-                            )
-                            .otherwise(move || {
-                                let c = mask_core.clone();
+    view().flex_col().gap_1().child(label("密碼")).child(
+        view()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(
+                view()
+                    .flex_1()
+                    .px_3()
+                    .py_2()
+                    .rounded(px(theme::RADIUS_BLOCK))
+                    .bg(theme::SURFACE)
+                    .child(
+                        when(
+                            move || shown_cond.revealed.get().is_some(),
+                            move || {
+                                let c = shown_build.clone();
                                 text(move || {
-                                    c.detail
+                                    c.revealed
                                         .get()
-                                        .and_then(|d| d.password_masked.clone())
-                                        .unwrap_or_else(|| "••••••••".to_owned())
+                                        .and_then(|v| v.password.clone())
+                                        .filter(|p| !p.is_empty())
+                                        .unwrap_or_else(|| "（此項目沒有密碼）".to_owned())
                                 })
                                 .text_size(px(theme::TEXT_FIELD_VALUE))
+                                .font_family(ui::mono_font())
                                 .text_color(theme::TEXT_PRIMARY)
                                 .number_of_lines(1)
-                                                            }),
-                        ),
-                )
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .child(ui::text_button_dyn(
-                            move || {
-                                if reveal_core.revealed.get().is_some() {
-                                    "隱藏密碼".to_owned()
-                                } else {
-                                    "顯示密碼".to_owned()
-                                }
                             },
-                            move || toggle.send(Cmd::RequestReveal),
-                        ))
-                        .child(when(
-                            move || copy_cond.revealed.get().is_some(),
-                            move || {
-                                let c = copy_build.clone();
-                                ui::copy_button(
-                                    Rc::new(move || c.revealed.get().unwrap_or_default()),
-                                    "密碼",
-                                    copied,
-                                    c.settings,
-                                )
-                                                            },
-                        )),
-                ),
-        )
+                        )
+                        .otherwise(move || {
+                            let c = mask_core.clone();
+                            text(move || {
+                                c.detail
+                                    .get()
+                                    .and_then(|d| d.password_masked.clone())
+                                    .unwrap_or_else(|| "••••••••".to_owned())
+                            })
+                            .text_size(px(theme::TEXT_FIELD_VALUE))
+                            .text_color(theme::TEXT_PRIMARY)
+                            .number_of_lines(1)
+                        }),
+                    ),
+            )
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(ui::text_button_dyn(
+                        move || {
+                            if reveal_core.revealed.get().is_some() {
+                                "隱藏密碼".to_owned()
+                            } else {
+                                "顯示密碼".to_owned()
+                            }
+                        },
+                        move || toggle.send(Cmd::RequestReveal),
+                    ))
+                    .child(when(
+                        move || copy_cond.revealed.get().is_some(),
+                        move || {
+                            let c = copy_build.clone();
+                            ui::copy_button(
+                                Rc::new(move || {
+                                    c.revealed
+                                        .get()
+                                        .and_then(|v| v.password.clone())
+                                        .unwrap_or_default()
+                                }),
+                                "密碼",
+                                copied,
+                                c.settings,
+                            )
+                        },
+                    )),
+            ),
+    )
 }
 
 fn label(text_label: &'static str) -> Text {
@@ -939,58 +1281,55 @@ fn field(label_text: &'static str, value: Disp, trailing: Vec<View>) -> View {
     for t in trailing {
         actions = actions.child(t);
     }
-    view()
-        .flex_col()
-        .gap_1()
-        .child(label(label_text))
-        .child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(
-                    view()
-                        .flex_1()
-                        .px_3()
-                        .py_2()
-                        .rounded(px(theme::RADIUS_BLOCK))
-                        .bg(theme::SURFACE)
-                        .child(
-                            text(move || v1())
-                                .text_size(px(theme::TEXT_FIELD_VALUE))
-                                .text_color(theme::TEXT_PRIMARY)
-                                .number_of_lines(1),
-                        ),
-                )
-                .child(actions),
-        )
+    view().flex_col().gap_1().child(label(label_text)).child(
+        view()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(
+                view()
+                    .flex_1()
+                    .px_3()
+                    .py_2()
+                    .rounded(px(theme::RADIUS_BLOCK))
+                    .bg(theme::SURFACE)
+                    .child(
+                        text(move || v1())
+                            .text_size(px(theme::TEXT_FIELD_VALUE))
+                            .text_color(theme::TEXT_PRIMARY)
+                            .number_of_lines(1),
+                    ),
+            )
+            .child(actions),
+    )
 }
 
 /// 編輯態欄位：與 `field()` 同幾何（label 同位、圓角塊同寬同高），
 /// 塊內從文字換輸入框——morph 零跳動的欄位級實作。
-fn edit_field(label_text: &'static str, placeholder: &'static str, value: Signal<String>, secure: bool) -> View {
-    view()
-        .flex_col()
-        .gap_1()
-        .child(label(label_text))
-        .child(
-            input()
-                .value(move || value.get())
-                .placeholder(placeholder.to_owned())
-                .placeholder_color(move || color(theme::TEXT_MUTED))
-                .masked(secure)
-                .on_change(move |t: &str| value.set(t.to_owned()))
-                .px_3()
-                .h(px(34.0))
-                .w_full()
-                .rounded(px(theme::RADIUS_BLOCK))
-                .border(px(1.0))
-                .border_color(theme::HAIRLINE)
-                .bg(theme::SURFACE)
-                .text_color(theme::TEXT_PRIMARY)
-                .text_size(px(theme::TEXT_FIELD_VALUE))
-                .focus(|s| s.border_color(theme::ACCENT)),
-        )
+fn edit_field(
+    label_text: &'static str,
+    placeholder: &'static str,
+    value: Signal<String>,
+    secure: bool,
+) -> View {
+    view().flex_col().gap_1().child(label(label_text)).child(
+        input()
+            .value(move || value.get())
+            .placeholder(placeholder.to_owned())
+            .placeholder_color(move || color(theme::TEXT_MUTED))
+            .masked(secure)
+            .on_change(move |t: &str| value.set(t.to_owned()))
+            .px_3()
+            .h(px(34.0))
+            .w_full()
+            .rounded(px(theme::RADIUS_BLOCK))
+            .border(px(1.0))
+            .border_color(theme::HAIRLINE)
+            .bg(theme::SURFACE)
+            .text_color(theme::TEXT_PRIMARY)
+            .text_size(px(theme::TEXT_FIELD_VALUE))
+            .focus(|s| s.border_color(theme::ACCENT)),
+    )
 }
 
 /// 欄位值塊（build 時快照；自訂欄位用，欄名是動態字串、值塊内容由呼叫端
@@ -1031,9 +1370,10 @@ fn totp_section(core: AppCore, copied: Signal<Option<&'static str>>) -> Vec<View
     let btn_block = core.clone();
     vec![block_dyn(
         move || {
-            shown_core.totp.get().unwrap_or_else(|| {
-                err_core.totp_error.get().unwrap_or_default()
-            })
+            shown_core
+                .totp
+                .get()
+                .unwrap_or_else(|| err_core.totp_error.get().unwrap_or_default())
         },
         false,
         move || {
@@ -1102,8 +1442,8 @@ fn countdown(core: AppCore) -> View {
                         .h_full()
                         .rounded_full()
                         .w(move || {
-                            let left = countdown_remaining(&w_core) as f32
-                                / TOTP_PERIOD_SECS as f32;
+                            let left =
+                                countdown_remaining(&w_core) as f32 / TOTP_PERIOD_SECS as f32;
                             px(theme::TOTP_BAR_W * left)
                         })
                         .bg(move || {

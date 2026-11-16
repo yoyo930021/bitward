@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# 欄位路徑座標系的單一真源（CARD_FIELDS／IDENTITY_FIELDS 定義在協定型別層）
+bw-proto.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

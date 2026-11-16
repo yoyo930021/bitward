@@ -24,6 +24,40 @@ pub enum ItemKind {
     Identity,
 }
 
+/// 官方 `card` 節欄位名（線格式鍵名，六欄全 EncString；查證：clients
+/// `libs/common/src/vault/models/domain/card.ts`）。路徑文法 `card.<欄名>`。
+pub const CARD_FIELDS: [&str; 6] = [
+    "cardholderName",
+    "brand",
+    "number",
+    "expMonth",
+    "expYear",
+    "code",
+];
+
+/// 官方 `identity` 節欄位名（線格式鍵名，十八欄全 EncString；查證：clients
+/// `libs/common/src/vault/models/domain/identity.ts`）。路徑文法 `identity.<欄名>`。
+pub const IDENTITY_FIELDS: [&str; 18] = [
+    "title",
+    "firstName",
+    "middleName",
+    "lastName",
+    "address1",
+    "address2",
+    "address3",
+    "city",
+    "state",
+    "postalCode",
+    "country",
+    "company",
+    "email",
+    "phone",
+    "ssn",
+    "username",
+    "passportNumber",
+    "licenseNumber",
+];
+
 /// 讀取視窗三級；所有讀取簽名強制帶（契約 §2.1）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum View {
@@ -56,6 +90,29 @@ pub enum FieldPath {
     SecurityCode,
     IdentityField(String),
     Attachment(AttachmentId),
+    /// 卡片節非遮罩欄（cardholderName／brand／expMonth／expYear）：置尾紀律
+    /// （postcard 變體索引追加）。number/code 用既有 CardNumber／CardCode 座標。
+    CardField(String),
+}
+
+/// 欄位路徑字串（`FieldEdit::Set` 文法，見其文件）→ 敏感度座標。
+/// 卡片／身分節的欄名按線格式鍵名原樣進座標系（`card.number` → CardNumber、
+/// `card.code` → CardCode、其餘 `card.<f>` → CardField(f)、`identity.<f>` →
+/// IdentityField(f)）。非 card/identity 路徑回 None（呼叫端自有既有映射）。
+#[must_use]
+pub fn card_identity_path_to_field_path(path: &str) -> Option<FieldPath> {
+    if let Some(f) = path.strip_prefix("card.") {
+        return Some(match f {
+            "number" => FieldPath::CardNumber,
+            "code" => FieldPath::CardCode,
+            other if CARD_FIELDS.contains(&other) => FieldPath::CardField(other.to_owned()),
+            _ => return None,
+        });
+    }
+    let f = path.strip_prefix("identity.")?;
+    IDENTITY_FIELDS
+        .contains(&f)
+        .then(|| FieldPath::IdentityField(f.to_owned()))
 }
 
 /// 分級表：純函數，無配置（契約 §2.1）。username 預設 Secret，
@@ -72,6 +129,7 @@ pub fn sensitivity_of(p: &FieldPath) -> Sensitivity {
         | FieldPath::CardCode
         | FieldPath::SecurityCode
         | FieldPath::IdentityField(_)
+        | FieldPath::CardField(_)
         | FieldPath::Attachment(_) => Sensitivity::Secret,
     }
 }
@@ -108,6 +166,77 @@ pub struct ItemMeta {
     pub uri_matches: Vec<Option<u8>>,
 }
 
+/// 卡片節投影（type 3；六欄全 EncString，欄名鍵＝官方線格式，見 [`CARD_FIELDS`]）。
+/// `number`/`code` 是遮罩欄：Masked 給 `number_masked`（末四碼）＋`code_masked`
+/// （固定點號，不洩長度），Reveal 才出全值——紀律同 `password`/`password_masked`。
+/// 其餘四欄（持卡人／品牌／有效月／有效年）解鎖即可讀，Masked/Reveal 同形。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CardView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cardholder_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brand: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exp_month: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exp_year: Option<String>,
+    /// 卡號遮罩態（例：`••••4242`；僅 Masked）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number_masked: Option<String>,
+    /// 卡號全值（僅 Reveal；A3 紀律：鍵缺席不是 null）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number: Option<String>,
+    /// CVV 遮罩態（固定 `••••`；僅 Masked 且有值）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_masked: Option<String>,
+    /// CVV 全值（僅 Reveal）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+}
+
+/// 身分節投影（type 4；十八欄全 EncString，欄名鍵見 [`IDENTITY_FIELDS`]）。
+/// 官方詳情頁語意＝解鎖即可讀（同 `notes`/`username`），故 Masked/Reveal 同形、
+/// 無遮罩欄；Metadata（鎖定態）整節缺席。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub middle_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address1: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address2: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address3: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub city: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub postal_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub company: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssn: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passport_number: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license_number: Option<String>,
+}
+
 /// 依 `View` 構造的回傳型別：Metadata 下機密欄位在型別上不存在（契約 §2.1）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ItemView {
@@ -134,6 +263,13 @@ pub struct ItemView {
     /// Masked/Reveal 帶解密檔名。內容位元組只經 Download 出口。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<AttachmentMeta>,
+    /// 卡片節（type 3，PR1）。Metadata 恆 None（欄位全密文）；Masked 帶四欄
+    /// 明文＋卡號/CVV 遮罩態；Reveal 帶卡號/CVV 全值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card: Option<CardView>,
+    /// 身分節（type 4，PR1）。Metadata 恆 None；Masked/Reveal 帶全十八欄。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<IdentityView>,
 }
 
 impl ItemView {
@@ -147,6 +283,8 @@ impl ItemView {
             notes: None,
             fields: Vec::new(),
             attachments: Vec::new(),
+            card: None,
+            identity: None,
         }
     }
 
@@ -161,6 +299,18 @@ impl ItemView {
         self.notes = notes;
         self.fields = fields;
         self.attachments = attachments;
+        self
+    }
+
+    /// 附掛型別節（卡片／身分）；呼叫端已按 `View` 決定遮罩形態（紀律同
+    /// [`Self::with_details`]）。
+    pub fn with_card_identity(
+        mut self,
+        card: Option<CardView>,
+        identity: Option<IdentityView>,
+    ) -> Self {
+        self.card = card;
+        self.identity = identity;
         self
     }
     pub fn masked(
