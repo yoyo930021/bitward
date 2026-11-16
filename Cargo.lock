@@ -479,7 +479,6 @@ dependencies = [
 name = "bw-vault"
 version = "0.0.1"
 dependencies = [
- "bw-proto",
  "proptest",
  "serde_json",
 ]

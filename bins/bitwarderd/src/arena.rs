@@ -90,10 +90,22 @@ unsafe fn alloc_arena() -> Option<Arena> {
         Some(n) => unsafe { libc::syscall(n, 0usize) },
         None => -1,
     };
-    let (mmap_fd, flags) = if fd >= 0 {
-        (fd as i32, libc::MAP_SHARED)
+    // memfd_secret 檔初始 size 0：未 ftruncate 就 MAP_SHARED 觸碰越 EOF 位址＝
+    // SIGBUS（OrbStack ubuntu 24.04 實錄，A10 測炸點；x86 同根因）。
+    let secret_fd = if fd >= 0 {
+        let f = fd as i32;
+        if unsafe { libc::ftruncate(f, ARENA_LEN as libc::off_t) } == 0 {
+            Some(f)
+        } else {
+            unsafe { libc::close(f) };
+            None
+        }
     } else {
-        (-1, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS)
+        None
+    };
+    let (mmap_fd, flags) = match secret_fd {
+        Some(f) => (f, libc::MAP_SHARED),
+        None => (-1, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS),
     };
     let base = unsafe {
         libc::mmap(
@@ -169,7 +181,11 @@ mod tests {
         let after = unsafe { std::slice::from_raw_parts(probe, secret.len()) };
         assert!(after.iter().all(|b| *b == 0), "drop 後未清零");
         let locked = unsafe {
+            // mincore 輸出向量元素型別兩平台不同簽：macOS c_schar、Linux c_uchar。
+            #[cfg(target_os = "macos")]
             let mut vec: libc::c_schar = 0;
+            #[cfg(not(target_os = "macos"))]
+            let mut vec: libc::c_uchar = 0;
             libc::mincore(probe as *mut libc::c_void, 1, &mut vec) == 0
         };
         assert!(locked, "mincore 失敗代表頁未 resident（mlock 未生效）");

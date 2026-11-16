@@ -96,7 +96,7 @@ pass "HubOffline 快速失敗（含 last_seen）"
 BITWARD_DATA_DIR=$PWD/$DH ./target/debug/bitwarderd --data-dir $DH --sock $DH/s \
   --listen 127.0.0.1:$TLSPORT --ntfy "http://127.0.0.1:$NTPORT/$TOPIC" >>$DH/log 2>&1 & HUBPID=$!
 sleep 1
-echo "$WP" | B unlock >/dev/null || fail "重啟後 unlock 失敗"
+echo "$WP" | B unlock --password-stdin >/dev/null || fail "重啟後 unlock 失敗"
 T default ls --json | jq -e 'length >= 1' >/dev/null || fail "重啟後 remote 未恢復"
 pass "hub 重啟後 remote 收斂"
 

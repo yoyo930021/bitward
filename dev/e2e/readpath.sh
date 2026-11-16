@@ -83,7 +83,7 @@ pass "A5 p95=${P95}ms（<50ms）"
 # A6：雙 session 併存不互毀；lock 後舊 token StaleEpoch
 cp "$DATA/cli_session" "$DATA/session_a"
 rm -f "$DATA/cli_session"          # 第二次指令另開新 session
-B unlock >/dev/null                # session B（冪等：已解鎖不该撤銷 A）
+echo "$WP" | B unlock --password-stdin >/dev/null   # session B（冪等：已解鎖不该撤銷 A；14a 嚴格模式需帶主密碼）
 cp "$DATA/cli_session" "$DATA/session_b"
 cp "$DATA/session_a" "$DATA/session_a_real"   # raw 重放用（mv 會搬走原檔）
 A_OUT=$(./target/debug/bitward --sock "$SOCK" --json ls 2>&1 </dev/null || true)   # 用 cli_session(=B)
@@ -119,7 +119,7 @@ pass "A6 unlock 冪等 + lock 級聯撤銷（raw 重放拒斥＋CLI 癒合留痕
 
 # A8：每個 Call 都落 audit 且 hash 鏈可驗證
 rm -f "$DATA/cli_session"   # A6 用過的 token 已被 lock 撤銷，取新 session
-B unlock >/dev/null
+echo "$WP" | B unlock --password-stdin >/dev/null
 CHAIN=$(B audit --verify --json | jq -r '.ok')
 [[ "$CHAIN" == "true" ]] || fail "A8 audit 鏈驗證失敗"
 N_CALLS=$(B audit --tail 1000 --json | jq 'length')
@@ -144,7 +144,7 @@ done
 B sync >/dev/null || fail "A12 鎖定態 sync 失敗"
 LOCKED_LS=$(B ls) || fail "A12 鎖定態 ls 失敗"
 [[ "$LOCKED_LS" != *github* ]] || fail "A12 前提失效：鎖定態 sync 後名字就已明文（沒被蓋回信封？）"
-B unlock >/dev/null || fail "A12 unlock 失敗"
+echo "$WP" | B unlock --password-stdin >/dev/null || fail "A12 unlock 失敗"
 LS=$(B ls) || fail "A12 unlock 後 ls 失敗"
 [[ "$LS" == *github* ]] || fail "A12 unlock 後 ls 沒回填出明文名字"
 [[ "$LS" != *" (pending)"* ]] || fail "A12 unlock 後 ls 仍含 (pending)"
