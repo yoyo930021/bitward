@@ -1466,6 +1466,9 @@ pub fn editor_page(
                             })
                             .collect(),
                         uri_matches: matches_v,
+                        // Android 編輯器只有 Login 型節（無卡片／身分 UI），PR1 6f895c7 新欄補 None。
+                        card: None,
+                        identity: None,
                     })
                     .map(|_| ())
             }

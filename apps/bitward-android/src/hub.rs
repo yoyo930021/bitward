@@ -1001,6 +1001,9 @@ impl Hub {
             folder_id: None,
             fields: Vec::new(),
             uri_matches: Vec::new(),
+            // Android 現況無卡片／身分節 UI（型別恆 Login），PR1 6f895c7 新欄補 None。
+            card: None,
+            identity: None,
         })?;
         Ok((id, "created"))
     }
@@ -1764,6 +1767,8 @@ mod tests {
             folder_id: None,
             fields: Vec::new(),
             uri_matches: Vec::new(),
+            card: None,
+            identity: None,
         }
     }
 
