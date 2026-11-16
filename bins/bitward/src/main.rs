@@ -540,6 +540,9 @@ enum EaCmd {
     Reject { id: String },
     /// grantee 唯讀視圖（需解鎖態；輸出 grantor 項目 Reveal 投影）
     View { id: String },
+    /// 接管（stdin：新主密碼；需解鎖態。改 grantor 主密碼＋重包 akey，
+    /// 伺服器順手清其 2FA 因子——源檔語意見 daemon 註解）
+    Takeover { id: String },
 }
 
 #[derive(Subcommand)]
@@ -1644,6 +1647,10 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             EaCmd::Approve { id } => EaCall::Approve { ea_id: id.clone() },
             EaCmd::Reject { id } => EaCall::Reject { ea_id: id.clone() },
             EaCmd::View { id } => EaCall::View { ea_id: id.clone() },
+            EaCmd::Takeover { id } => EaCall::Takeover {
+                ea_id: id.clone(),
+                new_password: read_line_stdin()?,
+            },
         }),
         Cmd::Settings { cmd } => match cmd {
             SettingsCmd::Show => Call::Admin(AdminCall::GetSettings),

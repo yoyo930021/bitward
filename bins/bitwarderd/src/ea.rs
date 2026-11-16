@@ -8,8 +8,9 @@
 //! 狀態機與本檔的對應：
 //! - grantor 側（C1）：`Invite` →（VW 無 mail 自動 accept）→ `Confirm` → `Revoke`
 //! - grantee 側（C2）：`Initiate` →（grantor `Approve`/`Reject` 或逾時）→ `View`
-//! - 接管（C3）：`TakeoverPrepare` → `Takeover`（改 grantor 主密碼＋重包 akey，
-//!   伺服器順手清空其 2FA 因子——語意在 handler 註記）
+//! - 接管（C3）：`Takeover`（單次呼叫內走 takeover→重包→password；改 grantor
+//!   主密碼＋重包 akey。伺服器順手清空其 2FA 因子並踢非 Owner 出組織——
+//!   語意見 `password_emergency_access` 源檔）
 
 use bw_proto::{EaAccessType, EaCall, EaRole, ItemKind, ItemMeta, ItemView, Response, WtpError};
 use serde_json::Value;
@@ -32,6 +33,10 @@ impl crate::hub::Hub {
             EaCall::Approve { ea_id } => self.ea_simple_post(ea_id, false).await,
             EaCall::Reject { ea_id } => self.ea_reject(ea_id).await,
             EaCall::View { ea_id } => self.ea_view(ea_id).await,
+            EaCall::Takeover {
+                ea_id,
+                new_password,
+            } => self.ea_takeover(ea_id, new_password).await,
         }
     }
 
@@ -207,6 +212,76 @@ impl crate::hub::Hub {
         Ok(Response::EaView(items))
     }
 
+    /// 接管（C3）：takeover 材料 → 外部鑰解包 → 新密碼重包 → password 端點。
+    /// KDF 鹽優先級同官方：雲態 takeover 回包帶 `salt`（源檔
+    /// `EmergencyAccessTakeoverResponseModel.Salt`）；VW 1.37.2 不帶，
+    /// 退 grantor email（VW 的 master password salt 就是 email）。
+    /// 成功後 grantor 主密碼即換、其 2FA 全清、refresh token 輪換
+    /// （`set_password` 語意）——本裝置（grantee）鏡像不動，grantor 各端
+    /// 需以新密碼重登入。
+    async fn ea_takeover(&self, ea_id: &str, new_password: &str) -> DispatchResult {
+        if !self.machine.is_unlocked() {
+            return Err(denied("接管需要解鎖態（要以自己的 RSA 私鑰解派發信封）"));
+        }
+        if new_password.chars().count() < crate::hub::MIN_MASTER_PASSWORD {
+            return Err(denied(format!(
+                "新主密碼太短（至少 {} 字元）",
+                crate::hub::MIN_MASTER_PASSWORD
+            )));
+        }
+        let client = self.ea_client().await?;
+        let raw = client
+            .ea_takeover(ea_id)
+            .await
+            .map_err(crate::hub::map_server_err)?;
+        let key_env = raw
+            .get("keyEncrypted")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| crate::hub::drift("takeover 回包缺 keyEncrypted（grantor 未派鑰？）"))?
+            .to_owned();
+        let kdf = crate::hub::KdfWire::from_prelogin(&raw)
+            .ok_or_else(|| crate::hub::drift("takeover 回包缺 KDF 欄位"))?;
+        let salt = match raw.get("salt").and_then(Value::as_str) {
+            Some(s) => s.to_owned(),
+            // VW 態不帶 salt：＝grantor email，從 granted 清單按 ea_id 取。
+            None => {
+                let contacts = client
+                    .ea_list(EaRole::Grantor)
+                    .await
+                    .map_err(crate::hub::map_server_err)?;
+                contacts
+                    .into_iter()
+                    .find(|c| c.id == ea_id)
+                    .map(|c| c.email)
+                    .ok_or(WtpError::NotFound)?
+            }
+        };
+        let (hash, key) = self
+            .machine
+            .with_keys(|kb| {
+                let enc_priv = kb.encrypted_private_key()?;
+                let pkcs8 = bw_crypto::decrypt_private_key(kb.user_key(), enc_priv).ok()?;
+                let uk_bytes = bw_crypto::rsa_decrypt(&pkcs8, &key_env).ok()?;
+                let grantor_key = bw_crypto::UserKey::from_bytes(uk_bytes).ok()?;
+                let mk_new = bw_crypto::master_key(new_password, &salt, kdf.to_params()).ok()?;
+                let hash = bw_crypto::master_password_hash(&mk_new, new_password)
+                    .as_b64()
+                    .to_owned();
+                let key = bw_crypto::encrypt_user_key(&mk_new, &grantor_key).ok()?;
+                Some((hash, key))
+            })
+            .map_err(|_| denied("金鑰閉包失效（請重新解鎖）"))?
+            .ok_or_else(|| {
+                denied("本帳號沒有可用的 RSA 私鑰（註冊時未生成），解不开派發金鑰信封")
+            })?;
+        client
+            .ea_takeover_password(ea_id, &hash, &key)
+            .await
+            .map_err(crate::hub::map_server_err)?;
+        Ok(Response::Ok)
+    }
+
     /// 外部（grantor）cipher JSON → `ItemView`（Reveal 級）。鏡像層不在場：
     /// meta 直接從協議欄位構（紀律同 `bw_store::ciphers::write_cipher` 的讀側），
     /// 欄位解密走 [`Hub::cipher_field_decryptor`] 以 grantor user key 為候選鑰。
@@ -220,10 +295,7 @@ impl crate::hub::Hub {
         let id = uuid::Uuid::parse_str(cipher.get("id")?.as_str()?).ok()?;
         let empty_orgs = std::collections::HashMap::new();
         let dec = self.cipher_field_decryptor(grantor_key, cipher, &empty_orgs);
-        let name = cipher
-            .get("name")
-            .and_then(Value::as_str)
-            .and_then(&dec);
+        let name = cipher.get("name").and_then(Value::as_str).and_then(&dec);
         let login = cipher.get("login");
         let uris: Vec<String> = login
             .and_then(|l| l.get("uris"))

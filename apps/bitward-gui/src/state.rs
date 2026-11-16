@@ -641,6 +641,10 @@ pub enum Cmd {
     EaReject(String),
     /// grantee 拉唯讀視圖（`EmergencyAccess:View`；需解鎖態）。
     EaView(String),
+    /// 開接管面板（記 ea_id；新密碼欄現編）。
+    EaTakeoverOpen(String),
+    /// 面板送出：`EmergencyAccess:Takeover`（新密碼走本機線，A11）。
+    EaTakeoverSubmit,
     /// 視圖回包：Some＝進水印唯讀態；None＝退出回清單。
     EaViewLoaded(Option<std::sync::Arc<Vec<bw_proto::ItemView>>>),
     /// EA 寫操作收尾：Ok(toast)／Err(可懂錯誤)；成功後自動重取清單。
@@ -1439,6 +1443,9 @@ pub struct AppCore {
     /// 隸屬的 grantor 顯示名。**epoch 語意**：進鎖態即清（見 StateUpdated）。
     pub ea_view_items: Signal<Option<std::sync::Arc<Vec<bw_proto::ItemView>>>>,
     pub ea_view_for: Signal<Option<String>>,
+    /// 接管面板（C3）：`ea_tk_for`＝進行中的 ea id；明文密碼進鎖態即清。
+    pub ea_tk_for: Signal<Option<String>>,
+    pub ea_tk_pw: Signal<String>,
 }
 
 impl AppCore {
@@ -1553,6 +1560,8 @@ impl AppCore {
             ea_days: signal("7".to_owned()),
             ea_view_items: signal(None),
             ea_view_for: signal(None),
+            ea_tk_for: signal(None),
+            ea_tk_pw: signal(String::new()),
             form: FormFields {
                 name: signal(String::new()),
                 username: signal(String::new()),
@@ -2105,6 +2114,8 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 // 重解鎖後再讀會向 daemon 重取（daemon 快取同 epoch 作廢）。
                 core.ea_view_items.set(None);
                 core.ea_view_for.set(None);
+                core.ea_tk_for.set(None);
+                core.ea_tk_pw.set(String::new());
             }
             if was_unlocked
                 && !unlocked
@@ -3161,6 +3172,8 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 Ok(msg) => {
                     core.notice.set(Some(msg));
                     core.ea_email.set(String::new());
+                    core.ea_tk_for.set(None);
+                    core.ea_tk_pw.set(String::new());
                     core.send(Cmd::EaFetch);
                 }
                 Err(e) => core.ea_error.set(Some(e)),
@@ -3243,6 +3256,33 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                     core.ea_view_for.set(None);
                 }
             }
+        }
+        Cmd::EaTakeoverOpen(id) => {
+            core.ea_tk_for.set(Some(id));
+            core.ea_tk_pw.set(String::new());
+        }
+        Cmd::EaTakeoverSubmit => {
+            let Some(id) = core.ea_tk_for.get() else {
+                return;
+            };
+            let pw = core.ea_tk_pw.get();
+            if pw.chars().count() < 12 {
+                core.ea_error
+                    .set(Some("新主密碼至少 12 字元（daemon 同閘值）".into()));
+                return;
+            }
+            core.ea_error.set(None);
+            core.ea_busy.set(true);
+            core.ipc_quiet(move |s| {
+                match s.call(&Call::EmergencyAccess(bw_proto::EaCall::Takeover {
+                    ea_id: id.clone(),
+                    new_password: pw,
+                })) {
+                    Ok(Response::Ok) => Cmd::EaDone(Ok("已接管（新主密碼生效）".into())),
+                    Ok(other) => Cmd::EaDone(Err(format!("takeover 回應形態不符：{other:?}"))),
+                    Err(e) => Cmd::EaDone(Err(e.display())),
+                }
+            });
         }
         Cmd::SubmitSend => {
             let f = &core.send_form;

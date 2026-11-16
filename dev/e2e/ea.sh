@@ -19,6 +19,7 @@ EB="ea-grantee-$TS@bitward.test"
 ET="ea-takeover-$TS@bitward.test"
 DG=/tmp/bitward-ea-g
 DB=/tmp/bitward-ea-b
+DT=/tmp/bitward-ea-t
 
 command -v docker >/dev/null || { echo "FAIL: 需要 docker"; exit 1; }
 command -v jq >/dev/null || { echo "FAIL: 需要 jq"; exit 1; }
@@ -32,6 +33,7 @@ cleanup() {
   docker rm -f "$VW" >/dev/null 2>&1 || true
   pkill -f "bitwarderd --data-dir $DG" 2>/dev/null || true
   pkill -f "bitwarderd --data-dir $DB" 2>/dev/null || true
+  pkill -f "bitwarderd --data-dir $DT" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -46,6 +48,7 @@ start_daemon() { # $1=dir
 
 BG() { BITWARD_DATA_DIR=$DG ./target/debug/bitward --sock "$DG/s" "$@"; }
 BB() { BITWARD_DATA_DIR=$DB ./target/debug/bitward --sock "$DB/s" "$@"; }
+BT() { BITWARD_DATA_DIR=$DT ./target/debug/bitward --sock "$DT/s" "$@"; }
 
 docker rm -f "$VW" >/dev/null 2>&1 || true
 docker run -d --name "$VW" -p $PORT:80 -e I_REALLY_WANT_VOLATILE_STORAGE=true \
@@ -131,4 +134,30 @@ BG ea reject "$EAID" >/dev/null
   || fail "reject 後應回 Confirmed"
 pass "reject 閉環回 Confirmed（view 入口消失由 can_view 純測釘選）"
 
-echo "EXIT-C2-PARTIAL 0"
+# ── C3：接管閉環（第三受託人 takeover 型別）───────────────────
+ET="ea-takee-$TS@bitward.test"
+start_daemon "$DT"
+echo "$PWB" | BT dev-register --server "$SRV" --email "$ET" --password-stdin >/dev/null
+echo "$PWB" | BT login --server "$SRV" --email "$ET" --password-stdin >/dev/null
+BG ea invite "$ET" --type takeover --days 1 >/dev/null
+EAID2=$(BG ea ls | jq -r '.[] | select(.type=="Takeover") | .id')
+[[ -n "$EAID2" ]] || fail "takeover 型別邀請未入列"
+BG ea confirm "$EAID2" >/dev/null
+BT ea initiate "$EAID2" >/dev/null
+BG ea approve "$EAID2" >/dev/null
+echo "$PWNEW" | BT --json ea takeover "$EAID2" >/dev/null
+pass "takeover 鏈跑通（grantee 重包 akey＋新 hash 上收）"
+
+# 使用者可觀察終態：grantor 舊密碼失效、新密碼可登入見自己的庫。
+if echo "$PWG" | BG login --server "$SRV" --email "$EG" --password-stdin >/dev/null 2>&1; then
+  fail "接管後舊主密碼不應还能登入"
+fi
+pass "接管後舊主密碼登入被拒"
+echo "$PWNEW" | BG login --server "$SRV" --email "$EG" --password-stdin >/dev/null
+[[ "$(BG status --json | jq '.items')" -ge 1 ]] \
+  || fail "接管後新密碼登入應見 grantor 庫（items>=1）"
+pass "接管閉環：新主密碼登入成功且庫完整"
+# 2FA 清空語意：源檔 `TwoFactor::delete_all_by_user`——本 VW 帳號未啟因子，
+# 語意記錄於此＋daemon 註解（真因子清空留人工驗收，plan Lane 5 備註）。
+
+echo "EXIT 0"

@@ -894,6 +894,13 @@ pub enum EaCall {
     /// `Hub::cipher_decrypt_key` 外部鑰視窗投影成 Reveal 級 `ItemView` 清單。
     /// 需要解鎖態（解私鑰信封）；結果按 `LockEpoch` 快取——上鎖即失效。
     View { ea_id: String },
+    /// 接管（C3）：daemon 一鍵走 `POST {base}/{id}/takeover`（拿 grantor
+    /// KDF＋keyEncrypted）→ 己 RSA 私鑰解出 grantor user key → 以新主密碼
+    /// 重包 akey＋算 hash → `POST {base}/{id}/password`。`new_password` 明文
+    /// 紀律同 `AuthCall::ChangePassword`（只走本機線，不落 argv，A11）。
+    /// 伺服器語意（源檔 `password_emergency_access`）：改 grantor 主密碼、
+    /// **清空其全部 2FA 因子**、踢非 Owner 組織成員身分——接管即重生。
+    Takeover { ea_id: String, new_password: String },
 }
 
 /// EA 存取等級（upstream `EmergencyAccessType`：0=View、1=Takeover）。
@@ -2251,6 +2258,10 @@ mod tests {
             EaCall::Approve { ea_id: "x".into() },
             EaCall::Reject { ea_id: "x".into() },
             EaCall::View { ea_id: "x".into() },
+            EaCall::Takeover {
+                ea_id: "x".into(),
+                new_password: "pw".into(),
+            },
         ] {
             let wrapped = Call::EmergencyAccess(call);
             let bytes = postcard::to_allocvec(&wrapped).unwrap();

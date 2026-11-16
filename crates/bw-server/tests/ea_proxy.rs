@@ -112,6 +112,8 @@ const TRUSTED_VW: &str = include_str!("../fixtures/ea_trusted_vw_1.37.2.json");
 const GRANTED_VW: &str = include_str!("../fixtures/ea_granted_vw_1.37.2.json");
 const PUBKEY_VW: &str = include_str!("../fixtures/users_public_key_vw_1.37.2.json");
 const GRANTED_CLOUD: &str = include_str!("../fixtures/ea_granted_cloud_derived.json");
+const VIEW_VW: &str = include_str!("../fixtures/ea_view_vw_1.37.2.json");
+const TAKEOVER_VW: &str = include_str!("../fixtures/ea_takeover_vw_1.37.2.json");
 
 /// VW 佈局全鏈形態：清單解析吃真錄 bytes、invite/confirm/revoke 的
 /// path 與欄位名逐斷言（`{api}/emergency-access/*`、公鑰 `{api}/users/{id}/…`）。
@@ -235,4 +237,46 @@ fn both_fixture_shapes_parse() {
     assert_eq!(b.len(), 1);
     assert_eq!(a[0].recovery_initiated_at, None);
     assert!(b[0].recovery_initiated_at.is_some());
+}
+
+/// C2/C3 端點形態釘選（真錄 bytes 回放）：view/takeover 為空體 POST、
+/// password 帶 `newMasterPasswordHash`＋重包 `key`；回包欄位收斂成
+/// `emergencyAccessView`/`emergencyAccessTakeover` 形態（`salt` 缺席＝VW，
+/// 雲態推導帶 salt——daemon 派生分岔見 `bitwarderd::ea::ea_takeover`）。
+#[tokio::test]
+async fn view_takeover_and_password_wire_shapes() {
+    let view: serde_json::Value = serde_json::from_str(VIEW_VW).unwrap();
+    let take: serde_json::Value = serde_json::from_str(TAKEOVER_VW).unwrap();
+    assert_eq!(view["object"], "emergencyAccessView");
+    assert!(view["ciphers"].is_array() && view["keyEncrypted"].as_str().unwrap().starts_with("4."));
+    assert_eq!(take["object"], "emergencyAccessTakeover");
+    assert_eq!(take["kdf"], 0);
+    assert_eq!(take["kdfIterations"], 600000);
+    assert!(take.get("salt").is_none(), "VW 真錄不帶 salt（雲態才帶）");
+
+    let mock = Mock::spawn(vec![
+        (
+            "/api/emergency-access/trusted",
+            (200, TRUSTED_VW.to_owned()),
+        ),
+        ("/api/emergency-access/x/view", (200, VIEW_VW.to_owned())),
+        (
+            "/api/emergency-access/x/takeover",
+            (200, TAKEOVER_VW.to_owned()),
+        ),
+        ("/api/emergency-access/x/password", (200, "{}".to_owned())),
+    ]);
+    let client = client_with_token(&mock).await;
+    let raw = client.ea_view("x").await.unwrap();
+    assert_eq!(raw, view);
+    mock.hit("POST /api/emergency-access/x/view");
+    let raw = client.ea_takeover("x").await.unwrap();
+    assert_eq!(raw, take);
+    client
+        .ea_takeover_password("x", "NEWHASH==", "2.new|iv|mac")
+        .await
+        .unwrap();
+    let body = mock.json_body("POST /api/emergency-access/x/password");
+    assert_eq!(body["newMasterPasswordHash"], "NEWHASH==");
+    assert_eq!(body["key"], "2.new|iv|mac");
 }

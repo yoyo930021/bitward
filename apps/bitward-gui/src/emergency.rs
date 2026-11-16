@@ -54,6 +54,13 @@ pub fn can_view(c: &EaContact) -> bool {
         && c.access_type == bw_proto::EaAccessType::View
 }
 
+/// 接管入口（C3）：Takeover 型別且恢復已批准——改 grantor 主密碼閉環。
+pub fn can_takeover(c: &EaContact) -> bool {
+    c.role == EaRole::Grantor
+        && c.status == EaStatus::RecoveryApproved
+        && c.access_type == bw_proto::EaAccessType::Takeover
+}
+
 /// 緊急联系人頁視角（右欄整塊）：清單態 ↔ 水印唯讀檢視態同訊號切換。
 pub fn pane(core: AppCore) -> View {
     let invite_core = core.clone();
@@ -131,6 +138,13 @@ fn contacts_body(core: AppCore, invite_core: AppCore) -> View {
                         "授權給我的",
                         core.ea_grantors,
                     ))
+                    .child(dynamic({
+                        let tk_core = core.clone();
+                        move || match tk_core.ea_tk_for.get() {
+                            Some(_) => takeover_panel(tk_core.clone()),
+                            None => view(),
+                        }
+                    }))
                     .child(invite_form(core.clone())),
             ),
         )
@@ -248,6 +262,13 @@ fn recovery_actions(c: &EaContact, id: &str, core: &AppCore) -> View {
             vc.send(Cmd::EaView(vid.clone()))
         }));
     }
+    if can_takeover(c) {
+        let tc = core.clone();
+        let tid = id.to_owned();
+        row = row.child(ui::button("接管", ui::Btn::Destructive, move || {
+            tc.send(Cmd::EaTakeoverOpen(tid.clone()))
+        }));
+    }
     row
 }
 
@@ -354,6 +375,50 @@ fn view_row(v: bw_proto::ItemView, _core: AppCore) -> View {
         .child(view().flex_1())
         .child(row_note(v.username.clone().unwrap_or_default()))
         .child(row_note(format!("密碼 {pw}")))
+}
+
+/// 接管面板（C3）：新主密碼欄＋確認/取消。語意註記在欄位說明：
+/// 改寫對方主密碼、其 2FA 因子全清、各裝置需重登入。
+fn takeover_panel(core: AppCore) -> View {
+    let cancel_core = core.clone();
+    let submit_core = core.clone();
+    let pw_core = core.clone();
+    view()
+        .flex_col()
+        .gap_2()
+        .w_full()
+        .p_3()
+        .rounded(px(theme::RADIUS_CONTROL))
+        .border(px(1.0))
+        .border_color(theme::WARNING)
+        .bg(theme::ELEVATED)
+        .child(ui::section_title("接管這個帳號"))
+        .child(row_note(
+            "將以新主密碼接管：對方密碼改寫、雙重驗證因子全清、所有裝置需重新登入。",
+        ))
+        .child(ui::form_field(
+            "新主密碼",
+            "至少 12 字元",
+            core.ea_tk_pw,
+            true,
+            move |t| pw_core.ea_tk_pw.set(t),
+        ))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .child(ui::button(
+                    "確認接管",
+                    ui::Btn::Destructive,
+                    move || submit_core.send(Cmd::EaTakeoverSubmit),
+                ))
+                .child(ui::button("取消", ui::Btn::Ghost, move || {
+                    cancel_core.ea_tk_for.set(None);
+                    cancel_core.ea_tk_pw.set(String::new());
+                }))
+                .child(when(move || core.ea_busy.get(), || row_note("執行中…"))),
+        )
 }
 
 /// 邀請表單：email＋型別 chips＋等待天數＋送出。
@@ -478,8 +543,11 @@ mod tests {
         assert!(can_initiate(&confirmed));
         assert!(!can_view(&confirmed));
         assert!(can_view(&approved_view) && !can_initiate(&approved_view));
-        // 接管型別批准後不出檢視入口（C3 給接管鈕）
+        // 接管型別批准後不出檢視入口，改出接管鈕（C3）
         assert!(!can_view(&approved_take));
+        assert!(can_takeover(&approved_take));
+        assert!(!can_takeover(&approved_view));
+        assert!(!can_takeover(&confirmed));
         // 我在 grantor 側（role Grantee）：對方請求中才出批准/拒絕
         let pending = contact(
             EaRole::Grantee,

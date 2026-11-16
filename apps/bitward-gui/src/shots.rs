@@ -1328,8 +1328,72 @@ fn poll_attachment_row(dir: PathBuf, core: AppCore, ms: u64) {
         at(ms + 19000, move || {
             c.send(Cmd::SetTheme(Appearance::System))
         });
-        at(ms + 19400, quit);
+        // —— 卡片型別幀（PR1 補拍，佔號 65）：表單建卡（六欄）→ 詳情遮罩態
+        //    → 編輯態。斷言軸＝使用者可觀察：列表找得到、詳情節在場。——
+        let c = core.clone();
+        at(ms + 19500, move || {
+            c.send(Cmd::OpenCreate);
+        });
+        let c = core.clone();
+        at(ms + 19800, move || {
+            c.form.name.set("E2E 驗證卡".into());
+            c.form.kind.set(bw_proto::ItemKind::Card);
+            c.form.card.cardholder_name.set("Potato".into());
+            c.form.card.brand.set("Visa".into());
+            c.form.card.number.set("4242424242424242".into());
+            c.form.card.exp_month.set("12".into());
+            c.form.card.exp_year.set("2030".into());
+            c.form.card.code.set("123".into());
+            c.send(Cmd::SubmitForm);
+        });
+        let c = core.clone();
+        at(ms + 21000, move || {
+            c.query.set("E2E 驗證卡".into());
+            c.send(Cmd::RefetchList);
+        });
+        let c = core.clone();
+        at(ms + 21800, move || {
+            let id = find_id(&c, "E2E 驗證卡").expect("卡片應建成並可搜得");
+            c.query.set(String::new());
+            c.send(Cmd::RefetchList);
+            c.send(Cmd::OpenDetail(id));
+        });
+        let d = dir.clone();
+        at(ms + 22400, move || capture(&d, "shot-65-card-detail.png"));
+        let c = core.clone();
+        at(ms + 22700, move || {
+            if let Some(id) = find_id(&c, "E2E 驗證卡") {
+                c.send(Cmd::OpenEdit(id));
+            }
+        });
+        let d = dir.clone();
+        at(ms + 23200, move || capture(&d, "shot-65b-card-edit.png"));
+        // —— 緊急联系人入口幀（PR4，佔號 66）：工具組進頁→清單態渲染
+        //    （demo 庫無 EA 關係＝空態文案在場，即 Lane 1 的入口＋空態斷言）。——
+        let c = core.clone();
+        at(ms + 23500, move || {
+            c.send(Cmd::OpenEmergency);
+        });
+        poll_ea_loaded(dir.clone(), core.clone(), ms + 24200);
+        at(ms + 26000, quit);
     });
+}
+
+/// 等緊急联系人頁兩側清單落地（或錯誤上收）後截圖。
+fn poll_ea_loaded(dir: PathBuf, core: AppCore, ms: u64) {
+    at(ms, move || {
+        let c = core.clone();
+        if !c.ea_loaded.get() && c.ea_error.get().is_none() {
+            poll_ea_loaded(dir, c, ms + 400);
+            return;
+        }
+        assert!(
+            c.ea_loaded.get(),
+            "EA 清單應落地（錯誤：{:?}）",
+            c.ea_error.get()
+        );
+        capture(&dir, "shot-66-ea-entry.png");
+    })
 }
 
 /// 實拍模式（`NSH_GUI_SHOTS_CANDID`）：真庫零寫入三連拍——主列表（favicon

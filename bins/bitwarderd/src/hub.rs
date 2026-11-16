@@ -123,7 +123,7 @@ pub(crate) fn drift(detail: impl std::fmt::Display) -> WtpError {
 
 /// 主密碼強度閘（契約 2c：與註冊閘值一致；dev-register/VW 無本地閘，
 /// 此常数是本專案的唯一真相源，daemon 拒短碼、CLI/GUI 前置提示同值）。
-const MIN_MASTER_PASSWORD: usize = 12;
+pub(crate) const MIN_MASTER_PASSWORD: usize = 12;
 
 impl Hub {
     pub async fn open(
@@ -1762,7 +1762,7 @@ fn mask_push_token(t: &str) -> String {
 
 /// KDF 欄位的持久化/傳輸中介（bw-crypto 的 KdfParams 不實作 serde，邊界在這裡轉）。
 #[derive(Clone, Copy)]
-struct KdfWire {
+pub(crate) struct KdfWire {
     kind: i64,
     iterations: u64,
     memory: Option<u64>,
@@ -1770,7 +1770,7 @@ struct KdfWire {
 }
 
 impl KdfWire {
-    fn from_prelogin(v: &Value) -> Option<Self> {
+    pub(crate) fn from_prelogin(v: &Value) -> Option<Self> {
         let kind = v.get("kdf").and_then(Value::as_i64).unwrap_or(0);
         let iterations = v
             .get("kdfIterations")
@@ -1783,7 +1783,7 @@ impl KdfWire {
             parallelism: v.get("kdfParallelism").and_then(Value::as_u64),
         })
     }
-    fn to_params(self) -> bw_crypto::KdfParams {
+    pub(crate) fn to_params(self) -> bw_crypto::KdfParams {
         if self.kind == 1 {
             bw_crypto::KdfParams::Argon2id {
                 m: self.memory.unwrap_or(64) as u32,
@@ -1902,6 +1902,7 @@ fn action_tag(c: &Call) -> String {
         Call::EmergencyAccess(EaCall::Approve { .. }) => "Ea.Approve",
         Call::EmergencyAccess(EaCall::Reject { .. }) => "Ea.Reject",
         Call::EmergencyAccess(EaCall::View { .. }) => "Ea.View",
+        Call::EmergencyAccess(EaCall::Takeover { .. }) => "Ea.Takeover",
         Call::Use(UseCall::TotpCode { .. }) => "Use.TotpCode",
         Call::Use(UseCall::GeneratePassword { .. }) => "Use.GeneratePassword",
         Call::Use(UseCall::ResolveRef { .. }) => "Use.ResolveRef",
