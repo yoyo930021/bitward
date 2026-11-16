@@ -150,6 +150,21 @@ G_ITEMS=$(BITWARD_DATA_DIR="$DAG" ./target/debug/bitward --sock "$DAG/s" --json 
 pass "GUI 兩步登入入庫＋管理分節實跑（shot-48/49/52、Unlocked、items=$G_ITEMS）"
 
 # ── PR3：管理面開停閉環（真 VW、CLI `bitward 2fa`）────────────────
+# 錯碼測試已把 DAC 打回 SignedOut（帳號記錄隨簽出移除→管理面 NotFound,e2e 實錄）：
+# 重新走一遍兩步登入,給管理面建立 session。
+sleep $(( 31 - $(date +%s) % 30 ))
+totp_refresh() {
+  python3 -c "
+import base64,hmac,hashlib,struct,time
+key=base64.b32decode('$SECRET'+'='*(-len('$SECRET')%8))
+c=int(time.time()//30)
+h=hmac.new(key,struct.pack('>Q',c),hashlib.sha1).digest()
+o=h[-1]&0x0F
+print('%06d'%(((h[o]&0x7F)<<24|h[o+1]<<16|h[o+2]<<8|h[o+3])%10**6))"
+}
+printf '%s\n0\n%s\n' "$WP" "$(totp_refresh)" | B login --server "$SRV" --email "$EMAIL" --password-stdin >/dev/null \
+  || fail "管理面前提：重新兩步登入失敗"
+pass "管理面前置：重新登入建立 session"
 totp_of() { # $1=base32 secret → 當前 6 位碼
   python3 -c "
 import base64,hmac,hashlib,struct,time
