@@ -329,8 +329,10 @@ for i in $(seq 1 60); do [[ "$(BA outbox | jq "$PENDING")" == "0" ]] && break; s
 [[ "$(BA outbox | jq "$PENDING")" == "0" ]] || fail "A 的 username 編輯未收斂"
 ./target/debug/bitwarderd --data-dir "$DATA_B" --sock "$SOCK_B" &
 DAEMON_B=$!
-for i in $(seq 1 20); do [[ -S "$SOCK_B" ]] && break; sleep 0.2; done
-[[ -S "$SOCK_B" ]] || fail "B daemon 重啟 socket 未就緒"
+# 就緒判定＝「連得通」而非「sock 檔在場」：kill -9 留殭屍 sock 檔，-S 會假通過，
+# ubuntu 冷啟綁定較慢時 unlock 搶跑（CI 實錄：connect refused 早於 listening 100ms）。
+for i in $(seq 1 60); do BB status >/dev/null 2>&1 && break; kill -0 "$DAEMON_B" 2>/dev/null || { cat "$DATA_B/bind-error.log" 2>/dev/null; break; }; sleep 0.25; done
+BB status >/dev/null 2>&1 || fail "B daemon 重啟後未就緒（連不通 $SOCK_B）"
 rm -f "$DATA_B/cli_session"   # 重啟後記憶體 session 消失；取新 session
 echo "$WP" | BB unlock --password-stdin >/dev/null || fail "B 重啟後 unlock 失敗（14a 嚴格模式需主密碼）"
 FINAL_PW="Sh@red-Pw-9z!x"
