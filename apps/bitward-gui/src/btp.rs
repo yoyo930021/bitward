@@ -1,13 +1,11 @@
-//! BTP 精簡同步 client（契約 §2.5 P1 線格式：u32 LE 長度前綴 + JSON 幀）。
+//! BTP 精簡同步 client（契約 §2.5；幀規格見 `docs/research/btp-frames.md`）。
 //!
-//! 與 `bw-btp` 的 `write_frame`/`read_frame` 同語意，但走 std `UnixStream`：
-//! GUI 的呼叫全在 worker 執行緒上跑，不把 tokio 拉進 app 依賴樹
-//! （spike FINDINGS：`nsh run` 剝 target 依賴，普通依賴也越少越穩）。
-//! 握手照 CLI 慣例：`Hello{Auth::Enroll{pair_code: None}}` → `Welcome` →
-//! `Invoke`/`Reply`；本機 UDS 的 Enroll 即 Interactive 全權 session。
+//! 編碼層不另起爐灶：length-prefix 與訊息體一律走 `bw_proto::wire`，與 daemon 的
+//! `bw-btp` 同源（本 app 不吃 tokio，故用該模組的 std 路徑；握手照 CLI 慣例：
+//! `Hello{Auth::Enroll{pair_code: None}}` → `Welcome` → `Invoke`/`Reply`，
+//! 握手兩幀恆 JSON，Welcome 選定的格式套用到此後所有幀）。
 //! 鎖撤銷（A6）會讓快取 session 作廢：偵測到就丟掉連線重 Enroll 一次。
 
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,11 +14,9 @@ use std::time::Duration;
 use bw_proto::{
     Auth, Call, ClientMsg, EventTopic, PROTO_VERSION, ProtoVersion, Response, ServerMsg,
     UnlockStateView, WtpError,
+    wire::{self, WireFormat},
 };
 
-/// 與 `bw_btp::MAX_FRAME` 同值：幀上限要在解碼前擋住。批次 4a 起放寬到
-/// 48MiB——32MiB 附件的 base64 幀（≈43MiB）要過得了本機線。
-const MAX_FRAME: u32 = 48 * 1024 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
@@ -77,6 +73,8 @@ struct Conn {
     stream: std::os::unix::net::UnixStream,
     /// Welcome 帶回的鎖態（契約 §2.5：state 只有一份真相）。
     welcome_state: UnlockStateView,
+    /// Welcome 選定的訊息體編碼（此後所有幀）。
+    fmt: WireFormat,
 }
 
 impl Session {
@@ -159,7 +157,9 @@ impl Session {
     ) -> Result<(), BtpError> {
         let mut conn = Conn::open_with(&self.path, wants.to_vec(), None)?;
         loop {
-            match read_frame(&mut conn.stream)? {
+            match wire::read_frame::<_, ServerMsg>(&mut conn.stream, conn.fmt)
+                .map_err(|e| BtpError::Transport(e.to_string()))?
+            {
                 ServerMsg::Event { topic, .. } => on_event(topic),
                 other => {
                     return Err(BtpError::Transport(format!(
@@ -191,10 +191,12 @@ impl Conn {
         let mut conn = Conn {
             stream,
             welcome_state: UnlockStateView::SignedOut,
+            fmt: WireFormat::Json,
         };
         let pairing = uuid::Uuid::new_v4().to_string();
-        write_frame(
+        wire::write_frame(
             &mut conn.stream,
+            conn.fmt,
             &ClientMsg::Hello {
                 version: ProtoVersion(PROTO_VERSION),
                 auth: Auth::Enroll {
@@ -203,17 +205,28 @@ impl Conn {
                     pair_code: None,
                 },
                 wants,
+                formats: wire::supported_formats(),
             },
-        )?;
-        // Hello 之後第一幀必須是 Welcome（daemon 在 serve_conn 就回）。
-        match read_frame(&mut conn.stream)? {
-            ServerMsg::Welcome { proto, state, .. } => {
+        )
+        .map_err(|e| BtpError::Transport(e.to_string()))?;
+        // Hello 之後第一幀必須是 Welcome（daemon 在 serve_conn 就回）；
+        // 协商欄位缺省＝JSON，選定結果自此後的幀生效。
+        match wire::read_frame::<_, ServerMsg>(&mut conn.stream, conn.fmt)
+            .map_err(|e| BtpError::Transport(e.to_string()))?
+        {
+            ServerMsg::Welcome {
+                proto,
+                state,
+                format,
+                ..
+            } => {
                 if proto > PROTO_VERSION {
                     return Err(BtpError::Transport(format!(
                         "daemon proto {proto} > GUI {PROTO_VERSION}"
                     )));
                 }
                 conn.welcome_state = state;
+                conn.fmt = format;
             }
             other => {
                 return Err(BtpError::Transport(format!("預期 Welcome，收到 {other:?}")));
@@ -223,15 +236,19 @@ impl Conn {
     }
 
     fn round_trip(&mut self, rid: u64, call: &Call) -> Result<Response, BtpError> {
-        write_frame(
+        wire::write_frame(
             &mut self.stream,
+            self.fmt,
             &ClientMsg::Invoke {
                 rid,
                 call: call.clone(),
             },
-        )?;
+        )
+        .map_err(|e| BtpError::Transport(e.to_string()))?;
         loop {
-            match read_frame(&mut self.stream)? {
+            match wire::read_frame::<_, ServerMsg>(&mut self.stream, self.fmt)
+                .map_err(|e| BtpError::Transport(e.to_string()))?
+            {
                 ServerMsg::Reply { rid: r, outcome } if r == rid => {
                     return outcome.map_err(BtpError::Protocol);
                 }
@@ -245,36 +262,12 @@ impl Conn {
     }
 }
 
-fn write_frame<W: Write>(w: &mut W, msg: &impl serde::Serialize) -> Result<(), BtpError> {
-    let body =
-        serde_json::to_vec(msg).map_err(|e| BtpError::Transport(format!("編碼失敗：{e}")))?;
-    let len = u32::try_from(body.len()).map_err(|_| BtpError::Transport("幀過大".into()))?;
-    if len > MAX_FRAME {
-        return Err(BtpError::Transport(format!("幀過大：{len} > {MAX_FRAME}")));
-    }
-    w.write_all(&len.to_le_bytes())
-        .and_then(|()| w.write_all(&body))
-        .map_err(|e| BtpError::Transport(format!("寫入失敗：{e}")))
-}
-
-fn read_frame<R: Read>(r: &mut R) -> Result<ServerMsg, BtpError> {
-    let mut head = [0u8; 4];
-    r.read_exact(&mut head)
-        .map_err(|e| BtpError::Transport(format!("讀取失敗：{e}")))?;
-    let len = u32::from_le_bytes(head);
-    if len > MAX_FRAME {
-        return Err(BtpError::Transport(format!("幀過大：{len} > {MAX_FRAME}")));
-    }
-    let mut body = vec![0u8; len as usize];
-    r.read_exact(&mut body)
-        .map_err(|e| BtpError::Transport(format!("讀取失敗：{e}")))?;
-    serde_json::from_slice(&body).map_err(|e| BtpError::Transport(format!("解碼失敗：{e}")))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bw_proto::wire::MAX_FRAME;
     use bw_proto::{Query, SortKey, VaultCall, View};
+    use std::io::{Read as _, Write as _};
 
     fn list_msg(rid: u64) -> ClientMsg {
         ClientMsg::Invoke {
@@ -293,7 +286,7 @@ mod tests {
     #[test]
     fn frame_roundtrip_over_socketpair() {
         let (mut a, mut b) = std::os::unix::net::UnixStream::pair().unwrap();
-        write_frame(&mut a, &list_msg(7)).unwrap();
+        wire::write_frame(&mut a, WireFormat::Json, &list_msg(7)).unwrap();
         let mut head = [0u8; 4];
         b.read_exact(&mut head).unwrap();
         let mut body = vec![0u8; u32::from_le_bytes(head) as usize];
@@ -311,7 +304,10 @@ mod tests {
         let bogus = MAX_FRAME + 1;
         a.write_all(&bogus.to_le_bytes()).unwrap();
         a.write_all(b"junk").unwrap();
-        assert!(matches!(read_frame(&mut b), Err(BtpError::Transport(_))));
+        assert!(matches!(
+            wire::read_frame::<_, ServerMsg>(&mut b, WireFormat::Json),
+            Err(wire::WireError::FrameTooLarge { .. })
+        ));
     }
 
     #[test]
@@ -338,13 +334,15 @@ mod tests {
             stream.read_exact(&mut body).unwrap();
             let hello: ClientMsg = serde_json::from_slice(&body).unwrap();
             match hello {
-                ClientMsg::Hello { wants, .. } => {
+                ClientMsg::Hello { wants, formats, .. } => {
                     assert!(wants.contains(&EventTopic::OutboxDrained));
+                    assert_eq!(formats, wire::supported_formats(), "Hello 必須宣告格式偏好");
                 }
                 other => panic!("expected Hello, got {other:?}"),
             }
-            write_frame(
+            wire::write_frame(
                 &mut stream,
+                WireFormat::Json,
                 &ServerMsg::Welcome {
                     proto: PROTO_VERSION,
                     epoch: 1,
@@ -358,11 +356,13 @@ mod tests {
                         deadline_epoch_ms: None,
                     },
                     events_from: 0,
+                    format: WireFormat::Json,
                 },
             )
             .unwrap();
-            write_frame(
+            wire::write_frame(
                 &mut stream,
+                WireFormat::Json,
                 &ServerMsg::Event {
                     topic: EventTopic::OutboxDrained,
                     seq: 1,

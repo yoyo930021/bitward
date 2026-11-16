@@ -11,6 +11,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use bw_btp::{read_server, write_client};
+use bw_proto::wire::{self, WireFormat};
 use bw_proto::{Auth, Call, ClientMsg, PROTO_VERSION, ProtoVersion, Response, ServerMsg, WtpError};
 
 struct Inner {
@@ -45,23 +46,27 @@ impl Bridge {
         let (mut rd, mut wr) = tokio::io::split(stream);
         write_client(
             &mut wr,
+            WireFormat::Json,
             &ClientMsg::Hello {
                 version: ProtoVersion(PROTO_VERSION),
                 auth,
                 wants: vec![],
+                formats: wire::supported_formats(),
             },
         )
         .await
         .map_err(|e| format!("btp hello: {e}"))?;
-        match read_server(&mut rd).await {
-            Ok(ServerMsg::Welcome { proto, .. }) => {
+        // 握手幀恆 JSON；Welcome 帶回的選定格式套用到此後的所有幀。
+        let fmt = match read_server(&mut rd, WireFormat::Json).await {
+            Ok(ServerMsg::Welcome { proto, format, .. }) => {
                 if proto > PROTO_VERSION {
                     return Err(format!("daemon proto {proto} > mcp {PROTO_VERSION}"));
                 }
+                format
             }
             Ok(other) => return Err(format!("expected Welcome, got {other:?}")),
             Err(e) => return Err(format!("btp welcome: {e}")),
-        }
+        };
         let inner = Arc::new(Inner {
             pending: Mutex::new(HashMap::new()),
             dead: watch::channel(None).0,
@@ -71,7 +76,7 @@ impl Bridge {
             let inner = inner.clone();
             tokio::spawn(async move {
                 while let Some(msg) = write_rx.recv().await {
-                    if let Err(e) = write_client(&mut wr, &msg).await {
+                    if let Err(e) = write_client(&mut wr, fmt, &msg).await {
                         inner.kill(format!("btp write: {e}"));
                         break;
                     }
@@ -82,7 +87,7 @@ impl Bridge {
             let inner = inner.clone();
             tokio::spawn(async move {
                 loop {
-                    match read_server(&mut rd).await {
+                    match read_server(&mut rd, fmt).await {
                         Ok(ServerMsg::Reply { rid, outcome }) => {
                             if let Some(tx) = inner
                                 .pending

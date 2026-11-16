@@ -5,7 +5,9 @@
   - `android-findings.md` — Android 實測紀錄：nsh 打包缺口、Gradle 外殼方案、孤島接線計畫、已知缺陷（鏡像目錄、reindex）。
   - `candidate-1-daemon-hub.md` / `candidate-2-everything-spoke.md` — 初始設計空間的兩個競爭原型（存檔參考；勝出形態已併入 ARCHITECTURE）。
 - `research/`
-  - `protocol.md` — BTP 線協定逐欄位規格（改協定必讀，postcard variant 索引紀律）。
+  - `protocol.md` — 上游 Bitwarden/Vaultwarden HTTP API 調查（授權、SDK、端點形態）。
+  - `btp-frames.md` — **BTP 線協定幀層規格**：length-prefix 佈局、JSON/postcard 协商、
+    混版本矩陣、conformance vectors（`cargo test -p bw-btp --test vectors` 執行）。
   - `macos-provider.md` — AuthenticationServices provider 能力邊界研究。
   - `feature-gaps.md` — 對照官方客户端的功能盤點。
   - `agent-ecosystem.md` / `prior-art.md` — agent 生態與前例調查。

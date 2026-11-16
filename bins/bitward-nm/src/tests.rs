@@ -12,6 +12,7 @@ use tokio::net::{UnixListener, UnixStream};
 use uuid::Uuid;
 
 use bw_btp::{read_client, write_server};
+use bw_proto::wire::WireFormat;
 use bw_proto::{
     AccountInfo, AdminCall, Auth, AuthCall, Call, ClientMsg, ItemKind, ItemMeta, ItemView,
     PROTO_VERSION, Response, ServerKind, ServerMsg, ServerProfile, UnlockStateView, VaultCall,
@@ -79,7 +80,7 @@ async fn spawn_daemon(dir: &Path) -> Daemon {
 
 async fn conn(stream: UnixStream, d: Daemon) {
     let (mut rd, mut wr) = stream.into_split();
-    let Ok(ClientMsg::Hello { auth, .. }) = read_client(&mut rd).await else {
+    let Ok(ClientMsg::Hello { auth, .. }) = read_client(&mut rd, WireFormat::Json).await else {
         return;
     };
     if matches!(auth, Auth::Session { .. }) && d.kill_sessions.load(AtomicOrdering::SeqCst) {
@@ -88,6 +89,7 @@ async fn conn(stream: UnixStream, d: Daemon) {
     d.hellos.lock().unwrap().push(auth);
     write_server(
         &mut wr,
+        WireFormat::Json,
         &ServerMsg::Welcome {
             proto: PROTO_VERSION,
             epoch: 1,
@@ -101,12 +103,13 @@ async fn conn(stream: UnixStream, d: Daemon) {
                 deadline_epoch_ms: None,
             },
             events_from: 0,
+            format: WireFormat::Json,
         },
     )
     .await
     .unwrap();
     loop {
-        let Ok(msg) = read_client(&mut rd).await else {
+        let Ok(msg) = read_client(&mut rd, WireFormat::Json).await else {
             return;
         };
         let ClientMsg::Invoke { rid, call } = msg else {
@@ -120,9 +123,13 @@ async fn conn(stream: UnixStream, d: Daemon) {
             d.kill.notified().await;
             return; // 收線：對端讀到 EOF ⇒ 橋斷
         }
-        if write_server(&mut wr, &ServerMsg::Reply { rid, outcome })
-            .await
-            .is_err()
+        if write_server(
+            &mut wr,
+            WireFormat::Json,
+            &ServerMsg::Reply { rid, outcome },
+        )
+        .await
+        .is_err()
         {
             return;
         }

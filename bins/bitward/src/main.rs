@@ -9,6 +9,7 @@ use clap::{Parser, Subcommand};
 use uuid::Uuid;
 
 use bw_btp::{read_server, write_client};
+use bw_proto::wire::{self, WireFormat};
 use bw_proto::{
     AdminCall, AgentCall, Auth, AuthCall, Call, CipherDraft, CipherField, CipherFieldKind,
     ClientMsg, EaAccessType, EaCall, EaRole, FieldEdit, FillCall, ImportItem, ItemId, ItemKind,
@@ -844,6 +845,7 @@ async fn open_session(
     (
         tokio::net::unix::OwnedReadHalf,
         tokio::net::unix::OwnedWriteHalf,
+        WireFormat,
     ),
     String,
 > {
@@ -872,23 +874,25 @@ async fn open_session(
         };
         write_client(
             &mut wr,
+            WireFormat::Json,
             &ClientMsg::Hello {
                 version: ProtoVersion(PROTO_VERSION),
                 auth: auth.clone(),
                 wants: vec![],
+                formats: wire::supported_formats(),
             },
         )
         .await
         .map_err(|e| e.to_string())?;
-        match read_server(&mut rd).await {
-            Ok(ServerMsg::Welcome { proto, .. }) => {
+        match read_server(&mut rd, WireFormat::Json).await {
+            Ok(ServerMsg::Welcome { proto, format, .. }) => {
                 if let Some(s) = proto_mismatch(proto) {
                     return Err(s);
                 }
                 if matches!(auth, Auth::Enroll { .. }) {
                     let _ = std::fs::write(session_file(data_dir), &fresh);
                 }
-                return Ok((rd, wr));
+                return Ok((rd, wr, format));
             }
             Ok(ServerMsg::Error { message }) if attempt == 0 => {
                 // daemon 明確拒絕（重啟過/隨鎖撤銷）：刪檔重 Enroll 續跑，但必須留痕
@@ -957,12 +961,13 @@ async fn run() -> Result<(), String> {
         return hub_cmd(cmd, &data_dir, args.json).await;
     }
     let sock = args.sock.clone().unwrap_or_else(|| default_sock(&data_dir));
-    let (mut rd, mut wr): (
+    let (mut rd, mut wr, fmt): (
         Box<dyn tokio::io::AsyncRead + Unpin + Send>,
         Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
+        WireFormat,
     ) = match &args.remote {
         None => match open_session(&sock, &data_dir).await {
-            Ok((r, w)) => (Box::new(r), Box::new(w)),
+            Ok((r, w, f)) => (Box::new(r), Box::new(w), f),
             Err(le) => {
                 // 編組 failover（§1.1）：本地中樞不可達且設了預設 hub→改用預設並
                 // 留可懂提示；預設也失聯→HubOffline＋換 hub 指引（Lane 5 終態）。
@@ -990,6 +995,7 @@ async fn run() -> Result<(), String> {
     let rid = 1u64;
     write_client(
         &mut wr,
+        fmt,
         &ClientMsg::Invoke {
             rid,
             call: call.clone(),
@@ -997,9 +1003,9 @@ async fn run() -> Result<(), String> {
     )
     .await
     .map_err(|e| e.to_string())?;
-    let mut reply = await_reply(&mut rd, rid).await?;
+    let mut reply = await_reply(&mut rd, fmt, rid).await?;
     if matches!(args.cmd, Cmd::Login { .. }) {
-        reply = login_2fa_rounds(&mut rd, &mut wr, &call, reply, rid).await?;
+        reply = login_2fa_rounds(&mut rd, &mut wr, fmt, &call, reply, rid).await?;
     }
     match reply {
         Ok(resp) => {
@@ -1060,9 +1066,9 @@ type BoxRd = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
 type BoxWr = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
 type Reply = Result<Response, WtpError>;
 
-async fn await_reply(rd: &mut BoxRd, rid: u64) -> Result<Reply, String> {
+async fn await_reply(rd: &mut BoxRd, fmt: WireFormat, rid: u64) -> Result<Reply, String> {
     loop {
-        match read_server(rd).await.map_err(|e| e.to_string())? {
+        match read_server(rd, fmt).await.map_err(|e| e.to_string())? {
             ServerMsg::Reply { rid: r, outcome } if r == rid => return Ok(outcome),
             ServerMsg::Event { .. } => continue,
             other => return Err(format!("unexpected {other:?}")),
@@ -1077,6 +1083,7 @@ async fn await_reply(rd: &mut BoxRd, rid: u64) -> Result<Reply, String> {
 async fn login_2fa_rounds(
     rd: &mut BoxRd,
     wr: &mut BoxWr,
+    fmt: WireFormat,
     first: &Call,
     reply: Reply,
     mut rid: u64,
@@ -1195,10 +1202,10 @@ async fn login_2fa_rounds(
                 remember: false,
             }),
         });
-        write_client(wr, &ClientMsg::Invoke { rid, call: next })
+        write_client(wr, fmt, &ClientMsg::Invoke { rid, call: next })
             .await
             .map_err(|e| e.to_string())?;
-        reply = await_reply(rd, rid).await?;
+        reply = await_reply(rd, fmt, rid).await?;
     }
     Err("第二因子嘗試次數過多（5 次）；請重試 login".into())
 }
@@ -1293,6 +1300,7 @@ async fn pair_join(args: &Args, data_dir: &Path) -> Result<(), String> {
     let fresh = Uuid::new_v4().to_string();
     write_client(
         &mut wr,
+        WireFormat::Json,
         &ClientMsg::Hello {
             version: ProtoVersion(PROTO_VERSION),
             auth: Auth::Enroll {
@@ -1301,11 +1309,15 @@ async fn pair_join(args: &Args, data_dir: &Path) -> Result<(), String> {
                 pair_code: Some(code.clone()),
             },
             wants: vec![],
+            formats: wire::supported_formats(),
         },
     )
     .await
     .map_err(|e| e.to_string())?;
-    match read_server(&mut rd).await.map_err(|e| e.to_string())? {
+    match read_server(&mut rd, WireFormat::Json)
+        .await
+        .map_err(|e| e.to_string())?
+    {
         ServerMsg::Welcome { .. } => {}
         ServerMsg::Reply {
             outcome: Err(e), ..
@@ -1453,16 +1465,7 @@ async fn hub_cmd(cmd: &HubCmd, data_dir: &Path, json: bool) -> Result<(), String
 }
 
 /// 跨機連線：HubOffline 快速失敗 + 可選 wake 信令後重試一次（§1.2）
-async fn open_remote(
-    profile: &str,
-    data_dir: &Path,
-) -> Result<
-    (
-        Box<dyn tokio::io::AsyncRead + Unpin + Send>,
-        Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
-    ),
-    String,
-> {
+async fn open_remote(profile: &str, data_dir: &Path) -> Result<(BoxRd, BoxWr, WireFormat), String> {
     let path = data_dir.join("remotes").join(format!("{profile}.json"));
     let prof: RemoteProfile =
         serde_json::from_slice(&std::fs::read(&path).map_err(|e| e.to_string())?)
@@ -1504,35 +1507,34 @@ async fn try_remote(
     host: &str,
     port: u16,
     prof: &RemoteProfile,
-) -> Result<
-    (
-        Box<dyn tokio::io::AsyncRead + Unpin + Send>,
-        Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
-    ),
-    String,
-> {
+) -> Result<(BoxRd, BoxWr, WireFormat), String> {
     let stream = bw_btp::tls::connect(host, port, &prof.pin)
         .await
         .map_err(|e| e.to_string())?;
     let (mut rd, mut wr) = tokio::io::split(stream);
     write_client(
         &mut wr,
+        WireFormat::Json,
         &ClientMsg::Hello {
             version: ProtoVersion(PROTO_VERSION),
             auth: Auth::Session {
                 token: prof.token.clone(),
             },
             wants: vec![],
+            formats: wire::supported_formats(),
         },
     )
     .await
     .map_err(|e| e.to_string())?;
-    match read_server(&mut rd).await.map_err(|e| e.to_string())? {
-        ServerMsg::Welcome { proto, .. } => {
+    match read_server(&mut rd, WireFormat::Json)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        ServerMsg::Welcome { proto, format, .. } => {
             if let Some(s) = proto_mismatch(proto) {
                 return Err(s);
             }
-            Ok((Box::new(rd), Box::new(wr)))
+            Ok((Box::new(rd), Box::new(wr), format))
         }
         other => Err(format!("expected Welcome, got {other:?}")),
     }

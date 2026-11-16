@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use bw_btp::{read_client, write_server};
+use bw_proto::wire::{self, WireFormat};
 use bw_proto::{
     ApprovalId, Auth, Call, ClientMsg, ItemKind, ItemMeta, ItemView, PROTO_VERSION, Response,
     ServerKind, ServerMsg, ServerProfile, SortKey, UnlockStateView, VaultCall, View, WtpError,
@@ -31,6 +32,7 @@ fn welcome() -> ServerMsg {
             version: Some("1.37.2".into()),
             features: vec![],
         },
+        format: WireFormat::Json,
         state: UnlockStateView::Unlocked {
             epoch: 7,
             deadline_epoch_ms: None,
@@ -73,13 +75,13 @@ async fn fake_daemon(auth: Auth) -> (Arc<Bridge>, Fake) {
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                c = read_client(&mut dr) => match c {
+                c = read_client(&mut dr, WireFormat::Json) => match c {
                     Ok(msg) => {
                         let hello = matches!(msg, ClientMsg::Hello { .. });
                         if calls_tx.send(msg).is_err() {
                             break;
                         }
-                        if hello && write_server(&mut dw, &welcome()).await.is_err() {
+                        if hello && write_server(&mut dw, WireFormat::Json, &welcome()).await.is_err() {
                             break;
                         }
                     }
@@ -87,7 +89,7 @@ async fn fake_daemon(auth: Auth) -> (Arc<Bridge>, Fake) {
                 },
                 r = replies_rx.recv() => match r {
                     Some(m) => {
-                        if write_server(&mut dw, &m).await.is_err() {
+                        if write_server(&mut dw, WireFormat::Json, &m).await.is_err() {
                             break;
                         }
                     }
@@ -237,10 +239,16 @@ async fn framing_and_protocol_surface() {
             version,
             auth,
             wants,
+            formats,
         } => {
             assert_eq!(version.0, PROTO_VERSION);
             assert!(matches!(auth, Auth::Session { ref token } if token == "tok-1"));
             assert!(wants.is_empty());
+            assert_eq!(
+                formats,
+                wire::supported_formats(),
+                "Hello 必須帶上本進程的線格式偏好"
+            );
         }
         other => panic!("expected Hello, got {other:?}"),
     }

@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 use bw_btp::{read_client, write_server};
 use bw_keys::UnlockEvent;
+use bw_proto::wire::{WireFormat, select_format};
 use bw_proto::{Auth, ClientMsg, EventTopic, PROTO_VERSION, Response, ServerMsg, WtpError};
 use hub::Hub;
 mod service;
@@ -567,17 +568,23 @@ where
             grant_gap: "peer uid != daemon uid".into(),
         });
     }
-    let hello = tokio::time::timeout(std::time::Duration::from_secs(10), read_client(&mut rd))
-        .await
-        .map_err(|_| WtpError::RetryAfter { ms: 0 })?
-        .map_err(|_| WtpError::Denied {
-            grant_gap: "hello unreadable".into(),
-        })?;
+    // 握手兩幀（Hello/Welcome）恆 JSON：旧對端不識得任何其他格式，协商欄位
+    // 靠 `serde(default)` 寬容。選定結果寫進 Welcome，兩側自此同格式。
+    let hello = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        read_client(&mut rd, WireFormat::Json),
+    )
+    .await
+    .map_err(|_| WtpError::RetryAfter { ms: 0 })?
+    .map_err(|_| WtpError::Denied {
+        grant_gap: "hello unreadable".into(),
+    })?;
     let auth_out: Result<_, WtpError> = 'auth: {
         let ClientMsg::Hello {
             version,
             auth,
             wants,
+            formats,
         } = hello
         else {
             break 'auth Err(WtpError::Denied {
@@ -589,6 +596,11 @@ where
                 feature: format!("peer proto {} > daemon {PROTO_VERSION}", version.0),
             });
         }
+        let Some(fmt) = select_format(&formats) else {
+            break 'auth Err(WtpError::Unsupported {
+                feature: format!("無共同線格式：peer 宣告 {formats:?}"),
+            });
+        };
         let sess = match auth {
             Auth::Enroll {
                 display_name,
@@ -656,15 +668,16 @@ where
                 });
             }
         };
-        Ok((sess, wants))
+        Ok((sess, wants, fmt))
     };
-    let (sess, wants) = match auth_out {
+    let (sess, wants, fmt) = match auth_out {
         Ok(v) => v,
         // 拒絕原因必須上車（readpath A6 raw 重放的依據）：只 close 不回應，
         // thin 端會把「撤銷」誤歸因成「daemon 重啟」。
         Err(e) => {
             let _ = write_server(
                 &mut wr,
+                WireFormat::Json,
                 &ServerMsg::Error {
                     message: e.to_string(),
                 },
@@ -676,18 +689,25 @@ where
 
     write_server(
         &mut wr,
+        WireFormat::Json,
         &ServerMsg::Welcome {
             proto: PROTO_VERSION,
             epoch: hub.machine.epoch().0,
             server: hub.server_profile().await,
             state: hub.machine.state(),
             events_from: hub.store.cursor().unwrap_or(0),
+            format: fmt,
         },
     )
     .await
     .map_err(|_| WtpError::Denied {
         grant_gap: "write".into(),
     })?;
+    tracing::info!(
+        peer = %sess.row.id,
+        format = fmt.as_str(),
+        "BTP 連線协商完成"
+    );
 
     let mut ev_rx = if wants.is_empty() {
         None
@@ -696,7 +716,7 @@ where
     };
 
     loop {
-        let recv = read_client(&mut rd);
+        let recv = read_client(&mut rd, fmt);
         tokio::pin!(recv);
         tokio::select! {
             msg = &mut recv => {
@@ -717,7 +737,7 @@ where
                         } else {
                             hub.dispatch(&sess, &call).await
                         };
-                        if write_server(&mut wr, &ServerMsg::Reply { rid, outcome })
+                        if write_server(&mut wr, fmt, &ServerMsg::Reply { rid, outcome })
                             .await
                             .is_err()
                         {
@@ -727,7 +747,7 @@ where
                     ClientMsg::Pull { cursor } => {
                         // P2：事件歷史重播在 P3 補（目前 Pull 回游標確認）
                         let _seq = hub.store.cursor().unwrap_or(cursor);
-                        if write_server(&mut wr, &ServerMsg::Reply { rid: 0, outcome: Ok(Response::Status(hub.status_info().await)) }).await.is_err() {
+                        if write_server(&mut wr, fmt, &ServerMsg::Reply { rid: 0, outcome: Ok(Response::Status(hub.status_info().await)) }).await.is_err() {
                             return Ok(());
                         }
                     }
@@ -744,6 +764,7 @@ where
                     let seq = hub.store.cursor().unwrap_or(0);
                     if write_server(
                         &mut wr,
+                        fmt,
                         &ServerMsg::Event {
                             topic,
                             seq,

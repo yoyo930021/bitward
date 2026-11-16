@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod wire;
+
 pub type ItemId = Uuid;
 pub type FolderId = Uuid;
 pub type CollectionId = Uuid;
@@ -1634,6 +1636,10 @@ pub enum ClientMsg {
         version: ProtoVersion,
         auth: Auth,
         wants: Vec<EventTopic>,
+        /// 連線級訊息體編碼偏好（`bw_proto::wire`；順序＝偏好序）。
+        /// `serde(default)`：舊客戶端不帶此欄＝空清單，daemon 據此選定 JSON。
+        #[serde(default)]
+        formats: Vec<crate::wire::WireFormat>,
     },
     Invoke {
         rid: u64,
@@ -2100,6 +2106,11 @@ pub enum ServerMsg {
         server: ServerProfile,
         state: UnlockStateView,
         events_from: u64,
+        /// daemon 選定的訊息體編碼（`bw_proto::wire`，取自 `Hello::formats` 偏好序）。
+        /// 本幀本身仍走 JSON：协商結果自 Welcome 之後的幀生效，兩側据此切換。
+        /// `serde(default)`＝JSON：舊 daemon 不帶此欄的語意（它只可能說 JSON）。
+        #[serde(default)]
+        format: crate::wire::WireFormat,
     },
     Reply {
         rid: u64,
