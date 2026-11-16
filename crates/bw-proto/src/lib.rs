@@ -1985,12 +1985,92 @@ pub struct DupGroup {
     pub ids: Vec<ItemId>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PairInfo {
     pub code: String,
     /// SPKI pin；無 CA 體系的信任錨點（§1.2）
     pub pin: String,
     pub expires_in_secs: u64,
+}
+
+// —— 資料管理群回包形態（PR5 型別化子批 D1）——
+// 這些原本走 `Response::Json`（daemon 手搭 `json!`、thin 端 runtime parser 讀鍵名）。
+// 欄位名與鍵序照**既有 JSON 形態**逐字釘選（見 `datamanage_typed_shapes_are_json_compatible`
+// 測），切換批只換變體不改Shape，e2e 與 GUI parser 才不會同時動兩處。
+
+/// 弱密碼報告的一列（鏡像解密打分結果；明文不外洩，只 id/name/score）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WeakPasswordEntry {
+    pub id: ItemId,
+    /// 明文名稱（鎖定態解不開＝None，語意同 `ItemMeta::name`）。
+    pub name: Option<String>,
+    /// `bw_crypto::password_score` 分級（0–4）。
+    pub score: u8,
+}
+
+/// `Reports:WeakPasswords` 回包。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WeakPasswordReport {
+    pub threshold: u8,
+    pub items: Vec<WeakPasswordEntry>,
+}
+
+/// 項目歷史的一版（名稱按該版本自帶 key 信封解密；解不開＝空字串，呼叫端顯佔位）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CipherHistoryVersion {
+    pub id: String,
+    /// 伺服器 ISO-8601 原樣（字串序即時間序）。
+    #[serde(rename = "creationDate")]
+    pub creation_date: String,
+    pub name: String,
+    #[serde(rename = "uriCount")]
+    pub uri_count: usize,
+}
+
+/// `Reports:CipherHistory` 回包。`supported`＝伺服器有實裝歷史路由；
+/// `restore_supported`＝有「從歷史還原」端點（查證：無，見 daemon 端註解）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CipherHistoryReport {
+    pub supported: bool,
+    #[serde(rename = "restoreSupported")]
+    pub restore_supported: bool,
+    pub versions: Vec<CipherHistoryVersion>,
+}
+
+/// 資料夾列（清單與新建回包同形態）。
+/// `name` 是信封字串的明文：鎖定態解不開＝None（不猜，呼叫端決定隱藏節點）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FolderInfo {
+    pub id: String,
+    pub name: Option<String>,
+}
+
+/// 硬刪回包：鏡像摘除的列數（含關聯／outbox／overlay）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PurgeReport {
+    pub id: ItemId,
+    pub mirror_rows: u64,
+}
+
+/// 批次匯入回包：收下的筆數與本地 id（推送收斂屬 outbox，不在這裡結算）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ImportReport {
+    pub imported: usize,
+    pub ids: Vec<ItemId>,
+}
+
+/// 推播 token 列（`token` 已是去敏形態：前 8 碼＋hash，見 `mask_push_token`）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PushTokenInfo {
+    pub token: String,
+    pub platform: String,
+}
+
+/// AutoType 計數：明文只進按鍵事件、不回傳，這裡只有統計（§2.1 出口紀律）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AutoTypeStats {
+    pub typed: usize,
+    pub fields: usize,
 }
 
 /// 全型別化回應：這是 P2 切 postcard 主線的前置（`Value` 的 f64 postcard 不支援）。
@@ -3272,6 +3352,160 @@ mod tests {
         assert!(!j.contains("1234"));
         let back: ItemView = serde_json::from_str(&j).unwrap();
         assert_eq!(back.fields[0].name, "PIN");
+    }
+
+    /// PR5 D1 形態金標：型別化回包的 JSON 必須與**原手搭 `json!`** 逐字同形
+    /// （鍵名、null 欄、數字形態），型別化子批才能只動 daemon 生產點而不动
+    /// thin 端（GUI parser、e2e jq 路徑）；D5 換變體時同形性已由本測證明。
+    /// 同測驗 postcard **往返含反序列化**（治 encode-only 舊債）。
+    #[test]
+    fn datamanage_typed_shapes_are_json_compatible() {
+        let id = ItemId::parse_str("67e55044-10b1-426f-9247-bb680e5fe0c8").unwrap();
+        let cases: Vec<(serde_json::Value, serde_json::Value)> = vec![
+            (
+                serde_json::to_value(WeakPasswordReport {
+                    threshold: WEAK_PASSWORD_THRESHOLD,
+                    items: vec![WeakPasswordEntry {
+                        id,
+                        name: Some("gh".into()),
+                        score: 0,
+                    }],
+                })
+                .unwrap(),
+                serde_json::json!({
+                    "threshold": 3,
+                    "items": [{"id": "67e55044-10b1-426f-9247-bb680e5fe0c8", "name": "gh", "score": 0}]
+                }),
+            ),
+            (
+                serde_json::to_value(CipherHistoryReport {
+                    supported: true,
+                    restore_supported: false,
+                    versions: vec![CipherHistoryVersion {
+                        id: "v1".into(),
+                        creation_date: "2026-11-10T00:00:00.000Z".into(),
+                        name: "gh-a".into(),
+                        uri_count: 2,
+                    }],
+                })
+                .unwrap(),
+                serde_json::json!({
+                    "supported": true,
+                    "restoreSupported": false,
+                    "versions": [{"id": "v1", "creationDate": "2026-11-10T00:00:00.000Z", "name": "gh-a", "uriCount": 2}]
+                }),
+            ),
+            (
+                serde_json::to_value(CipherHistoryReport {
+                    supported: false,
+                    restore_supported: false,
+                    versions: Vec::new(),
+                })
+                .unwrap(),
+                serde_json::json!({"supported": false, "restoreSupported": false, "versions": []}),
+            ),
+            (
+                serde_json::to_value(vec![
+                    FolderInfo {
+                        id: id.to_string(),
+                        name: Some("工作資料夾".into()),
+                    },
+                    FolderInfo {
+                        id: "11111111-2222-3333-4444-555555555555".into(),
+                        name: None,
+                    },
+                ])
+                .unwrap(),
+                serde_json::json!([
+                    {"id": "67e55044-10b1-426f-9247-bb680e5fe0c8", "name": "工作資料夾"},
+                    {"id": "11111111-2222-3333-4444-555555555555", "name": null}
+                ]),
+            ),
+            (
+                serde_json::to_value(ImportReport {
+                    imported: 1,
+                    ids: vec![id],
+                })
+                .unwrap(),
+                serde_json::json!({"imported": 1, "ids": ["67e55044-10b1-426f-9247-bb680e5fe0c8"]}),
+            ),
+            (
+                serde_json::to_value(vec![PushTokenInfo {
+                    token: "a1b2c3d4…0123456789ab".into(),
+                    platform: "ios".into(),
+                }])
+                .unwrap(),
+                serde_json::json!([{"token": "a1b2c3d4…0123456789ab", "platform": "ios"}]),
+            ),
+            (
+                serde_json::to_value(AutoTypeStats {
+                    typed: 12,
+                    fields: 2,
+                })
+                .unwrap(),
+                serde_json::json!({"typed": 12, "fields": 2}),
+            ),
+        ];
+        for (typed, hand_built) in cases {
+            assert_eq!(typed, hand_built, "型別化回包的 JSON 形態漂移");
+        }
+
+        let folders = vec![FolderInfo {
+            id: id.to_string(),
+            name: None,
+        }];
+        let pushes = vec![PushTokenInfo {
+            token: "t".into(),
+            platform: "watchos".into(),
+        }];
+        let weak = WeakPasswordReport {
+            threshold: WEAK_PASSWORD_THRESHOLD,
+            items: vec![WeakPasswordEntry {
+                id,
+                name: Some("gh".into()),
+                score: 1,
+            }],
+        };
+        let history = CipherHistoryReport {
+            supported: true,
+            restore_supported: false,
+            versions: vec![CipherHistoryVersion {
+                id: "v1".into(),
+                creation_date: "2026-11-10T00:00:00.000Z".into(),
+                name: String::new(),
+                uri_count: 0,
+            }],
+        };
+        let purge = PurgeReport { id, mirror_rows: 7 };
+        let import = ImportReport {
+            imported: 0,
+            ids: vec![id],
+        };
+        let autotype = AutoTypeStats {
+            typed: 3,
+            fields: 1,
+        };
+        // `Value` 本身走 postcard 會卡在 `deserialize_any`（本 PR 的債源），
+        // 故逐條用**型別**往返回環，不比 `Value`。
+        fn roundtrip<T: Serialize + serde::de::DeserializeOwned + PartialEq + core::fmt::Debug>(
+            v: &T,
+        ) {
+            let bytes = postcard::to_allocvec(v).unwrap();
+            let back: T = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(&back, v, "postcard 往返漂移");
+            assert_eq!(
+                postcard::to_allocvec(&back).unwrap(),
+                bytes,
+                "反序列化後再編不安定"
+            );
+        }
+        roundtrip(&weak);
+        roundtrip(&history);
+        roundtrip(&folders);
+        roundtrip(&purge);
+        roundtrip(&import);
+        roundtrip(&pushes);
+        roundtrip(&autotype);
     }
 
     impl ClientMsg {

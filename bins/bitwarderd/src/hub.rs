@@ -121,6 +121,15 @@ pub(crate) fn drift(detail: impl std::fmt::Display) -> WtpError {
     }
 }
 
+/// PR5 型別化過渡：型別化的回包結構先包在 `Response::Json` 裡上線
+/// （JSON 形態＝結構的 serde 輸出，由 `bw-proto` 的形態金標測釘住與舊手搭 JSON 同形），
+/// thin 端因此不必逐批跟著改；切換批把這裡換成直發專屬變體並刪除 `Json`。
+pub(crate) fn typed_json<T: Serialize>(v: &T) -> Result<Response, WtpError> {
+    serde_json::to_value(v)
+        .map(Response::Json)
+        .map_err(|e| drift(format!("型別化回包序列化失敗：{e}")))
+}
+
 /// 主密碼強度閘（契約 2c：與註冊閘值一致；dev-register/VW 無本地閘，
 /// 此常数是本專案的唯一真相源，daemon 拒短碼、CLI/GUI 前置提示同值）。
 pub(crate) const MIN_MASTER_PASSWORD: usize = 12;
@@ -648,11 +657,12 @@ impl Hub {
                     let rows = self.store.push_token_list().map_err(denied)?;
                     let list = rows
                         .iter()
-                        .map(|(token, platform)| {
-                            json!({"token": mask_push_token(token), "platform": platform})
+                        .map(|(token, platform)| bw_proto::PushTokenInfo {
+                            token: mask_push_token(token),
+                            platform: platform.clone(),
                         })
                         .collect::<Vec<_>>();
-                    Ok(Response::Json(Value::Array(list)))
+                    typed_json(&list)
                 }
             },
             Call::TwoFactor(tfc) => self.two_factor_manage(tfc).await,
@@ -1530,10 +1540,10 @@ impl Hub {
         .await
         // 外層是 JoinError（任務掛掉）→ Denied；內層已是 WtpError（如 sink 不可用）原樣上拋
         .map_err(denied)??;
-        Ok(Response::Json(json!({
-            "typed": stats.typed,
-            "fields": stats.fields,
-        })))
+        typed_json(&bw_proto::AutoTypeStats {
+            typed: stats.typed,
+            fields: stats.fields,
+        })
     }
 
     fn totp(&self, id: ItemId) -> DispatchResult {

@@ -7,13 +7,7 @@ use uuid::Uuid;
 use bw_proto::{DupGroup, ItemId, OverlayOpWire, Response, WtpError};
 use bw_store::{MutationDraft, Overlay, OverlayOp};
 
-use crate::hub::Hub;
-
-fn denied(e: impl std::fmt::Display) -> WtpError {
-    WtpError::Denied {
-        grant_gap: e.to_string(),
-    }
-}
+use crate::hub::{Hub, denied, typed_json};
 
 impl Hub {
     pub fn overlay_op(
@@ -128,7 +122,7 @@ impl Hub {
             })
             .map_err(denied)?;
         let org_keys = self.org_key_map();
-        let mut rows: Vec<Value> = Vec::new();
+        let mut rows: Vec<bw_proto::WeakPasswordEntry> = Vec::new();
         for m in metas {
             let row = match self.store.item(m.id) {
                 Ok(Some(r)) => r,
@@ -154,26 +148,26 @@ impl Hub {
             });
             let Ok(Some(score)) = scored else { continue };
             if score < bw_proto::WEAK_PASSWORD_THRESHOLD {
-                rows.push(json!({
-                    "id": m.id.to_string(),
-                    "name": m.name,
-                    "score": score,
-                }));
+                rows.push(bw_proto::WeakPasswordEntry {
+                    id: m.id,
+                    name: m.name,
+                    score,
+                });
             }
         }
         rows.sort_by(|a, b| {
-            let k = |r: &Value| {
-                (
-                    r["score"].as_i64().unwrap_or(0),
-                    r["name"].as_str().unwrap_or("").to_lowercase(),
-                )
-            };
-            k(a).cmp(&k(b))
+            a.score.cmp(&b.score).then_with(|| {
+                a.name
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .cmp(&b.name.as_deref().unwrap_or("").to_lowercase())
+            })
         });
-        Ok(Response::Json(json!({
-            "threshold": bw_proto::WEAK_PASSWORD_THRESHOLD,
-            "items": rows,
-        })))
+        typed_json(&bw_proto::WeakPasswordReport {
+            threshold: bw_proto::WEAK_PASSWORD_THRESHOLD,
+            items: rows,
+        })
     }
 
     /// 項目版本歷史：代理 `GET /ciphers/{id}/history`（官方舊版線格式，條目自帶
@@ -197,18 +191,18 @@ impl Hub {
             .as_ref()
             .ok_or_else(|| denied("離線：歷史資料源在伺服器"))?;
         let unsupported = || {
-            Response::Json(json!({
-                "supported": false,
-                "restoreSupported": false,
-                "versions": [],
-            }))
+            typed_json(&bw_proto::CipherHistoryReport {
+                supported: false,
+                restore_supported: false,
+                versions: Vec::new(),
+            })
         };
         let raw = match h.client.cipher_history(id).await {
             Ok(v) => v,
             Err(bw_server::ServerError::Http {
                 status: 404 | 405, ..
             }) => {
-                return Ok(unsupported());
+                return unsupported();
             }
             Err(e) => return Err(crate::hub::map_server_err(e)),
         };
@@ -217,7 +211,7 @@ impl Hub {
             None => Vec::new(),
         };
         let org_keys = self.org_key_map();
-        let mut versions: Vec<Value> = Vec::new();
+        let mut versions: Vec<bw_proto::CipherHistoryVersion> = Vec::new();
         for e in entries {
             let (name, uri_count) = self
                 .machine
@@ -243,25 +237,28 @@ impl Hub {
                     (name, uris)
                 })
                 .map_err(|_| WtpError::Locked)?;
-            versions.push(json!({
-                "id": e.get("id").and_then(Value::as_str).unwrap_or_default(),
-                "creationDate": e.get("creationDate").and_then(Value::as_str).unwrap_or_default(),
-                "name": name,
-                "uriCount": uri_count,
-            }));
+            versions.push(bw_proto::CipherHistoryVersion {
+                id: e
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                creation_date: e
+                    .get("creationDate")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                name,
+                uri_count,
+            });
         }
         // 新到舊（官方歷史頁同序）；creationDate 是 ISO-8601，字串序即時間序。
-        versions.sort_by(|a, b| {
-            b["creationDate"]
-                .as_str()
-                .unwrap_or("")
-                .cmp(a["creationDate"].as_str().unwrap_or(""))
-        });
-        Ok(Response::Json(json!({
-            "supported": true,
-            "restoreSupported": false,
-            "versions": versions,
-        })))
+        versions.sort_by(|a, b| b.creation_date.cmp(&a.creation_date));
+        typed_json(&bw_proto::CipherHistoryReport {
+            supported: true,
+            restore_supported: false,
+            versions,
+        })
     }
 
     /// 合併：tags 聯集進 keep（本地），dupes 走 outbox 軟刪（§2.4 唯一寫路徑）。
@@ -357,7 +354,10 @@ impl Hub {
         let id =
             Uuid::parse_str(id_s).map_err(|_| crate::hub::drift(format!("folder id {id_s}")))?;
         self.store.folder_put(id, &created).map_err(denied)?;
-        Ok(Response::Json(json!({"id": id.to_string(), "name": name})))
+        typed_json(&bw_proto::FolderInfo {
+            id: id.to_string(),
+            name: Some(name.to_owned()),
+        })
     }
 
     /// 資料夾清單：id 恆出；名稱是信封字串，解鎖態解明文、鎖定態 null
@@ -379,26 +379,22 @@ impl Hub {
                     .collect()
             })
             .ok();
-        let mut out: Vec<Value> = rows
+        let mut out: Vec<bw_proto::FolderInfo> = rows
             .iter()
             .enumerate()
-            .map(|(i, r)| {
-                json!({
-                    "id": r.id.to_string(),
-                    "name": names.as_ref().and_then(|ns| ns[i].clone()),
-                })
+            .map(|(i, r)| bw_proto::FolderInfo {
+                id: r.id.to_string(),
+                name: names.as_ref().and_then(|ns| ns[i].clone()),
             })
             .collect();
         out.sort_by(|a, b| {
-            let name = |v: &Value| match v["name"].as_str() {
+            let name = |v: &bw_proto::FolderInfo| match v.name.as_deref() {
                 Some(s) => (0u8, s.to_lowercase()),
                 None => (1u8, String::new()),
             };
-            name(a)
-                .cmp(&name(b))
-                .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+            name(a).cmp(&name(b)).then_with(|| a.id.cmp(&b.id))
         });
-        Ok(Response::Json(Value::Array(out)))
+        typed_json(&out)
     }
 
     /// 刪除資料夾（官方語意同序）：先把夾內項目 `folderId` 清 NULL
@@ -461,9 +457,7 @@ impl Hub {
             bw_proto::EventTopic::VaultChanged,
             json!({"id": id.to_string(), "op": "purge"}),
         );
-        Ok(Response::Json(
-            json!({"purged": id.to_string(), "mirror_rows": n}),
-        ))
+        typed_json(&bw_proto::PurgeReport { id, mirror_rows: n })
     }
 
     /// 原子批次匯入（`VaultCall::Import`；語意見 proto 端註解）：
@@ -480,7 +474,10 @@ impl Hub {
     ) -> Result<Response, WtpError> {
         self.require_unlocked()?;
         if items.is_empty() {
-            return Ok(Response::Json(json!({"imported": 0, "ids": []})));
+            return typed_json(&bw_proto::ImportReport {
+                imported: 0,
+                ids: Vec::new(),
+            });
         }
         if items.len() > 500 {
             return Err(denied(format!(
@@ -536,9 +533,9 @@ impl Hub {
         }
         self.reindex_many(&ids)?;
         self.trigger_drain();
-        Ok(Response::Json(json!({
-            "imported": mids.len(),
-            "ids": ids.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
-        })))
+        typed_json(&bw_proto::ImportReport {
+            imported: mids.len(),
+            ids,
+        })
     }
 }
