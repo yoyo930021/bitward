@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use nsh_core::prelude::*;
 
-use crate::state::{AppCore, Cmd, FieldDraft, Route, SideGroup, name_is_envelope};
+use crate::state::{AppCore, Cmd, FieldDraft, Route, SendTab, SideGroup, name_is_envelope};
 
 /// 在 AppKit main thread 上執行 `f`（macOS 限定；其餘平台直接跑）。
 #[cfg(target_os = "macos")]
@@ -1199,9 +1199,43 @@ fn poll_attachment_row(dir: PathBuf, core: AppCore, ms: u64) {
         at(ms + 14800, move || c13.send(Cmd::OpenCreate));
         let d5 = dir.clone();
         at(ms + 15400, move || capture(&d5, "shot-40-dark-modal.png"));
+        // —— Send 接收入口幀（PR2）：表單建文字 Send → 成功卡帶「在瀏覽器開
+        //    連結」鈕；斷言軸＝daemon webUrl（loopback 收件頁）在場，使用者
+        //    按鈕即直達收件頁（Lane 9 的可觀察終態）——
         let c14 = core.clone();
-        at(ms + 15700, move || c14.send(Cmd::SetTheme(Appearance::System)));
-        at(ms + 16100, quit);
+        at(ms + 15700, move || {
+            c14.send(Cmd::SetTheme(Appearance::Light));
+            c14.send(Cmd::OpenSend);
+        });
+        let c = core.clone();
+        at(ms + 16300, move || {
+            c.send(Cmd::ShowSendsTab(SendTab::Create));
+            c.send_form.text.set("E2E 接收頁範例".into());
+        });
+        let c = core.clone();
+        at(ms + 16700, move || c.send(Cmd::SubmitSend));
+        let c = core.clone();
+        let d = dir.clone();
+        at(ms + 18300, move || {
+            let created = c
+                .send_created
+                .get()
+                .expect("Send 建立應成功（demo VW 在線、庫解鎖態）");
+            let w = created
+                .get("webUrl")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            assert!(
+                w.starts_with("http://127.0.0.1:"),
+                "webUrl 應指向 loopback 收件頁，實際：{w}"
+            );
+            capture(&d, "shot-61-send-link.png");
+        });
+        let c = core.clone();
+        at(ms + 19000, move || {
+            c.send(Cmd::SetTheme(Appearance::System))
+        });
+        at(ms + 19400, quit);
     });
 }
 

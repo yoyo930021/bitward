@@ -1,9 +1,11 @@
 //! Send 加密分享（路線 5）：右欄視角，側欄「Send」進入。
-//! 清單（型別章＋名稱／到期／存取計數／已檢視＋複製連結／移除）↔ 新增表單
-//! （文字/檔案二選一、內容/路徑、取用密碼選填、到期天數、次數上限）
-//! → 成功卡（URL＋複製鈕，官方 send-success 流）。
-//! **接收端不做**（開網頁的人用的，不是本客戶端職責）；建立需連網
-//! （daemon 無 outbox，離線錯誤走表單紅字誠實標註）。
+//! 清單（型別章＋名稱／到期／存取計數／已檢視＋開連結／複製連結／移除）↔
+//! 新增表單（文字/檔案二選一、內容/路徑、取用密碼選填、到期天數、次數上限）
+//! → 成功卡（URL＋複製鈕＋開連結，官方 send-success 流）。
+//! 接收端（PR2）：daemon loopback 網頁已就緒——「在瀏覽器開連結」把分享 URL 的
+//! loopback 變體（`webUrl` 欄）交給系統瀏覽器，收件頁在瀏覽器內 WebCrypto 解密，
+//! GUI 本身不做解密；daemon 未起 webui 或鎖態時 `webUrl` 為 null，鈕不出來。
+//! 建立需連網（daemon 無 outbox，離線錯誤走表單紅字誠實標註）。
 //! 清單資料源＝daemon 鏡像（連網時現刷）；名稱與 URL 鎖態為 null。
 
 use std::sync::Arc;
@@ -24,6 +26,8 @@ pub struct SendRow {
     pub is_file: bool,
     pub name: Option<String>,
     pub url: Option<String>,
+    /// 本機接收頁 URL（daemon webui 在場才有；鎖態 null＝鈕不出來）。
+    pub web_url: Option<String>,
     pub deletion_date: String,
     pub access_count: i64,
     pub max_access: Option<i64>,
@@ -43,6 +47,7 @@ pub fn send_rows(v: &Value) -> Vec<SendRow> {
                         is_file: r.get("type").and_then(Value::as_i64) == Some(1),
                         name: r.get("name").and_then(Value::as_str).map(str::to_owned),
                         url: r.get("url").and_then(Value::as_str).map(str::to_owned),
+                        web_url: r.get("webUrl").and_then(Value::as_str).map(str::to_owned),
                         deletion_date: r
                             .get("deletionDate")
                             .and_then(Value::as_str)
@@ -149,6 +154,7 @@ fn list_view(core: AppCore) -> View {
 fn send_row(row: SendRow, core: AppCore, copied: Signal<Option<&'static str>>) -> View {
     let name = row.name.clone().unwrap_or_else(|| "—".into());
     let url_for_copy = row.url.clone().unwrap_or_default();
+    let (web_open, web_cond) = (row.web_url.clone(), row.web_url.clone());
     let rm_core = core.clone();
     let (ask_id, ask_name) = (row.id, row.name.clone().unwrap_or_else(|| "未命名".into()));
     view()
@@ -192,6 +198,12 @@ fn send_row(row: SendRow, core: AppCore, copied: Signal<Option<&'static str>>) -
                         .bg(theme::SUCCESS),
                 )
                 .child(row_note("已檢視"))
+        }))
+        .child(when(move || web_cond.is_some(), move || {
+            let u = web_open.clone().unwrap_or_default();
+            view().child(ui::button("開連結", ui::Btn::Ghost, move || {
+                drop(open_url(u.clone()));
+            }))
         }))
         .child(ui::copy_button(
             std::rc::Rc::new(move || url_for_copy.clone()),
@@ -381,7 +393,9 @@ fn created_view(core: AppCore, created: Arc<Value>) -> View {
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme::TEXT_PRIMARY),
         )
-        .child(row_note(format!("「{name}」— 把連結交給對方，開網頁即可收（本站不需接收端）。")))
+        .child(row_note(format!(
+            "「{name}」— 把連結交給對方，開網頁即可收；本機按下方鈕直達收件頁。"
+        )))
         .child(
             view()
                 .flex_row()
@@ -404,6 +418,19 @@ fn created_view(core: AppCore, created: Arc<Value>) -> View {
                     core.settings,
                 )),
         )
+        .child(match created.get("webUrl").and_then(Value::as_str) {
+            Some(w) => {
+                let w = w.to_owned();
+                view().flex_row().gap_3().child(ui::button(
+                    "在瀏覽器開連結",
+                    ui::Btn::Ghost,
+                    move || {
+                        drop(open_url(w.clone()));
+                    },
+                ))
+            }
+            None => view(),
+        })
         .child(
             view()
                 .flex_row()
@@ -435,7 +462,8 @@ mod tests {
     fn rows_parse_tolerantly() {
         let v = serde_json::json!({"items": [
             {"id": "6fe8bae0-e019-48fb-a651-f9e3514d156e", "type": 1, "name": null,
-             "url": null, "deletionDate": "2026-11-17T13:49:27.000000Z",
+             "url": null, "webUrl": "http://127.0.0.1:51234/#/send/A/seed",
+             "deletionDate": "2026-11-17T13:49:27.000000Z",
              "accessCount": 3, "maxAccessCount": null, "viewed": true},
             {"id": "not-a-uuid", "type": 0},
         ]});
@@ -446,6 +474,15 @@ mod tests {
         assert_eq!(rows[0].max_access, None);
         assert!(rows[0].viewed);
         assert!(rows[0].name.is_none());
+        // webUrl 在場才有意義（鈕的顯示軸）；缺欄＝None 不出鈕
+        assert_eq!(
+            rows[0].web_url.as_deref(),
+            Some("http://127.0.0.1:51234/#/send/A/seed")
+        );
+        let no_web = serde_json::json!({"items": [
+            {"id": "6fe8bae0-e019-48fb-a651-f9e3514d156e", "type": 0},
+        ]});
+        assert_eq!(send_rows(&no_web)[0].web_url, None);
         assert!(send_rows(&serde_json::json!({})).is_empty());
     }
 

@@ -315,6 +315,7 @@ Transport 總表：
 | CLI/GUI/MCP ↔ daemon | UDS `0600`（`$XDG_RUNTIME_DIR` 或 Application Support 下） | `LOCAL_PEERCRED` uid+pid → 執行檔路徑 → 代碼簽章 Team ID 白名單；每連線 X25519+AEAD（防同機搶佔 socket，KeePassXC 教訓） | |
 | Provider extension ↔ daemon | App group 上 **XPC/Mach**，service name `<group>.<name>` | sandbox extension + entitlement | 註冊 `MachServices` 讓 launchd **按需拉起 daemon**；若實測 XPC 受限，退為 group container 內 unix socket（Bitwarden passkey provider 生產先例） |
 | 跨機 thin | TCP+TLS1.3 或 Tailscale；配對碼 + SPKI pin + DeviceId | 每裝置獨立 grant；BTP 層再疊一層 X25519（不單信隧道） | 借 vaultgate/1Password Connect 的短期 token 模式，遠端永不拿長期金鑰 |
+| Send 接收頁 ↔ daemon | HTTP **僅 127.0.0.1**、OS 隨機 port（`webui.rs`） | per-page nonce（`GET /` 換發內嵌）＋自訂標頭 preflight＋不回 CORS 頭；代理 base 取帳號 server 值（頁端無法指定，SSRF 無入口） | seed 留瀏覽器 URL fragment 永不上送；本層只穿透密文，解密在頁內 WebCrypto（實測 VW 不給 allow-origin，直打已否決） |
 | MCP ↔ host | stdio JSON-RPC | fork 關係 + 可選 allowlist | |
 | Android 進程內 | mpsc（同 BTP 訊息型別） | 元件邊界 | |
 
