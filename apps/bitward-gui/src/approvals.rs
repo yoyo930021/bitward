@@ -43,27 +43,33 @@ pub fn pane(core: AppCore) -> View {
                 .child(
                     text(move || {
                         let n = list_core.pending.get().len();
-                        if n == 0 { "目前沒有待批准的請求".to_owned() } else { format!("{n} 筆待决") }
+                        if n == 0 {
+                            "目前沒有待批准的請求".to_owned()
+                        } else {
+                            format!("{n} 筆待决")
+                        }
                     })
                     .text_size(px(theme::TEXT_PAGE_SUB))
                     .text_color(theme::TEXT_MUTED),
                 ),
         )
-        .child(scroll().flex_1().child(
-            view()
-                .flex_col()
-                .gap_2()
-                .w_full()
-                .max_w(px(680.0))
-                .child(each(
-                    move || (*core.pending.get()).clone(),
-                    |p: &PendingRow| p.id.clone(),
-                    move |item: ReadSignal<PendingRow>, _| {
-                        pending_row(each_core.clone(), item.get())
-                    },
-                ))
-                .child(when(move || core.pending.get().is_empty(), empty_card)),
-        ))
+        .child(
+            scroll().flex_1().child(
+                view()
+                    .flex_col()
+                    .gap_2()
+                    .w_full()
+                    .max_w(px(680.0))
+                    .child(each(
+                        move || (*core.pending.get()).clone(),
+                        |p: &PendingRow| p.id.clone(),
+                        move |item: ReadSignal<PendingRow>, _| {
+                            pending_row(each_core.clone(), item.get())
+                        },
+                    ))
+                    .child(when(move || core.pending.get().is_empty(), empty_card)),
+            ),
+        )
 }
 
 /// 單筆佇列列：summary（mono）＋時間＋批准/拒絕。

@@ -187,9 +187,19 @@ mod tests {
     fn download_target_sanitizes_and_avoids_collisions() {
         let p = download_target("深/層\\名.pdf");
         let name = p.file_name().unwrap().to_str().unwrap().to_owned();
-        assert!(name.starts_with("bitward-attachment-深_層_名.pdf"), "{name}");
+        assert!(
+            name.starts_with("bitward-attachment-深_層_名.pdf"),
+            "{name}"
+        );
         assert!(p.starts_with("Downloads".chars().collect::<String>()) || p.is_absolute());
         let empty = download_target("");
-        assert!(empty.file_name().unwrap().to_str().unwrap().contains("attachment"));
+        assert!(
+            empty
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("attachment")
+        );
     }
 }

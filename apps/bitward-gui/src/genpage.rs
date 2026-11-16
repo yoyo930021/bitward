@@ -42,105 +42,105 @@ pub fn pane(core: AppCore) -> View {
                 ),
         )
         .child(view().h(px(1.0)).mx_8().bg(theme::HAIRLINE))
-        .child(scroll().flex_1().child(
-            view()
-                .flex_col()
-                .gap_5()
-                .px_8()
-                .py_4()
-                .w_full()
-                .max_w(px(680.0))
-                // 現值＋強度條
-                .child(
-                    view()
-                        .flex_col()
-                        .gap_2()
-                        .p_4()
-                        .rounded_lg()
-                        .border(px(1.0))
-                        .border_color(theme::HAIRLINE)
-                        .bg(theme::SURFACE)
-                        .child(
-                            text(move || pw.get().unwrap_or_else(|| "—".into()))
-                                .text_size(px(24.0))
-                                .font_family(ui::mono_font())
-                                .text_color(theme::TEXT_PRIMARY)
-                                .line_height(px(32.0)),
-                        )
-                        .child(strength_bar(core.clone())),
-                )
-                // 長度滑桿
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_3()
-                        .child(
-                            text("長度")
-                                .text_size(px(theme::TEXT_FIELD_LABEL))
-                                .font_weight(FontWeight::MEDIUM)
-                                .letter_spacing(px(0.4))
-                                .text_color(theme::TEXT_SECONDARY),
-                        )
-                        .child(form::slider_on(gstate))
-                        .child(
-                            text(move || format!("{}", gstate.get().length))
-                                .text_size(px(theme::TEXT_ROW))
-                                .font_family(ui::mono_font())
-                                .text_color(theme::TEXT_PRIMARY),
-                        ),
-                )
-                // 六開關
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                                                .child(form::switch_chip(
-                            "大寫",
-                            move || gstate.get().uppercase,
-                            move || gstate.update(|g| g.uppercase = !g.uppercase),
-                        ))
-                        .child(form::switch_chip(
-                            "小寫",
-                            move || gstate.get().lowercase,
-                            move || gstate.update(|g| g.lowercase = !g.lowercase),
-                        ))
-                        .child(form::switch_chip(
-                            "數字",
-                            move || gstate.get().digits,
-                            move || gstate.update(|g| g.digits = !g.digits),
-                        ))
-                        .child(form::switch_chip(
-                            "符號",
-                            move || gstate.get().symbols,
-                            move || gstate.update(|g| g.symbols = !g.symbols),
-                        ))
-                        .child(form::switch_chip(
-                            "易讀",
-                            move || gstate.get().avoid_ambiguous,
-                            move || {
-                                gstate.update(|g| g.avoid_ambiguous = !g.avoid_ambiguous)
-                            },
-                        )),
-                )
-                // 動作
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .child(ui::button("重新產生", ui::Btn::Primary, move || {
-                            regen.send(Cmd::GenerateTool)
-                        }))
-                        .child(when(
-                            move || core.gen_tool_pw.get().is_some(),
-                            move || {
-                                ui::copy_button(disp.clone(), "產生器", copied, core.settings)
-                            },
-                        )),
-                ),
-        ))
+        .child(
+            scroll().flex_1().child(
+                view()
+                    .flex_col()
+                    .gap_5()
+                    .px_8()
+                    .py_4()
+                    .w_full()
+                    .max_w(px(680.0))
+                    // 現值＋強度條
+                    .child(
+                        view()
+                            .flex_col()
+                            .gap_2()
+                            .p_4()
+                            .rounded_lg()
+                            .border(px(1.0))
+                            .border_color(theme::HAIRLINE)
+                            .bg(theme::SURFACE)
+                            .child(
+                                text(move || pw.get().unwrap_or_else(|| "—".into()))
+                                    .text_size(px(24.0))
+                                    .font_family(ui::mono_font())
+                                    .text_color(theme::TEXT_PRIMARY)
+                                    .line_height(px(32.0)),
+                            )
+                            .child(strength_bar(core.clone())),
+                    )
+                    // 長度滑桿
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                text("長度")
+                                    .text_size(px(theme::TEXT_FIELD_LABEL))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .letter_spacing(px(0.4))
+                                    .text_color(theme::TEXT_SECONDARY),
+                            )
+                            .child(form::slider_on(gstate))
+                            .child(
+                                text(move || format!("{}", gstate.get().length))
+                                    .text_size(px(theme::TEXT_ROW))
+                                    .font_family(ui::mono_font())
+                                    .text_color(theme::TEXT_PRIMARY),
+                            ),
+                    )
+                    // 六開關
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(form::switch_chip(
+                                "大寫",
+                                move || gstate.get().uppercase,
+                                move || gstate.update(|g| g.uppercase = !g.uppercase),
+                            ))
+                            .child(form::switch_chip(
+                                "小寫",
+                                move || gstate.get().lowercase,
+                                move || gstate.update(|g| g.lowercase = !g.lowercase),
+                            ))
+                            .child(form::switch_chip(
+                                "數字",
+                                move || gstate.get().digits,
+                                move || gstate.update(|g| g.digits = !g.digits),
+                            ))
+                            .child(form::switch_chip(
+                                "符號",
+                                move || gstate.get().symbols,
+                                move || gstate.update(|g| g.symbols = !g.symbols),
+                            ))
+                            .child(form::switch_chip(
+                                "易讀",
+                                move || gstate.get().avoid_ambiguous,
+                                move || gstate.update(|g| g.avoid_ambiguous = !g.avoid_ambiguous),
+                            )),
+                    )
+                    // 動作
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(ui::button("重新產生", ui::Btn::Primary, move || {
+                                regen.send(Cmd::GenerateTool)
+                            }))
+                            .child(when(
+                                move || core.gen_tool_pw.get().is_some(),
+                                move || {
+                                    ui::copy_button(disp.clone(), "產生器", copied, core.settings)
+                                },
+                            )),
+                    ),
+            ),
+        )
 }
 
 /// 強度條：4 格填色，分級色借 `reports::score_dot_color`（與報告同一

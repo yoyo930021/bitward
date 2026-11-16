@@ -24,11 +24,11 @@ use nsh_platform_macos::objc2::rc::{Allocated, Retained, Weak};
 use nsh_platform_macos::objc2::runtime::{AnyObject, Bool, NSObject, ProtocolObject};
 use nsh_platform_macos::objc2::{
     class, define_class, extern_protocol, msg_send, DefinedClass, MainThreadOnly,
+    DefinedClass, MainThreadOnly, class, define_class, extern_protocol, msg_send,
 };
 use nsh_platform_macos::objc2_app_kit::NSWindow;
 use nsh_platform_macos::objc2_foundation::{
     NSArray, NSData, NSError, NSObjectProtocol, NSString,
-};
 
 unsafe extern "C" {
     /// 本 app 未連結 AuthenticationServices（框架走 NSBundle 動態載入）,
@@ -36,6 +36,38 @@ unsafe extern "C" {
     /// TwoFA 紀律「libc 未再匯出 dlopen」的替代路）。
     fn dlsym(handle: *mut std::ffi::c_void, symbol: *const std::ffi::c_char)
     -> *mut std::ffi::c_void;
+}
+
+/// macOS `RTLD_DEFAULT`＝((void*)-2)。
+const RTLD_DEFAULT: *mut std::ffi::c_void = -2isize as *mut std::ffi::c_void;
+
+/// 取 `ASAuthorizationAllSupportedPublicKeyCredentialDescriptorTransports()`
+/// （標頭提供的 transports 全集合,usb/nfc/ble）；取不到＝回 None 由呼叫端
+/// 跳過 allowedCredentials 收窄（寧寬勿拒,伺服器仍會拒絕非清單鑰）。
+fn all_supported_transports() -> Option<Retained<NSArray<AnyObject>>> {
+    let name = std::ffi::CString::new(
+        "ASAuthorizationAllSupportedPublicKeyCredentialDescriptorTransports",
+    )
+    .ok()?;
+    unsafe {
+        let sym = dlsym(RTLD_DEFAULT, name.as_ptr());
+        if sym.is_null() {
+            return None;
+        }
+        let f: unsafe extern "C" fn() -> *mut NSArray<AnyObject> = std::mem::transmute(sym);
+        Retained::from_raw(f())
+    }
+}
+use nsh_platform_macos::objc2_foundation::{NSArray, NSData, NSError, NSObjectProtocol, NSString};
+
+unsafe extern "C" {
+    /// 本 app 未連結 AuthenticationServices（框架走 NSBundle 動態載入）,
+    /// 符號改向全程序要：`dlsym(RTLD_DEFAULT, …)`（libSystem 恆有 dlsym,
+    /// TwoFA 紀律「libc 未再匯出 dlopen」的替代路）。
+    fn dlsym(
+        handle: *mut std::ffi::c_void,
+        symbol: *const std::ffi::c_char,
+    ) -> *mut std::ffi::c_void;
 }
 
 /// macOS `RTLD_DEFAULT`＝((void*)-2)。
@@ -147,6 +179,9 @@ extern_protocol!(
     /// 鏡像 Apple 標頭：回傳承載彈窗的 NSWindow（ASPresentationAnchor 別名）。
     #[allow(clippy::missing_safety_doc)]
     unsafe trait ASAuthorizationControllerPresentationContextProviding: NSObjectProtocol {
+    unsafe trait ASAuthorizationControllerPresentationContextProviding:
+        NSObjectProtocol
+    {
         #[allow(deprecated)]
         #[unsafe(method_id(presentationAnchorForAuthorizationController:))]
         fn presentation_anchor(&self, controller: &AnyObject) -> Retained<NSWindow>;
@@ -169,6 +204,24 @@ define_class!(
     #[name = "BitwardWebauthnIsland"]
     #[ivars = Ivars]
     struct IslandDelegate;
+
+    unsafe impl NSObjectProtocol for IslandDelegate {}
+
+    impl IslandDelegate {
+        #[unsafe(method_id(initWithDone:))]
+        fn init_with_done(
+            this: Allocated<Self>,
+            done: *mut std::ffi::c_void,
+        ) -> Option<Retained<Self>> {
+            // 由呼叫端 Box::into_raw 轉來（*mut c_void 保編碼合規）,這裡收回。
+            let cb = unsafe { *Box::from_raw(done as *mut DoneCb) };
+            let ivars = Ivars {
+                done: RefCell::new(Some(cb)),
+                controller: RefCell::new(None),
+            };
+            let this = this.set_ivars(ivars);
+            unsafe { msg_send![super(this), init] }
+        }
 
     unsafe impl NSObjectProtocol for IslandDelegate {}
 
@@ -317,6 +370,8 @@ pub fn request_assertion(
         };
         // allowedCredentials：有清單才收窄（id 解碼失敗的跳過,寧寬勿拒）。
         if let Some(transports) = all_supported_transports().filter(|_| !credential_ids.is_empty()) {
+        if let Some(transports) = all_supported_transports().filter(|_| !credential_ids.is_empty())
+        {
             let mut objs: Vec<Retained<AnyObject>> = Vec::new();
             for id in &credential_ids {
                 let Some(bytes) = b64url_decode(id) else {
@@ -341,6 +396,8 @@ pub fn request_assertion(
             }
         }
         let boxed: *mut std::ffi::c_void = Box::into_raw(Box::new(on_done)) as *mut std::ffi::c_void;
+        let boxed: *mut std::ffi::c_void =
+            Box::into_raw(Box::new(on_done)) as *mut std::ffi::c_void;
         let delegate: Option<Retained<IslandDelegate>> = msg_send![
             IslandDelegate::alloc(mtm),
             initWithDone: boxed

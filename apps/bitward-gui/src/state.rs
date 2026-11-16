@@ -1226,6 +1226,18 @@ fn tf_pw_or_err(core: &AppCore) -> Option<String> {
         None
     } else {
         Some(pw)
+}
+
+/// 管理面主密碼閘（PR3）：空欄先本地擋、給可懂一行——語意同 CLI 的
+/// stdin 必填，不讓缺憑證的請求白跑一趟 daemon。
+fn tf_pw_or_err(core: &AppCore) -> Option<String> {
+    let pw = core.tf_pw.get();
+    if pw.is_empty() {
+        core.tf_error
+            .set(Some("此操作需要主密碼（先填上方主密碼欄）".into()));
+        None
+    } else {
+        Some(pw)
     }
 }
 
@@ -2397,10 +2409,8 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         }
         Cmd::TfYubikeyAdd => {
             let Some(pw) = tf_pw_or_err(core) else { return };
-            let otp = match bw_proto::TwoFactorProviderInfo::validate_token(
-                3,
-                &core.tf_yubi.get(),
-            ) {
+            let otp = match bw_proto::TwoFactorProviderInfo::validate_token(3, &core.tf_yubi.get())
+            {
                 Ok(t) => t,
                 Err(m) => {
                     core.tf_error.set(Some(m));

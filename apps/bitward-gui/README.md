@@ -47,7 +47,7 @@ cd apps/bitward-gui
 BITWARD_GUI_SOCK=<repo>/dev/e2e/demo/s NSH_GUI_SHOTS=$PWD nsh run --target macos
 ```
 
-依指令序列跑完整驗收流並寫 `shot-1..23、26..43、50..60-*.png`（24/25 徽章流、44..47 登入流、48/49 2FA 流見下）後退出：列表全量（三欄骨架、
+依指令序列跑完整驗收流並寫 `shot-1..23、26..43、50..61、65、65b、66-*.png`（24/25 徽章流、44..47 登入流、48/49 2FA 流、62..64 Duo/管理面流見下）後退出：列表全量（三欄骨架、
 型別磚、未同步膠囊，右欄空態為「選取一個項目」佔位）→ 搜尋 "GitHub" →
 詳情遮罩 → 詳情 revealed → 新增編輯器（右欄 inline）→ 真送新增（Create+AddTag）
 → TOTP 缺席路徑（無 seed → 自動取碼靜默收合，驗證碼節不渲染，shot-6-totp-absent）→ 排序下拉 → 標籤 chips 選取 →
@@ -229,6 +229,12 @@ e2e 延伸（同 `login2fa.sh`）：管理面 CLI 閉環（[0]→停用→[]→�
 （`shot-63-duo-redirect.png`，真實 Duo 雲往復需正式憑證）、管理分節真 VW
 清單證據（`shot-64-2fa-admin.png`）。安全金鑰島需人手觸鑰，驗收走真機：
 插鑰→按「使用安全金鑰」→系統彈 Touch ID/PIN 面板→簽章自動入欄。
+
+緊急存取（PR4，主流尾段）：`shot-65-card-detail.png`／`shot-65b-card-edit.png`
+（卡片六欄建卡→詳情遮罩→編輯態，PR1 補拍幀）＋`shot-66-ea-entry.png`
+（工具組「緊急联系人」進頁；demo 庫無 EA 關係＝入口＋空態文案同幀）。
+雙帳號全鏈（invite→confirm→view 水印→epoch 失效→takeover）在
+`dev/e2e/ea.sh`（獨立容器 `bitward-vw-ea:18101`，`EA_KEEP=1` 留環境錄 fixtures）。
 
 注意：垃圾桶與資料夾需要 daemon 支援 `Query.deleted`／`Query.folder` 三態與
 `ListFolders`／`Vault:Restore`／`Vault:Purge`（主線三件套已落地）；批次 2c 的

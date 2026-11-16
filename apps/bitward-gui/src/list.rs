@@ -53,11 +53,7 @@ pub fn search(core: AppCore) -> View {
                 .flex_row()
                 .items_center()
                 .justify_center()
-                .child(
-                    text("⌕")
-                        .text_size(px(15.0))
-                        .text_color(theme::TEXT_MUTED),
-                ),
+                .child(text("⌕").text_size(px(15.0)).text_color(theme::TEXT_MUTED)),
         )
 }
 
@@ -150,7 +146,11 @@ fn collect_tags(items: &[ItemView]) -> Vec<String> {
     tags
 }
 
-pub(crate) fn chip(label: String, selected: impl Fn() -> bool + 'static, on_press: impl Fn() + 'static) -> View {
+pub(crate) fn chip(
+    label: String,
+    selected: impl Fn() -> bool + 'static,
+    on_press: impl Fn() + 'static,
+) -> View {
     chip_dyn(move || label.clone(), selected, on_press)
 }
 
@@ -228,11 +228,7 @@ fn filter_button(
                 .text_size(px(12.5))
                 .text_color(theme::TEXT_SECONDARY),
         )
-        .child(
-            text("▾")
-                .text_size(px(10.0))
-                .text_color(theme::TEXT_MUTED),
-        )
+        .child(text("▾").text_size(px(10.0)).text_color(theme::TEXT_MUTED))
 }
 
 fn sort_label(sort: SortKey) -> String {
@@ -278,33 +274,25 @@ pub fn panel(core: AppCore) -> impl IntoElement {
             .map(|v| v.meta.id)
             .collect::<Vec<_>>()
     })
-    .separator(move || {
+    .separator(move || view().h(px(1.0)).ml(px(63.0)).mr_3().bg(theme::HAIRLINE))
+    .empty(dynamic(move || {
         view()
-            .h(px(1.0))
-            .ml(px(63.0))
-            .mr_3()
-            .bg(theme::HAIRLINE)
-    })
-    .empty(
-        dynamic(move || {
-            view()
-                .h_40()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_1()
-                .child(
-                    text(if empty_core.filter.get().trash {
-                        "垃圾桶是空的"
-                    } else {
-                        "找不到符合的項目"
-                    })
-                    .text_size(px(14.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme::TEXT_SECONDARY),
-                )
-        }),
-    )
+            .h_40()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_1()
+            .child(
+                text(if empty_core.filter.get().trash {
+                    "垃圾桶是空的"
+                } else {
+                    "找不到符合的項目"
+                })
+                .text_size(px(14.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme::TEXT_SECONDARY),
+            )
+    }))
 }
 
 /// 列高 44（官方節奏）：型別磚 32＋雙行文字；右側只放狀態膠囊（未同步）與星。
@@ -435,7 +423,13 @@ fn row(core: AppCore, at: Position) -> View {
                     .text_color(theme::ACCENT),
                 )
                 .child(when(
-                    move || right_core.items.get().get(at.index()).is_some_and(|v| v.meta.pending),
+                    move || {
+                        right_core
+                            .items
+                            .get()
+                            .get(at.index())
+                            .is_some_and(|v| v.meta.pending)
+                    },
                     || ui::badge("未同步", theme::ACCENT, theme::ACCENT.opacity(0.10)),
                 )),
         )
@@ -518,6 +512,9 @@ mod tests {
     fn collect_tags_dedups_and_sorts() {
         let a = view_of(vec![], vec!["工作", "dev"]);
         let b = view_of(vec![], vec!["dev"]);
-        assert_eq!(collect_tags(&[a, b]), vec!["dev".to_owned(), "工作".to_owned()]);
+        assert_eq!(
+            collect_tags(&[a, b]),
+            vec!["dev".to_owned(), "工作".to_owned()]
+        );
     }
 }

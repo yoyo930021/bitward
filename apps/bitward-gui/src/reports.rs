@@ -133,50 +133,55 @@ fn reuse_list(core: AppCore) -> View {
         .flex_col()
         .gap_4()
         .child(list_header("重用密碼", head_core))
-        .child(scroll().flex_1().child(
-            view()
-                .flex_col()
-                .gap_3()
-                .w_full()
-                .max_w(px(680.0))
-                .child(each(
-                    move || (*core.reports_reuse.get()).clone(),
-                    |g: &bw_proto::DupGroup| g.domain.clone(),
-                    move |group: ReadSignal<bw_proto::DupGroup>, _| {
-                        let mut body = view().flex_col().gap_1();
-                        for id in group.get().ids {
-                            body = body.child(item_row(id, each_core.clone(), None));
-                        }
-                        view()
-                            .flex_col()
-                            .gap_2()
-                            .p_4()
-                            .rounded(px(theme::RADIUS_BLOCK))
-                            .border(px(1.0))
-                            .border_color(theme::HAIRLINE)
-                            .bg(theme::ELEVATED)
-                            .child(
-                                view()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        text(group.get().domain.clone())
-                                            .text_size(px(theme::TEXT_ROW))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme::TEXT_PRIMARY),
-                                    )
-                                    .child(text(format!("共用 {} 筆", group.get().ids.len()))
-                                        .text_size(px(theme::TEXT_BADGE))
-                                        .text_color(theme::TEXT_MUTED)),
-                            )
-                            .child(body)
-                    },
-                ))
-                .child(when(move || core.reports_reuse.get().is_empty(), || {
-                    empty_note("目前沒有同網站同帳號的重複項目（需解鎖後掃描）")
-                })),
-        ))
+        .child(
+            scroll().flex_1().child(
+                view()
+                    .flex_col()
+                    .gap_3()
+                    .w_full()
+                    .max_w(px(680.0))
+                    .child(each(
+                        move || (*core.reports_reuse.get()).clone(),
+                        |g: &bw_proto::DupGroup| g.domain.clone(),
+                        move |group: ReadSignal<bw_proto::DupGroup>, _| {
+                            let mut body = view().flex_col().gap_1();
+                            for id in group.get().ids {
+                                body = body.child(item_row(id, each_core.clone(), None));
+                            }
+                            view()
+                                .flex_col()
+                                .gap_2()
+                                .p_4()
+                                .rounded(px(theme::RADIUS_BLOCK))
+                                .border(px(1.0))
+                                .border_color(theme::HAIRLINE)
+                                .bg(theme::ELEVATED)
+                                .child(
+                                    view()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            text(group.get().domain.clone())
+                                                .text_size(px(theme::TEXT_ROW))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(theme::TEXT_PRIMARY),
+                                        )
+                                        .child(
+                                            text(format!("共用 {} 筆", group.get().ids.len()))
+                                                .text_size(px(theme::TEXT_BADGE))
+                                                .text_color(theme::TEXT_MUTED),
+                                        ),
+                                )
+                                .child(body)
+                        },
+                    ))
+                    .child(when(
+                        move || core.reports_reuse.get().is_empty(),
+                        || empty_note("目前沒有同網站同帳號的重複項目（需解鎖後掃描）"),
+                    )),
+            ),
+        )
 }
 
 /// 弱密碼清單：name＋分級色點＋分數；點列進詳情。
@@ -188,25 +193,27 @@ fn weak_list(core: AppCore) -> View {
         .flex_col()
         .gap_4()
         .child(list_header("弱密碼", head_core))
-        .child(scroll().flex_1().child(
-            view()
-                .flex_col()
-                .gap_2()
-                .w_full()
-                .max_w(px(680.0))
-                .child(each(
-                    move || weak_score_items(&core.reports_weak.get()),
-                    |it: &(ItemId, i64)| it.0,
-                    move |it: ReadSignal<(ItemId, i64)>, _| {
-                        let (id, score) = it.get();
-                        item_row(id, each_core.clone(), Some(score))
-                    },
-                ))
-                .child(when(
-                    move || weak_score_items(&core.reports_weak.get()).is_empty(),
-                    || empty_note("目前沒有低於門檻的密碼（需解鎖後掃描）"),
-                )),
-        ))
+        .child(
+            scroll().flex_1().child(
+                view()
+                    .flex_col()
+                    .gap_2()
+                    .w_full()
+                    .max_w(px(680.0))
+                    .child(each(
+                        move || weak_score_items(&core.reports_weak.get()),
+                        |it: &(ItemId, i64)| it.0,
+                        move |it: ReadSignal<(ItemId, i64)>, _| {
+                            let (id, score) = it.get();
+                            item_row(id, each_core.clone(), Some(score))
+                        },
+                    ))
+                    .child(when(
+                        move || weak_score_items(&core.reports_weak.get()).is_empty(),
+                        || empty_note("目前沒有低於門檻的密碼（需解鎖後掃描）"),
+                    )),
+            ),
+        )
 }
 
 /// 歷史回包的 `versions` 陣形（不支援態恆空；詳情頁渲染閘與列構造共用）。
