@@ -384,6 +384,77 @@ async fn daemon_denied_becomes_tool_error_text() {
 }
 
 #[tokio::test]
+async fn vault_reveal_projects_only_requested_field() {
+    let (bridge, mut fake) = fake_daemon(Auth::Session { token: "t".into() }).await;
+    let mut h = Harness::new(bridge);
+    h.send(&call_line(
+        1,
+        "vault_reveal",
+        &format!(r#"{{"id":"{ITEM_ID}","field":"password"}}"#),
+    ))
+    .await;
+    let _ = hello_of(&mut fake).await;
+    let (rid, call) = next_call(&mut fake).await;
+    match call {
+        Call::Vault(VaultCall::Get { view, .. }) => assert_eq!(view, View::Reveal),
+        other => panic!("{other:?}"),
+    }
+    // 完整 Reveal 視窗（含 username/password/notes）回給 MCP
+    let mut revealed = sample_item();
+    revealed.username = Some("octo".into());
+    revealed.password = Some("hunter2".into());
+    revealed.notes = Some("secret note".into());
+    fake.replies
+        .send(ServerMsg::Reply {
+            rid,
+            outcome: Ok(Response::Item(Some(Box::new(revealed)))),
+        })
+        .unwrap();
+    let r = h.json().await;
+    assert_eq!(r["result"]["isError"], false);
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    let p: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(p["field"], "password");
+    assert_eq!(p["value"], "hunter2");
+    // item 4：只回被點名的欄，其他明文欄不得進 context
+    assert!(p.get("notes").is_none(), "未要求的 notes 不得外洩：{p}");
+    assert!(p.get("username").is_none(), "未要求的 username 不得外洩：{p}");
+    h.close_stdin();
+    assert!(
+        timeout(Duration::from_secs(5), &mut h.serve)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn vault_reveal_rejects_unsupported_field() {
+    let (bridge, mut fake) = fake_daemon(Auth::Session { token: "t".into() }).await;
+    let mut h = Harness::new(bridge);
+    h.send(&call_line(
+        1,
+        "vault_reveal",
+        &format!(r#"{{"id":"{ITEM_ID}","field":"card_number"}}"#),
+    ))
+    .await;
+    // 不支援欄位應在送 daemon 前即明拒（不出 Call）
+    let r = h.json().await;
+    let err = r.get("error").expect("參數錯誤應回 JSON-RPC error");
+    assert!(err["message"].as_str().unwrap().contains("vault_reveal"), "{err}");
+    drop(fake);
+    h.close_stdin();
+    assert!(
+        timeout(Duration::from_secs(5), &mut h.serve)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_ok()
+    );
+}
+
+#[tokio::test]
 async fn needs_approval_text_carries_approval_uuid() {
     let (bridge, mut fake) = fake_daemon(Auth::Session { token: "t".into() }).await;
     let mut h = Harness::new(bridge);

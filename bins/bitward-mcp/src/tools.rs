@@ -45,12 +45,12 @@ pub fn defs() -> Value {
         },
         {
             "name": "vault_reveal",
-            "description": "Reveal a plaintext secret field (default: password) into LLM context. Requires a Reveal grant on this session; without it the daemon denies or blocks on human approval. Every reveal is audited.",
+            "description": "Reveal one plaintext secret field (default: password) into LLM context; only that field is returned. Requires a Reveal grant on this session; without it the daemon denies or blocks on human approval. Every reveal is audited.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "id": {"type": "string", "description": "item uuid"},
-                    "field": {"type": "string", "description": "secret field to reveal (default \"password\")"}
+                    "field": {"type": "string", "description": "secret field to reveal: password (default) | username | notes; other fields use vault_get or totp_code"}
                 },
                 "required": ["id"]
             }
@@ -145,9 +145,10 @@ pub fn map_call(name: &str, args: &Value) -> Result<bw_proto::Call, ToolError> {
             view: View::Masked,
         }),
         "vault_reveal" => {
-            // field 是 context 面參數；本輪 daemon 的 Get{Reveal} 回完整視窗，
-            // 不另做過濾（政策唯一入口在 daemon，§2.3）。
-            opt_str(args, "field")?;
+            // item 4：`field` 不再被靜默忽略——先驗證欄名（不支援即明拒），
+            // 再由 main.rs 依欄位投影回應（只把被點名的明文送進 context）。
+            // daemon 端仍回完整 Reveal 視窗，政策唯一入口在 daemon（§2.3）。
+            reveal_field(args)?;
             Call::Vault(VaultCall::Get {
                 id: get_id(args)?,
                 view: View::Reveal,
@@ -221,6 +222,52 @@ fn opt_str(args: &Value, key: &str) -> Result<Option<String>, ToolError> {
             .as_str()
             .map(|s| Some(s.to_owned()))
             .ok_or_else(|| invalid(format!("{key} must be a string"))),
+    }
+}
+
+/// `vault_reveal` 能投影的機密欄（daemon Reveal 視窗內的單一明文值欄）。
+/// 卡號/CVV/自訂欄等請改走 `vault_get`（遮罩）或後續欄位級工具；totp 有獨立 `totp_code`。
+const REVEAL_FIELDS: &[&str] = &["password", "username", "notes"];
+
+/// 讀取＋驗證 `field`（item 4）：缺省＝None（語意＝預設 `password`）；非字串或不支援的
+/// 欄名 → 明拒（不再是靜默忽略後回傳整個 Reveal 檢視）。
+pub fn reveal_field(args: &Value) -> Result<Option<String>, ToolError> {
+    match args.get("field") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => {
+            if REVEAL_FIELDS.contains(&s.as_str()) {
+                Ok(Some(s.clone()))
+            } else {
+                Err(invalid(format!(
+                    "vault_reveal 僅支援 field ∈ {REVEAL_FIELDS:?}；其他欄位請改用 vault_get（遮罩檢視）或 totp_code"
+                )))
+            }
+        }
+        Some(_) => Err(invalid("field must be a string")),
+    }
+}
+
+/// 把 `vault_reveal` 的 `Get{Reveal}` 回應投影成「單一欄位」JSON：只回 id／名稱
+/// （非機密）＋被點名的欄位值，避免把整份 Reveal 視窗（含未要求的其他明文）倒進
+/// LLM context（item 4）。非 `Item` 回應（理論上不該發生）原樣序列化。
+pub fn project_reveal(resp: &bw_proto::Response, field: Option<&str>) -> Value {
+    let field = field.unwrap_or("password");
+    match resp {
+        bw_proto::Response::Item(Some(view)) => {
+            let value: Option<&str> = match field {
+                "password" => view.password.as_deref(),
+                "username" => view.username.as_deref(),
+                "notes" => view.notes.as_deref(),
+                _ => None,
+            };
+            json!({
+                "id": view.meta.id,
+                "name": view.meta.name,
+                "field": field,
+                "value": value,
+            })
+        }
+        other => serde_json::to_value(other).unwrap_or(Value::Null),
     }
 }
 
@@ -324,5 +371,64 @@ mod tests {
         assert!(map_call("vault_list", &json!({"limit": "x"})).is_err());
         assert!(map_call("audit_tail", &json!({})).is_ok());
         assert!(map_call("session_whoami", &json!({})).is_ok());
+    }
+
+    // —— item 4：vault_reveal 的 field 參數實作（投影）＋不支援欄位明拒 ——
+
+    #[test]
+    fn reveal_field_validates_supported_and_rejects_rest() {
+        // 缺省＝None（預設 password）
+        assert_eq!(reveal_field(&json!({"id": id()})).unwrap(), None);
+        for ok in ["password", "username", "notes"] {
+            assert_eq!(
+                reveal_field(&json!({"id": id(), "field": ok})).unwrap().as_deref(),
+                Some(ok)
+            );
+        }
+        // 不支援的欄名明拒（不再靜默忽略）
+        assert!(reveal_field(&json!({"id": id(), "field": "card_number"})).is_err());
+        assert!(reveal_field(&json!({"id": id(), "field": "totp"})).is_err());
+        assert!(reveal_field(&json!({"id": id(), "field": 5})).is_err());
+        // map_call 端同步攔下不支援欄位（呼叫 daemon 前即拒）
+        assert!(map_call("vault_reveal", &json!({"id": id(), "field": "card"})).is_err());
+        assert!(map_call("vault_reveal", &json!({"id": id(), "field": "notes"})).is_ok());
+    }
+
+    #[test]
+    fn project_reveal_returns_only_named_field() {
+        let meta = bw_proto::ItemMeta {
+            id: Uuid::parse_str(&id()).unwrap(),
+            kind: bw_proto::ItemKind::Login,
+            name: Some("GitHub".into()),
+            uris: vec![],
+            folder_id: None,
+            organization_id: None,
+            collections: vec![],
+            favorite: false,
+            tags: vec![],
+            updated_at: None,
+            pending: false,
+            deleted_at: None,
+            archived_at: None,
+            uri_matches: vec![],
+        };
+        let mut view = bw_proto::ItemView::metadata(meta);
+        view.username = Some("octo".into());
+        view.password = Some("hunter2".into());
+        view.notes = Some("secret note".into());
+        let resp = bw_proto::Response::Item(Some(Box::new(view)));
+
+        let p = project_reveal(&resp, None); // 預設 password
+        assert_eq!(p["field"], "password");
+        assert_eq!(p["value"], "hunter2");
+        assert_eq!(p["name"], "GitHub");
+        // 未點名的欄位不得出現在投影輸出（只回被要求的那一欄）
+        assert!(p.get("notes").is_none() && p.get("username").is_none(), "{p}");
+
+        let pu = project_reveal(&resp, Some("username"));
+        assert_eq!(pu["field"], "username");
+        assert_eq!(pu["value"], "octo");
+        let pn = project_reveal(&resp, Some("notes"));
+        assert_eq!(pn["value"], "secret note");
     }
 }

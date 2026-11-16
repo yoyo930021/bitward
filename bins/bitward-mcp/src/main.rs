@@ -182,7 +182,17 @@ async fn handle_line(line: &str, bridge: &Bridge, server_name: &str) -> Option<V
                 Err(e) => Err((e.code, e.message)),
                 Ok(call) => match bridge.invoke(call).await {
                     Err(dead) => Err((INTERNAL_ERROR, dead)),
-                    Ok(Ok(resp)) => Ok(tool_text(response_text(&resp), false)),
+                    Ok(Ok(resp)) => {
+                        // item 4：vault_reveal 依 `field` 投影，只回被點名的明文欄位。
+                        if name == "vault_reveal" {
+                            // map_call 已驗證欄名，這裡取欄位做投影（缺省＝password）。
+                            let field = tools::reveal_field(&args).ok().flatten();
+                            let projected = tools::project_reveal(&resp, field.as_deref());
+                            Ok(tool_text(projected.to_string(), false))
+                        } else {
+                            Ok(tool_text(response_text(&resp), false))
+                        }
+                    }
                     // daemon 的協定級錯誤＝工具層失敗（isError），不是協議失敗。
                     Ok(Err(wtp)) => Ok(tool_text(wtp.to_string(), true)),
                 },
