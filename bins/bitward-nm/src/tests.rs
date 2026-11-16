@@ -239,9 +239,15 @@ async fn five_methods_over_fake_daemon() {
     );
     let items = by_id["3"]["result"]["Items"].as_array().unwrap();
     assert_eq!(items.len(), 3);
-    // A3 語意：Metadata 輸出裡機密鍵根本不存在
+    // A3 值性（PR5 D5 裁決）：鍵可缺席或恆 null，但明文值不得出現在 Metadata 出口
     let list_raw = serde_json::to_string(&by_id["3"]).unwrap();
-    assert!(!list_raw.contains("password") && !list_raw.contains("hunter2"));
+    assert!(!list_raw.contains("hunter2"), "明文不得進出口：{list_raw}");
+    for it in items {
+        assert!(
+            it.get("password").is_none_or(Value::is_null),
+            "password 欄必須恆空：{it}"
+        );
+    }
     // credential.match：shim 以 host "github.com" 查，daemon 子串回 GitHub+Gist，
     // shim host 過濾後只剩 GitHub
     let matched = by_id["4"]["result"].as_array().unwrap();

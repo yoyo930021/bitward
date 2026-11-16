@@ -164,7 +164,25 @@ postcard 條目刻意不含仍帶 `serde_json::Value` 的變體（`Response::Jso
 只有 JSON 能回讀（本節開頭的 `deserialize_any` 限制）。
 
 緊湊度現測（同一訊息、兩種編碼）：`invoke-list-metadata` 225 → 20 bytes、
-`reply-totp-code` 87 → 12 bytes。全量 List 回應的端到端數見 PR5 perf 死線收據。
+`reply-totp-code` 87 → 12 bytes。
+
+### 3.1 perf 死線收據（PR5 D5，2026-11-17）
+
+同一 daemon（558 筆鏡像庫副本、544 筆未刪）、同一查詢（`ls --limit 0`）、交錯 5 輪：
+
+| 指標 | JSON（逃生舷） | postcard（主線） | 變化 |
+|---|---|---|---|
+| 全量 List 回包幀體 | 285,595 B | 82,583 B | **−71.1%** |
+| 端到端牆鐘（`time bitward ls`） | 0.00–0.01 s | 0.00–0.01 s | 不惡化 |
+| 解碼耗時中位數（200 次同體） | 0.309 ms | 0.097 ms | 3.2× 快 |
+| 對照 trunk 基線（PR5 前 JSON） | 217,595 B | 82,580 B | −62.0% |
+
+兩個基準都過門檻（≥−40%）。**如實記一筆副作用**：移除 `skip_serializing_if` 後
+JSON 模式的回包從 217,595 B 長到 285,595 B（+31%），因為缺席欄位現在寫顯式 null；
+postcard 側不受影響（`Option::None` 每欄 1 byte 判別字，Metadata 視窗的
+`ItemView` 十個可空欄 ≈ 10 B/筆 ≈ 5.4 KB，佔 postcard 回包 6.6%；card/identity
+的 37 欄在父節點 `None` 時不佔位）。收據重跑：
+`BW_PERF_STORE=<庫副本> cargo test -p bitwarderd --release -- --ignored wire_list_bytes --nocapture`。
 
 ## 4. 與既有機制的關係
 

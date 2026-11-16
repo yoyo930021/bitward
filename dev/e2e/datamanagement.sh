@@ -78,7 +78,7 @@ for _ in $(seq 1 30); do [[ "$(B outbox --json | jq '(.outbox.queued + .outbox.i
 pass "move/unshare outbox 路徑收斂（org 語意全覆蓋列 P4b）"
 
 # 值索引不洩到 metadata 輸出
-B ls --json | jq -e 'all(has("password") | not)' >/dev/null || fail "值索引回填後 metadata 輸出出現 password 鍵"
+B ls --json | jq -e 'all(.password == null)' >/dev/null || fail "值索引回填後 metadata 出口帶了 password 值（A3：恆 null 或鍵缺席）"
 pass "值索引未破壞 A3 輸出契約"
 
 echo "P4 DATAMANAGE E2E: ALL PASS"

@@ -339,9 +339,18 @@ async fn vault_list_round_trip_is_metadata_only() {
     assert!(text.contains("agent1"));
     let parsed: Value = serde_json::from_str(text).unwrap();
     assert_eq!(parsed["Items"][0]["meta"]["name"], "agent1");
-    // A3 結構保證：Metadata 視窗裡 password 鍵根本不存在。
-    assert!(parsed["Items"][0]["meta"].get("password").is_none());
-    assert!(parsed["Items"][0].get("password").is_none());
+    // A3 值性保證（PR5 D5 裁決）：Metadata 視窗的 password 恆 null 或鍵缺席，
+    // 兩者皆過；明文值不得出現（postcard 欄序編碼不再支援「跳欄」形態）。
+    assert!(
+        parsed["Items"][0]["meta"]
+            .get("password")
+            .is_none_or(Value::is_null)
+    );
+    assert!(
+        parsed["Items"][0]
+            .get("password")
+            .is_none_or(Value::is_null)
+    );
     h.close_stdin();
     assert!(
         timeout(Duration::from_secs(5), &mut h.serve)

@@ -174,25 +174,25 @@ pub struct ItemMeta {
 /// 其餘四欄（持卡人／品牌／有效月／有效年）解鎖即可讀，Masked/Reveal 同形。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardView {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub cardholder_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub brand: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub exp_month: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub exp_year: Option<String>,
     /// 卡號遮罩態（例：`••••4242`；僅 Masked）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub number_masked: Option<String>,
     /// 卡號全值（僅 Reveal；A3 紀律：鍵缺席不是 null）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub number: Option<String>,
     /// CVV 遮罩態（固定 `••••`；僅 Masked 且有值）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub code_masked: Option<String>,
     /// CVV 全值（僅 Reveal）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub code: Option<String>,
 }
 
@@ -201,41 +201,41 @@ pub struct CardView {
 /// 無遮罩欄；Metadata（鎖定態）整節缺席。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdentityView {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub first_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub middle_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub last_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub address1: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub address2: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub address3: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub city: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub state: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub postal_code: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub country: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub company: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub email: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub phone: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub ssn: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub username: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub passport_number: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub license_number: Option<String>,
 }
 
@@ -243,34 +243,30 @@ pub struct IdentityView {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ItemView {
     pub meta: ItemMeta,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
     /// Masked 形態（例：`••••12`）
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub password_masked: Option<String>,
     /// 僅 Reveal 構造且 grant 通過時為 Some。skip-if-none 是 A3 的結構保證：
     /// Metadata 輸出的 JSON 里 `password` 鍵根本不存在，不是 null。
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
     pub totp_available: bool,
     /// 筆記明文（SecureNote 本體欄；Notes 為 Secret 級，Metadata 下鍵不存在）。
     /// Masked/Reveal 均帶全文（官方詳情頁語意：解鎖即可讀筆記）。
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     /// 自訂欄位（順序同線格式 `fields[]`）。Metadata 下恆為空（欄名是密文，
     /// 鎖定態解不了）；Masked 帶 text 欄值、hidden 欄值為 None；Reveal 全帶。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub fields: Vec<CipherField>,
     /// 附件元資料（批次 4a）。Metadata/鎖定態恆為空（檔名是信封字串）；
     /// Masked/Reveal 帶解密檔名。內容位元組只經 Download 出口。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub attachments: Vec<AttachmentMeta>,
     /// 卡片節（type 3，PR1）。Metadata 恆 None（欄位全密文）；Masked 帶四欄
     /// 明文＋卡號/CVV 遮罩態；Reveal 帶卡號/CVV 全值。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub card: Option<CardView>,
     /// 身分節（type 4，PR1）。Metadata 恆 None；Masked/Reveal 帶全十八欄。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub identity: Option<IdentityView>,
 }
 
@@ -3301,7 +3297,7 @@ mod tests {
             })
         );
 
-        // ItemView.attachments：無附件時鍵缺席（A3 紀律延伸），有則帶元資料
+        // ItemView.attachments：無附件時恆空陣列（A3 值性契約，PR5 D5 裁決），有則帶元資料
         let mut v = ItemView::metadata(meta());
         v.attachments = vec![AttachmentMeta {
             id: "8fd01a914baeef9d1efd".into(),
@@ -3318,8 +3314,16 @@ mod tests {
                 .len(),
             1
         );
-        let empty = serde_json::to_string(&ItemView::metadata(meta())).unwrap();
-        assert!(!empty.contains("\"attachments\""));
+        // 兩態皆過的斷言式：缺席或 null/空陣列都算「未送值」（見 ARCHITECTURE §6 A3）
+        let empty: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&ItemView::metadata(meta())).unwrap())
+                .unwrap();
+        assert!(
+            empty
+                .get("attachments")
+                .is_none_or(|a| a.as_array().is_some_and(Vec::is_empty)),
+            "無附件時 attachments 必須缺席或空陣列：{empty}"
+        );
     }
 
     #[test]
@@ -3628,7 +3632,13 @@ mod tests {
         let j = serde_json::to_string(&v).unwrap();
         assert!(j.contains("\"notes\":\"筆記\""));
         assert!(j.contains("\"kind\":\"hidden\""));
-        assert!(!j.contains("\"password\":"));
+        // A3 值性形態（PR5 D5 裁決）：本出口的 password 明文欄恆 null 或鍵缺席，
+        // 兩者都不得帶值；遮罩欄另席。斷言用 `== null` 式，對缺席態同樣成立。
+        let parsed: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert!(
+            parsed.get("password").is_none_or(serde_json::Value::is_null),
+            "password 明文欄必須恆空：{j}"
+        );
         assert!(!j.contains("1234"));
         let back: ItemView = serde_json::from_str(&j).unwrap();
         assert_eq!(back.fields[0].name, "PIN");

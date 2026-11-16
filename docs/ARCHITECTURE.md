@@ -24,7 +24,7 @@
 | 核心語言 | Rust（stable，tokio 非同步 runtime） | 一顆核心複用：daemon、CLI、MCP shim、crypto、sync；Android 經 NSH Rust app 形態同檔打包（`libnsh.so` 含本 crate），UniFFI/JNI 只留給 Kotlin 孤島 |
 | 加密原語 | rustcrypto 系：`pbkdf2`、`argon2`、`aes`+`hmac`（信封 type 2）、`hkdf`、`rsa`、`sha2`、`rand_core` | 信封/KDF 編排**自寫**（授權），底層算子用 MIT/Apache crate，組合為 GPL 著作沒有障礙 |
 | 傳輸加密 | per-conn：`x25519-dalek` + `chacha20poly1305`；跨機：`rustls`（TLS1.3）+ 上層再疊一層 | KeePassXC crypto_box 教訓：不單信通道 |
-| 序列化 | BTP wire（P1 實測）：length-prefix + JSON 主線，因 status/audit 回應仍含 `serde_json::Value`，postcard 不支援其 f64；回應全型別化後（P2）切 postcard 主、JSON 退除錯位。型別 schema 產生 Rust/Swift/Kotlin bindings，**只服務平台孤島**（provider extension、autofill 外殼）；UI 與核心同為 Rust，不需要綁定層 | thin 端零業務邏輯的結構保證 |
+| 序列化 | BTP wire（PR5 落地）：length-prefix + **連線級协商的訊息體編碼**（`Hello.formats` → `Welcome.format`；規格與 conformance vectors 見 `docs/research/btp-frames.md`）。主線＝postcard，JSON 退除錯位（`BW_BTP_JSON=1` 逃生舷、舊對端自動降階）。前提已湊齊：協定型別無 `serde_json::Value` 欄位，且線上型別不再用 `skip_serializing_if`（postcard 欄序編碼不容跳欄）。CLI stdout 仍是 JSON，與幀格式無關。型別 schema 產生 Rust/Swift/Kotlin bindings，**只服務平台孤島**（provider extension、autofill 外殼）；UI 與核心同為 Rust，不需要綁定層 | thin 端零業務邏輯的結構保證 |
 | 本地儲存 | SQLite（WAL，`rusqlite`）+ FTS5 索引；附件 content-addressed blob | 檔權限 0600；鏡像存密文原樣 |
 | 金鑰封存 | macOS `security-framework`（Keychain biometric ACL）；Android Keystore Class 3/StrongBox（JNI） | §1 落盤形態 |
 | 記憶體 | `zeroize` + 自寫 secret arena（`mlock`、`MADV_DONTDUMP`、Linux `memfd_secret`） | §2.7 |
@@ -257,6 +257,13 @@ pub struct ServerProfile { pub kind: ServerKind,     // BitwardenCloud | Vaultwa
 
 ### 2.7 記憶體保護（明文的生命週期）
 
+> A3 出口形態裁決（2026-11-17，PR5 D5）：postcard 是欄序編碼，`skip_serializing_if`
+> 會讓解碼端把下一欄讀成 Option 判別字，因此線上型別一律恆序列化欄位。A3 從
+> 「出口**不含**該鍵」（結構性缺席）改寫為「該鍵**值恆 null** 或鍵缺席，斷言式
+> `== null` 對兩態皆過」（值性恆空）。語意等價性論證：契約要守的是「明文不出現在
+> metadata 出口」，缺席只是 JSON 時代的**代理指標**；顯式 null 反而把「未送」與
+> 「送空」拆開，且斷言更寬容（舊輸出缺席、新輸出 null 都過）。此為裁決，不是遺忘。
+
 目標兩條：密碼不進 LLM context（§2.3 已給型別層機制），以及密碼在記憶體裡盡可能短命、不可分頁、不可撿。
 
 ```rust
@@ -353,7 +360,7 @@ cargo nextest run -p bw-crypto                       # A1 KDF/信封/HKDF/RSA un
 cargo nextest run -p bw-server --test compat_fixtures # A2 錄製 /sync 回放（官方雲+VW 兩份）
                                                      # A2b UserDecryptionOptions 缺失 → 降級成功（#6729 回歸）
 bitward login --server http://127.0.0.1:8080 --email dev@bitward.test
-bitward sync && bitward ls --json | jq -e 'any(has("password")) | not'   # A3 輸出鍵集合無 Secret
+bitward sync && bitward ls --json | jq -e 'any(.password != null) | not'   # A3 出口無 Secret 值（恆 null 或鍵缺席兩態皆過）
 grep -a "$WP" ./dev/store.db || true                 # A4 盤上無明文主密碼；已知密碼值亦無
 hyperfine -N 'bitward ls --json'                     # A5 p95 < 50ms（對照官方 CLI 1–5s）
 # A6 兩個併發 unlock 後双方 session 皆可用；lock 後双双 StaleEpoch

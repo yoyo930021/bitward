@@ -2075,6 +2075,47 @@ mod tests {
         Hub::open(&dir, None, None).await.unwrap()
     }
 
+    /// PR5 perf 死線收據器（`BW_PERF_STORE` 指鏡像庫、`--ignored` 跑）：
+    /// 同一份全量 List 投影分別以兩種編碼上線，報位元組與解碼耗時中位數。
+    /// 對照組＝`BW_BTP_JSON=1` 逃生舷；門檻見 docs/research/btp-frames.md。
+    #[test]
+    #[ignore = "需要 BW_PERF_STORE 指向鏡像庫副本（PR5 perf 收據）"]
+    fn wire_list_bytes_and_parse_both_formats() {
+        use bw_proto::wire::{self, WireFormat};
+        let dir = std::env::var("BW_PERF_STORE").expect("BW_PERF_STORE 未設");
+        let store = bw_store::Store::open(std::path::Path::new(&dir).join("vault.db").as_path())
+            .expect("開庫失敗");
+        let metas = store
+            .query(&bw_proto::Query {
+                limit: u32::MAX,
+                ..Default::default()
+            })
+            .unwrap();
+        let resp = Response::Items(metas.into_iter().map(bw_proto::ItemView::metadata).collect());
+        let n = match &resp {
+            Response::Items(v) => v.len(),
+            _ => unreachable!(),
+        };
+        for fmt in [WireFormat::Json, WireFormat::Postcard] {
+            let body = wire::encode(fmt, &resp).unwrap();
+            let mut ms: Vec<f64> = Vec::new();
+            for _ in 0..200 {
+                let t = std::time::Instant::now();
+                let back: Response = wire::decode(fmt, &body).unwrap();
+                ms.push(t.elapsed().as_secs_f64() * 1000.0);
+                assert!(matches!(back, Response::Items(_)));
+            }
+            ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            println!(
+                "PERF format={} items={} bytes={} parse_median_ms={:.3}",
+                fmt.as_str(),
+                n,
+                body.len(),
+                ms[ms.len() / 2]
+            );
+        }
+    }
+
     #[test]
     fn mask_push_token_keeps_prefix_and_hash_only() {
         let token = "0123456789ABCDEF0123456789ABCDEF";

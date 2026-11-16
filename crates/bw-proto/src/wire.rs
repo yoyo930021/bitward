@@ -133,15 +133,21 @@ pub fn read_frame<R: std::io::Read, T: DeserializeOwned>(
     decode(fmt, &body)
 }
 
-/// 本進程能提供的格式清單（客戶端宣告、伺服器受理集合）。
+/// 環境變數逃生舷：`BW_BTP_JSON=1` 令本進程只說 JSON（除錯位與舊端對照組）。
+pub const JSON_ESCAPE_ENV: &str = "BW_BTP_JSON";
+
+/// 本進程能提供的格式清單（客戶端宣告、伺服器受理集合），順序＝偏好序。
 ///
-/// 目前只列 JSON：協定型別裡還掛著 `serde_json::Value`
-/// （`Response::Json`／`Audit`／`Sessions`／`Event::payload`），非自描述格式
-/// 解不回來（`Value` 的反序列化要 `deserialize_any`）。型別化收尾批把
-/// `Postcard` 放進清單頭部，逃生舷 `BW_BTP_JSON=1` 同批生效。
+/// 主線＝postcard（PR5 D5：協定已無 `serde_json::Value` 欄位，且線上型別不再用
+/// `skip_serializing_if`——欄序編碼不容跳欄）；JSON 留第二位給舊對端降階，
+/// 逃生舷開啟時只剩 JSON。
 #[must_use]
 pub fn supported_formats() -> Vec<WireFormat> {
-    vec![WireFormat::Json]
+    if std::env::var(JSON_ESCAPE_ENV).is_ok_and(|v| v == "1") {
+        vec![WireFormat::Json]
+    } else {
+        vec![WireFormat::Postcard, WireFormat::Json]
+    }
 }
 
 /// 從客戶端宣告的偏好裡選出伺服器支援的格式；None＝無共同格式。
@@ -189,9 +195,9 @@ mod tests {
         assert_eq!(select_format_in(&[], &json_only), Some(WireFormat::Json));
         // 嚴格 postcard 客戶端 ↔ 只支援 JSON 的伺服器：無交集（不得假成功降階）。
         assert_eq!(select_format_in(&[WireFormat::Postcard], &json_only), None);
-        // 本進程現況：Value 未清完前不得宣告 postcard。
-        assert_eq!(supported_formats(), vec![WireFormat::Json]);
-        assert_eq!(select_format(&both), Some(WireFormat::Json));
+        // 本進程現況（PR5 D5 主線）：新↔新走 postcard，偏好序被尊重。
+        assert_eq!(select_format(&both), Some(WireFormat::Postcard));
+        assert_eq!(select_format(&[WireFormat::Json]), Some(WireFormat::Json));
     }
 
     #[test]

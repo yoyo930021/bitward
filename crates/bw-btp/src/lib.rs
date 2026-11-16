@@ -119,6 +119,12 @@ where
 {
     // 訊息體編碼由連線級协商決定（bw_proto::wire）；本層只管長度前綴與讀寫。
     let body = wire::encode(fmt, msg)?;
+    // 診斷錨點：每幀的 content-type 與位元組數（perf 死線收據、混版本排障同用）。
+    tracing::debug!(
+        bytes = body.len(),
+        format = fmt.as_str(),
+        "BTP 幀寫出"
+    );
     w.write_all(&wire::frame_head(body.len())).await?;
     w.write_all(&body).await?;
     w.flush().await?;

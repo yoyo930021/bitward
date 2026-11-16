@@ -302,8 +302,11 @@ async fn main() -> Result<(), String> {
     // 批次 14.6:最先裝 ring 為 CryptoProvider 預設,根除 reqwest/hyper-rustls
     // auto-detect 雙 provider panic(詳見 bw_btp::tls::init_crypto_provider)。
     bw_btp::tls::init_crypto_provider();
+    // RUST_LOG 优先（排障與 perf 收據要靠 `bw_btp=debug` 看每幀 content-type/位元組）；
+    // 未設時維持批次 14.6 的 INFO 預設。
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")))
         .init();
     let args = Args::parse();
     if let Some(action) = args.service {
