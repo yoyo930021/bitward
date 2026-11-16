@@ -8,7 +8,8 @@
 #                    （SHA 或名稱）。Developer ID Application → 自動加
 #                    -o runtime --timestamp（公證必要）並重簽 appex。
 #   BW_INSTALLER_ID  productsign 用的 Developer ID Installer 身分；設了就必簽
-#                    （失敗即 FATAL），沒設維持「試 $BW_SIGN_ID、不支就降未簽」。
+#                    （失敗即 FATAL），沒設試 $BW_SIGN_ID、失敗硬 Fail（不再靜默降未簽，
+#                    本機要未簽需顯式 BW_ALLOW_UNSIGNED_PKG=1）。
 #   BW_FORM          sandbox（預設，現行主線）| direct（Developer ID 直裝分叉：
 #                    App 去 app-sandbox、BundleProgram 指回裸二進位、剝 dev profile）。
 #   BW_NOTARIZE=1    notarytool 真公證＋staple＋spctl 斷言（需 BW_APPLE_API_KEY /
@@ -181,17 +182,25 @@ productbuild --distribution "$STAGE/distribution.plist" --package-path "$STAGE" 
 # productsign 只吃 Installer Signing EKU（1.3.6.1.4.1.311.10.3.8）：實測 Mac Developer
 # 與 Apple Distribution 都被拒（「An installer signing identity (not an application
 # signing identity) is required」）。BW_INSTALLER_ID（Developer ID Installer）設了就
-# 必簽、失敗即 FATAL；沒設維持試 $IDENTITY、不支就降未簽 pkg（本機 installer 不吃 pkg 簽章）。
+# 必簽、失敗即 FATAL；沒設試 $IDENTITY，失敗不再靜默回退未簽 pkg（item 8：硬 Fail），
+# 本機 installer 要未簽需顯式 BW_ALLOW_UNSIGNED_PKG=1。stderr 落 mktemp 免固定路徑搶佔。
+PSIGN_ERR=$(mktemp)
 if [ -n "$INSTALLER_ID" ]; then
-  productsign --sign "$INSTALLER_ID" "$UNSIGNED" "$PKG" 2>/tmp/productsign.err \
-    || { echo "FATAL: productsign（$INSTALLER_ID）失敗：$(tail -1 /tmp/productsign.err)"; exit 1; }
+  productsign --sign "$INSTALLER_ID" "$UNSIGNED" "$PKG" 2>"$PSIGN_ERR" \
+    || { echo "FATAL: productsign（$INSTALLER_ID）失敗：$(tail -1 "$PSIGN_ERR")"; rm -f "$PSIGN_ERR"; exit 1; }
   echo "    productsign OK（Installer 身分）"
-elif productsign --sign "$IDENTITY" "$UNSIGNED" "$PKG" 2>/tmp/productsign.err; then
+elif productsign --sign "$IDENTITY" "$UNSIGNED" "$PKG" 2>"$PSIGN_ERR"; then
   echo "    productsign OK"
-else
-  echo "    productsign skipped：$(tail -1 /tmp/productsign.err)"
+elif [ "${BW_ALLOW_UNSIGNED_PKG:-0}" = 1 ]; then
+  echo "    WARN: productsign 失敗、BW_ALLOW_UNSIGNED_PKG=1 顯式降未簽 pkg：$(tail -1 "$PSIGN_ERR")"
   mv "$UNSIGNED" "$PKG"
+else
+  echo "FATAL: productsign（$IDENTITY）失敗、拒絕靜默回退未簽 pkg：$(tail -1 "$PSIGN_ERR")"
+  echo "       正式包請設 BW_INSTALLER_ID（Developer ID Installer）；本機 installer 若要未簽請顯式 BW_ALLOW_UNSIGNED_PKG=1。"
+  rm -f "$PSIGN_ERR"
+  exit 1
 fi
+rm -f "$PSIGN_ERR"
 echo "    $PKG"
 
 echo "==> notarize（BW_NOTARIZE=${BW_NOTARIZE:-0}）"
