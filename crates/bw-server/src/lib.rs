@@ -474,11 +474,7 @@ impl Client {
         // 續期生命週期錨點：重計閘、清失效標記、通知宿主持久化
         self.token_acquired_ms.store(unix_ms(), Ordering::SeqCst);
         self.needs_relogin.store(false, Ordering::SeqCst);
-        let sink = self
-            .token_sink
-            .read()
-            .map(|g| g.clone())
-            .unwrap_or(None);
+        let sink = self.token_sink.read().map(|g| g.clone()).unwrap_or(None);
         if let Some(sink) = sink {
             sink(&bundle.access_token, bundle.refresh_token.as_deref());
         }
