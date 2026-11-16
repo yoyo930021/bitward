@@ -141,3 +141,29 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -q -p bitwarderd -p bitward
       - run: ./dev/e2e/remotepath.sh
+
+  # PR6-E2：nsh-platform-linux（GTK4）建置閘。半天 spike 四屏親跑通過
+  # （OrbStack ubuntu 24.04：主列表/詳情/鎖屏/解鎖閉環全渲染，見 docs/research/nsh-linux.md）；
+  # CI 驗編譯＋單元測（不起窗，runner 無 X）。
+  linux-gui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev
+      - working-directory: apps/bitward-gui
+        run: cargo clippy --all-targets -- -D warnings
+      - working-directory: apps/bitward-gui
+        run: cargo test
+
+  # PR6-E3：推播路徑（PushCall 帳、APNs JWT 形狀、410 卸載收斂）入 CI——
+  # P5 至今只在本地跑過；mock APNs 是本機 http.server，無 docker 依賴，ubuntu 直跑。
+  pushpath:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -q -p bitwarderd -p bitward
+      - run: ./dev/e2e/pushpath.sh

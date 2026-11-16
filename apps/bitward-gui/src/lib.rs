@@ -56,16 +56,16 @@ pub fn sock_path() -> PathBuf {
     }
     let fallback = platform_data_dir().join("bitward").join("daemon.sock");
     #[cfg(target_os = "linux")]
-    if let Some(rt) = std::env::var_os("XDG_RUNTIME_DIR") {
-        if !rt.is_empty() {
-            let main = std::path::Path::new(&rt)
-                .join("bitward")
-                .join("daemon.sock");
-            if main.exists() || !fallback.exists() {
-                return main;
-            }
-            return fallback;
+    if let Some(rt) = std::env::var_os("XDG_RUNTIME_DIR")
+        && !rt.is_empty()
+    {
+        let main = std::path::Path::new(&rt)
+            .join("bitward")
+            .join("daemon.sock");
+        if main.exists() || !fallback.exists() {
+            return main;
         }
+        return fallback;
     }
     fallback
 }
