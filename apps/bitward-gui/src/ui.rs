@@ -81,6 +81,17 @@ pub fn form_field(
     secure: bool,
     on_change: impl Fn(String) + 'static,
 ) -> View {
+    form_field_dyn(label, move || placeholder.to_owned(), value, secure, on_change)
+}
+
+/// 佔位提示會隨狀態變動的版本（PR3：登入第二步驗證碼欄依因子形態換提示）。
+pub fn form_field_dyn(
+    label: &'static str,
+    placeholder: impl Fn() -> String + 'static,
+    value: Signal<String>,
+    secure: bool,
+    on_change: impl Fn(String) + 'static,
+) -> View {
     view()
         .flex_col()
         .gap_1()
@@ -94,7 +105,7 @@ pub fn form_field(
         .child(
             input()
                 .value(move || value.get())
-                .placeholder(placeholder.to_owned())
+                .placeholder(placeholder)
                 .placeholder_color(move || color(theme::TEXT_MUTED))
                 .masked(secure)
                 .on_change(move |t: &str| on_change(t.to_owned()))

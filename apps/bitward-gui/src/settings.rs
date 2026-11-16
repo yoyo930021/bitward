@@ -155,7 +155,9 @@ pub fn pane(core: AppCore) -> View {
                         .gap_2()
                         .child(ui::section_title("外觀"))
                         .child(crate::theme_picker(theme_core.clone())),
-                ),
+                )
+                // PR3：雙重驗證管理面（清單／TOTP／Email／YubiKey／救援碼）。
+                .child(crate::twofa::section(core.clone())),
         ))
 }
 

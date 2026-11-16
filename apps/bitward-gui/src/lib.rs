@@ -24,7 +24,9 @@ mod settings;
 mod shots;
 mod state;
 mod theme;
+mod twofa;
 mod ui;
+mod webauthn;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -227,6 +229,8 @@ pub fn App() -> impl IntoElement {
     let pw_modal_build = core.clone();
     let import_cond = core.clone();
     let import_build = core.clone();
+    let duo_cond = core.clone();
+    let duo_build = core.clone();
     view()
         .flex_col()
         .flex_1()
@@ -261,6 +265,10 @@ pub fn App() -> impl IntoElement {
         .child(when(
             move || import_cond.import_modal.get(),
             move || ui::import_modal(import_build.clone()),
+        ))
+        .child(when(
+            move || duo_cond.login.duo_open.get(),
+            move || twofa::duo_modal(duo_build.clone()),
         ))
 }
 
@@ -1080,6 +1088,7 @@ fn login_page(core: AppCore) -> View {
                     move || {
                         let list_core = factors_core.clone();
                         let pick_core = factors_core.clone();
+                        let sel_core = factors_core.clone();
                         view()
                             .flex_col()
                             .gap(px(theme::FORM_GAP))
@@ -1111,13 +1120,65 @@ fn login_page(core: AppCore) -> View {
                                 }
                                 col
                             }))
-                            .child(ui::form_field(
+                            .child(ui::form_field_dyn(
                                 "驗證碼",
-                                "6 位數字",
+                                {
+                                    let ph_sel = factors_core.clone();
+                                    move || {
+                                        ph_sel
+                                            .login
+                                            .selected_provider()
+                                            .and_then(|p| {
+                                                bw_proto::TwoFactorProviderInfo::factor_mode(
+                                                    p.provider,
+                                                )
+                                            })
+                                            .map(|m| m.placeholder().to_owned())
+                                            .unwrap_or_else(|| "6 位數字".to_owned())
+                                    }
+                                },
                                 code,
                                 false,
                                 move |v| code.set(v),
                             ))
+                            .child(dynamic(move || {
+                                let mode = sel_core
+                                    .login
+                                    .selected_provider()
+                                    .and_then(|p| {
+                                        bw_proto::TwoFactorProviderInfo::factor_mode(p.provider)
+                                    });
+                                match mode {
+                                    Some(bw_proto::FactorMode::DuoHandoff) => {
+                                        let c = sel_core.clone();
+                                        ui::button(
+                                            "開啟 Duo 驗證頁…",
+                                            ui::Btn::Ghost,
+                                            move || c.send(Cmd::OpenDuo),
+                                        )
+                                    }
+                                    Some(bw_proto::FactorMode::WebauthnAssertion) => {
+                                        let c = sel_core.clone();
+                                        ui::button_dyn(
+                                            move || {
+                                                if c.login.wa_busy.get() {
+                                                    "等待安全金鑰觸碰…".to_owned()
+                                                } else {
+                                                    "使用安全金鑰…".to_owned()
+                                                }
+                                            },
+                                            ui::Btn::Ghost,
+                                            move || c.send(Cmd::StartWebauthn),
+                                        )
+                                    }
+                                    Some(bw_proto::FactorMode::YubikeyOtp) => view().child(
+                                        text("請觸碰金鑰後，把 44 字元 OTP 貼上驗證碼欄。")
+                                            .text_size(px(11.5))
+                                            .text_color(theme::TEXT_MUTED),
+                                    ),
+                                    _ => view(),
+                                }
+                            }))
                             .child(
                                 view()
                                     .flex_row()

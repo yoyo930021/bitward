@@ -24,6 +24,7 @@ use nsh_core::prelude::*;
 use crate::btp::Session;
 use crate::export::{self, ExportOutcome};
 use crate::passgen::GenState;
+use crate::twofa;
 
 /// 連線生命週期（錯誤畫面 = Failed，重連 = 再發 Boot）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -570,6 +571,43 @@ pub enum Cmd {
     SubmitLogin2fa,
     /// 登入失敗回包（成功直接走 StateUpdated，登入即解鎖的 hub 語意）。
     LoginDone(Result<(), String>),
+    // ── 雙重驗證（PR3 GUI 面）────────────────────────────────
+    /// 管理面：拉已啟用因子清單（`TwoFactor:List`）。
+    TfFetch,
+    /// 取 TOTP secret＋otpauth URI（需主密碼）。
+    TfGetTotpKey,
+    /// 以驗證器現碼啟用 TOTP（需主密碼＋`tf_otp`＋已取 key）。
+    TfEnableTotp,
+    /// 寄 Email 驗證碼（需主密碼；地址預填帳號 email）。
+    TfEmailSend,
+    /// 信中碼確認啟用 Email（需主密碼＋`tf_email_code`）。
+    TfEmailVerify,
+    /// 貼上 44 字 OTP 啟用 YubiKey（需主密碼＋`tf_yubi`）。
+    TfYubikeyAdd,
+    /// 停用因子（需主密碼）。
+    TfDisable(i32),
+    /// 取備用救援碼（需主密碼；用後 2FA 全清）。
+    TfGetRecovery,
+    /// 清單回包。
+    TfStatesLoaded(Vec<bw_proto::TwoFactorProviderState>),
+    /// TOTP 設定材料回包。
+    TfTotpKey {
+        secret: String,
+        key_uri: Option<String>,
+    },
+    /// 救援碼回包（None＝伺服器尚未發碼）。
+    TfRecoveryLoaded(Option<String>),
+    /// 管理動作收尾：Ok(提示 toast)／Err(可懂錯誤)。
+    TfDone(Result<String, String>),
+    /// 第二步：開 Duo webview（材料從選中因子 details 取）。
+    OpenDuo,
+    CloseDuo,
+    /// webview 捕獲完成（`AUTH|…:APP|…` 或 `code|state`）→ 回填碼欄。
+    DuoCaptured(String),
+    /// 第二步：起安全金鑰島（ASAuthorization assertion）。
+    StartWebauthn,
+    /// 島結果：Ok(assertion JSON)／Err(可懂拒絕)。
+    WebauthnDone(Result<String, String>),
     /// 空作（背景路徑無情報可落地時佔位）。
     Nop,
     /// Sync:Trigger 成功回包：蓋同步時間戳、提示「已同步」、重抓列表。
@@ -797,6 +835,10 @@ pub struct LoginFields {
     pub provider: Signal<i32>,
     pub code: Signal<String>,
     pub remember: Signal<bool>,
+    /// Duo webview 模態開關（PR3：iframe/redirect 兩態同窗承載）。
+    pub duo_open: Signal<bool>,
+    /// 安全金鑰島進行中（ASAuthorization 彈系統面板時防連點）。
+    pub wa_busy: Signal<bool>,
 }
 
 impl LoginFields {
@@ -807,6 +849,22 @@ impl LoginFields {
         self.providers.set(None);
         self.code.set(String::new());
         self.remember.set(false);
+        self.duo_open.set(false);
+        self.wa_busy.set(false);
+    }
+
+    /// 目前選中因子的伺服器情報（島材料、hint、形態判定的唯一來源）。
+    pub fn selected_provider(&self) -> Option<Arc<bw_proto::TwoFactorProviderInfo>> {
+        let n = self.provider.get();
+        self.providers
+            .get()
+            .and_then(|infos| {
+                infos
+                    .iter()
+                    .find(|p| p.provider == n)
+                    .cloned()
+                    .map(Arc::new)
+            })
     }
 }
 
@@ -864,6 +922,19 @@ pub fn default_provider(infos: &[bw_proto::TwoFactorProviderInfo]) -> Option<i32
 /// 同源，見 `TwoFactorProviderInfo::validate_token`），這裡只做轉名與傳參。
 pub fn validate_factor(provider: i32, raw: &str) -> Result<String, String> {
     bw_proto::TwoFactorProviderInfo::validate_token(provider, raw)
+}
+
+/// 管理面主密碼閘（PR3）：空欄先本地擋、給可懂一行——語意同 CLI 的
+/// stdin 必填，不讓缺憑證的請求白跑一趟 daemon。
+fn tf_pw_or_err(core: &AppCore) -> Option<String> {
+    let pw = core.tf_pw.get();
+    if pw.is_empty() {
+        core.tf_error
+            .set(Some("此操作需要主密碼（先填上方主密碼欄）".into()));
+        None
+    } else {
+        Some(pw)
+    }
 }
 
 /// 登入錯誤可懂化（批次 8）：保留 daemon 原文（使用者要看真話），
@@ -947,6 +1018,9 @@ pub fn validate_change_password(
 }
 
 /// 根元件建立、以 `Copy` 訊號句柄向下傳播的應用核心。
+/// TOTP 設定草稿（PR3）：(secret, 本機組的 otpauth URI)。
+pub type TfTotpDraft = (String, Option<String>);
+
 #[derive(Clone)]
 pub struct AppCore {
     pub session: Arc<Session>,
@@ -982,6 +1056,7 @@ pub struct AppCore {
     pub error_text: Signal<Option<String>>,
     pub notice: Signal<Option<String>>,
     pub detail: Signal<Option<Arc<ItemView>>>,
+    /// Reveal 視窗的完整投影（None＝未顯示明文）。卡號/CVV 與密碼共用這條
     pub revealed: Signal<Option<String>>,
     pub totp: Signal<Option<String>>,
     /// TOTP 倒數三件組：視窗秒數、取碼時刻、1s tick（App 的引擎計時器驅動，
@@ -1025,6 +1100,23 @@ pub struct AppCore {
     /// 本機設定鏡（daemon 真態在 meta 表）：連線後 FetchSettings 回填、
     /// 設定頁改即存；複製鈕的剪貼簿清除倒數也讀這裡（ui::copy_button）。
     pub settings: Signal<bw_proto::Settings>,
+    /// 雙重驗證管理面（PR3）：主密碼只在送作瞬間經本機線（訊號態同
+    /// login.password 紀律，進鎖態即清）；states＝已啟用因子鏡像。
+    pub tf_pw: Signal<String>,
+    pub tf_states: Signal<Option<Arc<Vec<bw_proto::TwoFactorProviderState>>>>,
+    pub tf_fetched: Signal<bool>,
+    pub tf_busy: Signal<bool>,
+    pub tf_error: Signal<Option<String>>,
+    /// TOTP 設定草稿：Some＝(secret, otpauth URI) 面板展開中。
+    pub tf_totp: Signal<Option<Arc<TfTotpDraft>>>,
+    pub tf_otp: Signal<String>,
+    /// Email 因子兩步：Some＝已寄出的地址（收碼面板展開）。
+    pub tf_email_stage: Signal<Option<String>>,
+    pub tf_email_code: Signal<String>,
+    /// YubiKey OTP 貼上欄（44 字元，觸碰金鑰後貼入）。
+    pub tf_yubi: Signal<String>,
+    /// 救援碼（取回後顯示；用後伺服器全清 2FA，警告語意同 CLI）。
+    pub tf_recovery: Signal<Option<String>>,
     /// 詳情頁 Passkeys（GetPasskeys 按 item 過濾後的快取；離開詳情即清）。
     pub passkeys: Signal<Arc<Vec<bw_proto::PasskeyEntry>>>,
     /// 報告儀表板：視角兩態＋兩份報告鏡（daemon 現算、每次進入重取，不落盤）。
@@ -1096,6 +1188,8 @@ impl AppCore {
                 provider: signal(0),
                 code: signal(String::new()),
                 remember: signal(false),
+                duo_open: signal(false),
+                wa_busy: signal(false),
             },
             confirm: signal_with(None, SignalEquals::Never),
             pw_modal: signal(false),
@@ -1113,6 +1207,17 @@ impl AppCore {
             att_state: signal(crate::attach::AttState::default()),
             theme_mode: signal(Appearance::System),
             settings: signal(bw_proto::Settings::default()),
+            tf_pw: signal(String::new()),
+            tf_states: signal(None),
+            tf_fetched: signal(false),
+            tf_busy: signal(false),
+            tf_error: signal(None),
+            tf_totp: signal(None),
+            tf_otp: signal(String::new()),
+            tf_email_stage: signal(None),
+            tf_email_code: signal(String::new()),
+            tf_yubi: signal(String::new()),
+            tf_recovery: signal(None),
             passkeys: signal(Arc::new(Vec::new())),
             reports_tab: signal(ReportsTab::Cards),
             gen_tool: signal(crate::passgen::GenState::default()),
@@ -1665,6 +1770,16 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             // 鎖定轉換（解鎖→非解鎖）＝清除最近搜尋：官方 web vault 同位語意，
             // 字串只活在記憶體，清掉即從搜尋框與列表消失（設定可關）。
             let was_unlocked = is_unlocked(&core.vault.get());
+            if was_unlocked && !unlocked {
+                // 明文出棧（PR3）：管理面草稿隨鎖作廢，救援碼不落鏡。
+                core.tf_pw.set(String::new());
+                core.tf_totp.set(None);
+                core.tf_otp.set(String::new());
+                core.tf_email_stage.set(None);
+                core.tf_email_code.set(String::new());
+                core.tf_yubi.set(String::new());
+                core.tf_recovery.set(None);
+            }
             if was_unlocked
                 && !unlocked
                 && core.settings.get().clear_search_on_lock
@@ -1758,6 +1873,8 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.login.busy.set(false);
             core.login.error.set(None);
             core.login.code.set(String::new());
+            core.login.duo_open.set(false);
+            core.login.wa_busy.set(false);
             core.login
                 .provider
                 .set(default_provider(&providers).unwrap_or(0));
@@ -1819,6 +1936,282 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             }
         }
         Cmd::Nop => {}
+        // ── 雙重驗證管理面（PR3）：主密碼閘同 CLI stdin 語意（空＝本地先擋）。
+        Cmd::TfFetch => {
+            core.tf_busy.set(true);
+            core.tf_error.set(None);
+            core.ipc_quiet(|s| {
+                match s.call(&Call::TwoFactor(bw_proto::TwoFactorCall::List)) {
+                    Ok(Response::TwoFactorStates(v)) => Cmd::TfStatesLoaded(v),
+                    Ok(other) => {
+                        Cmd::TfDone(Err(format!("TwoFactor:List 回應形態不符：{other:?}")))
+                    }
+                    Err(e) => Cmd::TfDone(Err(e.display())),
+                }
+            });
+        }
+        Cmd::TfGetTotpKey => {
+            let Some(pw) = tf_pw_or_err(core) else { return };
+            core.tf_busy.set(true);
+            core.ipc_quiet(move |s| {
+                match s.call(&Call::TwoFactor(bw_proto::TwoFactorCall::GetAuthenticator {
+                    master_password: Some(pw),
+                })) {
+                    Ok(Response::TwoFactorTotp { secret, key_uri }) => {
+                        Cmd::TfTotpKey { secret, key_uri }
+                    }
+                    Ok(other) => Cmd::TfDone(Err(format!(
+                        "get-authenticator 回應形態不符：{other:?}"
+                    ))),
+                    Err(e) => Cmd::TfDone(Err(e.display())),
+                }
+            });
+        }
+        Cmd::TfEnableTotp => {
+            let Some(pw) = tf_pw_or_err(core) else { return };
+            let Some(arc) = core.tf_totp.get() else {
+                core.tf_error.set(Some("先按「取得設定碼」拿伺服器金鑰".into()));
+                return;
+            };
+            let key = arc.0.clone();
+            let token = match bw_proto::TwoFactorProviderInfo::validate_token(
+                0,
+                &core.tf_otp.get(),
+            ) {
+                Ok(t) => t,
+                Err(m) => {
+                    core.tf_error.set(Some(m));
+                    return;
+                }
+            };
+            core.tf_busy.set(true);
+            core.ipc_quiet(move |s| {
+                match s.call(&Call::TwoFactor(
+                    bw_proto::TwoFactorCall::EnableAuthenticator {
+                        master_password: Some(pw),
+                        token,
+                        key,
+                    },
+                )) {
+                    Ok(Response::Ok) => Cmd::TfDone(Ok("已啟用 Authenticator 因子".into())),
+                    Ok(other) => Cmd::TfDone(Err(format!(
+                        "enable-authenticator 回應形態不符：{other:?}"
+                    ))),
+                    Err(e) => Cmd::TfDone(Err(e.display())),
+                }
+            });
+        }
+        Cmd::TfEmailSend => {
+            let Some(pw) = tf_pw_or_err(core) else { return };
+            let email = core
+                .tf_email_stage
+                .get()
+                .or_else(|| core.acct_email.get())
+                .unwrap_or_default();
+            if email.trim().is_empty() {
+                core.tf_error.set(Some("沒有可寄件的帳號 email".into()));
+                return;
+            }
+            core.tf_email_stage.set(Some(email.clone()));
+            core.tf_busy.set(true);
+            core.ipc_quiet(move |s| {
+                match s.call(&Call::TwoFactor(bw_proto::TwoFactorCall::EmailSendCode {
+                    master_password: Some(pw),
+                    email,
+                })) {
+                    Ok(Response::Ok) => Cmd::TfDone(Ok("驗證碼已寄出，請查信".into())),
+                    Ok(other) => {
+                        Cmd::TfDone(Err(format!("send-email 回應形態不符：{other:?}")))
+                    }
+                    Err(e) => Cmd::TfDone(Err(e.display())),
+                }
+            });
+        }
+        Cmd::TfEmailVerify => {
+            let Some(pw) = tf_pw_or_err(core) else { return };
+            let Some(email) = core.tf_email_stage.get() else {
+                core.tf_error.set(Some("先按「寄驗證碼」".into()));
+                return;
+            };
+            let token = match bw_proto::TwoFactorProviderInfo::validate_token(
+                1,
+                &core.tf_email_code.get(),
+            ) {
+                Ok(t) => t,
+                Err(m) => {
+                    core.tf_error.set(Some(m));
+                    return;
+                }
+            };
+            core.tf_busy.set(true);
+            core.ipc_quiet(move |s| {
+                match s.call(&Call::TwoFactor(bw_proto::TwoFactorCall::EmailVerify {
+                    master_password: Some(pw),
+                    email,
+                    token,
+                })) {
+                    Ok(Response::Ok) => Cmd::TfDone(Ok("已啟用 Email 因子".into())),
+                    Ok(other) => {
+                        Cmd::TfDone(Err(format!("PUT email 回應形態不符：{other:?}")))
+                    }
+                    Err(e) => Cmd::TfDone(Err(e.display())),
+                }
+            });
+        }
+        Cmd::TfYubikeyAdd => {
+            let Some(pw) = tf_pw_or_err(core) else { return };
+            let otp = match bw_proto::TwoFactorProviderInfo::validate_token(
+                3,
+                &core.tf_yubi.get(),
+            ) {
+                Ok(t) => t,
+                Err(m) => {
+                    core.tf_error.set(Some(m));
+                    return;
+                }
+            };
+            core.tf_busy.set(true);
+            core.ipc_quiet(move |s| {
+                match s.call(&Call::TwoFactor(bw_proto::TwoFactorCall::EnableYubikey {
+                    master_password: Some(pw),
+                    otp,
+                })) {
+                    Ok(Response::Ok) => Cmd::TfDone(Ok("已啟用 YubiKey 因子".into())),
+                    Ok(other) => {
+                        Cmd::TfDone(Err(format!("enable yubikey 回應形態不符：{other:?}")))
+                    }
+                    Err(e) => Cmd::TfDone(Err(e.display())),
+                }
+            });
+        }
+        Cmd::TfDisable(provider) => {
+            let Some(pw) = tf_pw_or_err(core) else { return };
+            core.tf_busy.set(true);
+            core.ipc_quiet(move |s| {
+                match s.call(&Call::TwoFactor(bw_proto::TwoFactorCall::Disable {
+                    master_password: Some(pw),
+                    provider,
+                })) {
+                    Ok(Response::Ok) => Cmd::TfDone(Ok(format!(
+                        "已停用{}",
+                        bw_proto::TwoFactorProviderInfo::label(provider)
+                    ))),
+                    Ok(other) => {
+                        Cmd::TfDone(Err(format!("disable 回應形態不符：{other:?}")))
+                    }
+                    Err(e) => Cmd::TfDone(Err(e.display())),
+                }
+            });
+        }
+        Cmd::TfGetRecovery => {
+            let Some(pw) = tf_pw_or_err(core) else { return };
+            core.tf_busy.set(true);
+            core.ipc_quiet(move |s| {
+                match s.call(&Call::TwoFactor(bw_proto::TwoFactorCall::GetRecoveryCode {
+                    master_password: Some(pw),
+                })) {
+                    Ok(Response::TwoFactorRecoveryCode(code)) => Cmd::TfRecoveryLoaded(code),
+                    Ok(other) => Cmd::TfDone(Err(format!(
+                        "get-recover 回應形態不符：{other:?}"
+                    ))),
+                    Err(e) => Cmd::TfDone(Err(e.display())),
+                }
+            });
+        }
+        Cmd::TfStatesLoaded(v) => {
+            core.tf_busy.set(false);
+            core.tf_states.set(Some(Arc::new(v)));
+        }
+        Cmd::TfTotpKey { secret, key_uri } => {
+            core.tf_busy.set(false);
+            core.tf_error.set(None);
+            core.tf_totp.set(Some(Arc::new((secret, key_uri))));
+        }
+        Cmd::TfRecoveryLoaded(code) => {
+            core.tf_busy.set(false);
+            match code {
+                Some(c) => {
+                    core.tf_recovery.set(Some(c));
+                    core.notice.set(Some("救援碼已取得（用後 2FA 全清）".into()));
+                }
+                None => core.tf_error.set(Some("伺服器尚未發救援碼".into())),
+            }
+        }
+        Cmd::TfDone(res) => {
+            core.tf_busy.set(false);
+            match res {
+                Ok(msg) => {
+                    core.tf_error.set(None);
+                    core.notice.set(Some(msg));
+                    // 開停生效後重拉清單（伺服器是唯一真相源）。
+                    core.send(Cmd::TfFetch);
+                }
+                Err(e) => core.tf_error.set(Some(e)),
+            }
+        }
+        // ── 登入第二步島（PR3）：Duo webview／安全金鑰 ────────
+        Cmd::OpenDuo => {
+            let info = core.login.selected_provider();
+            match twofa::island_gate(info.as_deref()) {
+                Ok(bw_proto::FactorMode::DuoHandoff) => {
+                    core.login.error.set(None);
+                    core.login.duo_open.set(true);
+                }
+                Ok(_) => core.login.error.set(Some("此因子不需要開啟驗證頁".into())),
+                Err(m) => core.login.error.set(Some(m.to_owned())),
+            }
+        }
+        Cmd::CloseDuo => core.login.duo_open.set(false),
+        Cmd::DuoCaptured(tok) => {
+            core.login.duo_open.set(false);
+            core.login.error.set(None);
+            core.login.code.set(tok);
+            core.notice.set(Some("已取回 Duo 憑證，按「完成登入」".into()));
+        }
+        Cmd::StartWebauthn => {
+            let info = core.login.selected_provider();
+            let details = match twofa::island_gate(info.as_deref()) {
+                Ok(bw_proto::FactorMode::WebauthnAssertion) => info
+                    .as_ref()
+                    .and_then(|i| i.details.clone())
+                    .filter(|d| matches!(d, bw_proto::TwoFactorDetails::Webauthn { .. })),
+                Ok(_) => None,
+                Err(m) => {
+                    core.login.error.set(Some(m.to_owned()));
+                    None
+                }
+            };
+            let Some(bw_proto::TwoFactorDetails::Webauthn {
+                challenge,
+                credential_ids,
+                rp_id,
+            }) = details
+            else {
+                if info.is_some() {
+                    core.login
+                        .error
+                        .set(Some("WebAuthn 材料缺席或因子不符".into()));
+                }
+                return;
+            };
+            core.login.wa_busy.set(true);
+            core.login.error.set(None);
+            let tx = core.tx.clone();
+            crate::webauthn::request_assertion(challenge, credential_ids, rp_id, move |res| {
+                let _ = tx.send(Cmd::WebauthnDone(res));
+            });
+        }
+        Cmd::WebauthnDone(res) => {
+            core.login.wa_busy.set(false);
+            match res {
+                Ok(json) => {
+                    core.login.error.set(None);
+                    core.login.code.set(json);
+                    core.notice.set(Some("已取回安全金鑰簽章，按「完成登入」".into()));
+                }
+                Err(e) => core.login.error.set(Some(e)),
+            }
+        }
         Cmd::OpenChangePassword => {
             core.pw.reset();
             core.pw_modal.set(true);
@@ -2192,6 +2585,12 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.sort_menu.set(false);
             core.route.set(Route::Settings);
             core.send(Cmd::FetchSettings);
+            // PR3：首次進設定頁自動拉 2FA 清單（本 session 只拉一次，
+            // 重開頁不轟打伺服器；手動「重新載入清單」永遠可用）。
+            if !core.tf_fetched.get() {
+                core.tf_fetched.set(true);
+                core.send(Cmd::TfFetch);
+            }
         }
         Cmd::FetchSettings => {
             core.ipc(|s| match s.call(&Call::Admin(AdminCall::GetSettings)) {
