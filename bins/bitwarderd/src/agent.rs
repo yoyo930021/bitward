@@ -114,57 +114,77 @@ impl Hub {
         {
             return Err(denied("agent session ttl 已到期"));
         }
-        let req = self.call_req(call)?;
+        // item 3：`Delete`／`Merge` 逐 id 判定——任一 id 未授權即拒絕整批，
+        // 任一 id 需核准則整批進一次核准迴路（批准後全數放行）。
+        let reqs = self.call_reqs(call)?;
         let grants = sess.grants.read().unwrap().clone();
-        let decision = bw_agent::check(&grants, &req).map_err(denied)?;
-        match decision {
-            Decision::Allow(idx) => {
-                self.budget_ok(sess, &grants, idx, &req)?;
-                Ok(Some(idx))
-            }
-            Decision::NeedApproval(idx) => {
-                self.budget_ok(sess, &grants, idx, &req)?;
-                // 人工核准迴路：事件推給互動端，請求端阻塞至批准或逾時
-                let id = ApprovalId(Uuid::new_v4());
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                self.pending.lock().unwrap().insert(
-                    id,
-                    PendingApproval {
-                        target: sess.row.id.clone(),
-                        summary: summarize(call),
-                        requested_at_ms: self.store.now_ms(),
-                        tx,
-                    },
-                );
-                self.emit(
-                    EventTopic::ApprovalRequired,
-                    json!({"id": id.0.to_string(), "summary": summarize(call)}),
-                );
-                self.publish_signal(&format!("bitward: approval {} {}", id.0, summarize(call)));
-                let waited = tokio::time::timeout(std::time::Duration::from_secs(120), rx).await;
-                self.pending.lock().unwrap().remove(&id);
-                match waited {
-                    // 批准（含追加 grant）：語意不變
-                    Ok(Ok(Ok(extra))) => {
-                        if let Some(extra) = extra {
-                            let mut g = sess.grants.write().unwrap();
-                            g.0.extend(extra.0);
-                        }
-                        let g = sess.grants.read().unwrap().clone();
-                        let mut row = sess.row.clone();
-                        row.grants = serde_json::to_value(&g).unwrap_or(json!([]));
-                        let _ = self.store.session_put(&row);
-                        Ok(Some(idx))
-                    }
-                    // 拒絕：立刻回 Denied，不再等 120s 逾時
-                    Ok(Ok(Err(_))) => {
-                        tracing::info!(approval = %id.0, target = %sess.row.id, "approval denied");
-                        Err(denied("核准被使用者拒絕"))
-                    }
-                    // 逾時或通道斷（核准端消失）：維持 ApprovalExpired 語意
-                    _ => Err(WtpError::ApprovalExpired),
+        let mut hit_idx: Option<usize> = None;
+        let mut need_approval = false;
+        for req in &reqs {
+            match bw_agent::check(&grants, req).map_err(denied)? {
+                Decision::Allow(idx) => {
+                    self.budget_ok(sess, &grants, idx, req)?;
+                    hit_idx.get_or_insert(idx);
+                }
+                Decision::NeedApproval(idx) => {
+                    self.budget_ok(sess, &grants, idx, req)?;
+                    hit_idx.get_or_insert(idx);
+                    need_approval = true;
                 }
             }
+        }
+        let idx = hit_idx.unwrap_or(0);
+        if need_approval {
+            self.wait_for_approval(sess, call).await?;
+        }
+        Ok(Some(idx))
+    }
+
+    /// 人工核准迴路：事件推給互動端，請求端阻塞至批准或逾時。批准（含追加
+    /// 常駐 grant）回 Ok；使用者拒絕或通道斷回 Err。
+    async fn wait_for_approval(
+        &self,
+        sess: &Arc<LiveSession>,
+        call: &Call,
+    ) -> Result<(), WtpError> {
+        let id = ApprovalId(Uuid::new_v4());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending.lock().unwrap().insert(
+            id,
+            PendingApproval {
+                target: sess.row.id.clone(),
+                summary: summarize(call),
+                requested_at_ms: self.store.now_ms(),
+                tx,
+            },
+        );
+        self.emit(
+            EventTopic::ApprovalRequired,
+            json!({"id": id.0.to_string(), "summary": summarize(call)}),
+        );
+        self.publish_signal(&format!("bitward: approval {} {}", id.0, summarize(call)));
+        let waited = tokio::time::timeout(std::time::Duration::from_secs(120), rx).await;
+        self.pending.lock().unwrap().remove(&id);
+        match waited {
+            // 批准（含追加 grant）：語意不變
+            Ok(Ok(Ok(extra))) => {
+                if let Some(extra) = extra {
+                    let mut g = sess.grants.write().unwrap();
+                    g.0.extend(extra.0);
+                }
+                let g = sess.grants.read().unwrap().clone();
+                let mut row = sess.row.clone();
+                row.grants = serde_json::to_value(&g).unwrap_or(json!([]));
+                let _ = self.store.session_put(&row);
+                Ok(())
+            }
+            // 拒絕：立刻回 Denied，不再等 120s 逾時
+            Ok(Ok(Err(_))) => {
+                tracing::info!(approval = %id.0, target = %sess.row.id, "approval denied");
+                Err(denied("核准被使用者拒絕"))
+            }
+            // 逾時或通道斷（核准端消失）：維持 ApprovalExpired 語意
+            _ => Err(WtpError::ApprovalExpired),
         }
     }
 
@@ -187,8 +207,10 @@ impl Hub {
         Ok(())
     }
 
-    /// Call → 判定輸入。item 的 tags/uris 從鏡像 metadata 取（≤Identity 級）。
-    fn call_req(&self, call: &Call) -> Result<CallReq, WtpError> {
+    /// Call → 判定輸入集合。多數呼叫一筆即定；`Delete`／`Merge` 逐 id 展開成多筆，
+    /// 授權端全部通過才算過（item 3：不得只憑首 id 授權就刪／合併他 id）。
+    /// item 的 tags/uris 從鏡像 metadata 取（≤Identity 級）。
+    fn call_reqs(&self, call: &Call) -> Result<Vec<CallReq>, WtpError> {
         let (access, item) = match call {
             Call::Vault(VaultCall::List { view, .. }) => (
                 Access::See(match view {
@@ -360,27 +382,47 @@ impl Hub {
         if matches!(call, Call::Sync(SyncCall::Trigger { .. })) {
             return Err(denied("agent 不能手動 trigger sync（由 daemon 排程）"));
         }
-        let mut tags = vec![];
-        let mut uris = vec![];
-        let mut folder = None;
-        let mut collections = vec![];
-        if let Some(id) = item
-            && let Ok(Some(m)) = self.store.meta(id)
-        {
-            tags = m.tags;
-            uris = m.uris;
-            folder = m.folder_id;
-            collections = m.collections;
-        }
-        Ok(CallReq {
-            access,
-            item,
-            tags,
-            uris,
-            folder,
-            collections,
-            est_bytes: 64,
-        })
+        // item 3：批次刪除／合併逐 id 判定。Merge 連同 dupes（被刪方）一起算，
+        // 不能只憑 keep 授權就把他 id 併掉。空 Delete 退回首 id=None 的單筆。
+        let items: Vec<Option<bw_proto::ItemId>> = match call {
+            Call::Vault(VaultCall::Delete { ids }) => {
+                if ids.is_empty() {
+                    vec![None]
+                } else {
+                    ids.iter().map(|id| Some(*id)).collect()
+                }
+            }
+            Call::Vault(VaultCall::Merge { keep, dupes }) => std::iter::once(Some(*keep))
+                .chain(dupes.iter().map(|id| Some(*id)))
+                .collect(),
+            _ => vec![item],
+        };
+        items
+            .into_iter()
+            .map(|item| {
+                let mut tags = vec![];
+                let mut uris = vec![];
+                let mut folder = None;
+                let mut collections = vec![];
+                if let Some(id) = item
+                    && let Ok(Some(m)) = self.store.meta(id)
+                {
+                    tags = m.tags;
+                    uris = m.uris;
+                    folder = m.folder_id;
+                    collections = m.collections;
+                }
+                Ok(CallReq {
+                    access,
+                    item,
+                    tags,
+                    uris,
+                    folder,
+                    collections,
+                    est_bytes: 64,
+                })
+            })
+            .collect()
     }
 
     pub fn record_usage(
@@ -1110,5 +1152,71 @@ mod tests {
             !take.contains("takeover-SENTINEL"),
             "接管新密碼不得進摘要：{take}"
         );
+    }
+
+    // —— item 3：`Delete`／`Merge` 逐 id 判定，不得只憑首 id 授權 ——
+
+    #[tokio::test]
+    async fn delete_requires_every_id_authorized() {
+        let hub = bare_hub().await;
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+        // 只授 id1 的刪除權
+        let sess = hub.new_session(
+            Uuid::new_v4().to_string(),
+            SessionKind::Agent,
+            parse_grants(&format!("mutate:delete item:{id1}")).unwrap(),
+            None,
+            json!({"kind": "agent", "name": "del"}),
+        );
+        // 單 id 授權涵蓋：僅刪 id1 → 放行
+        let ok = hub
+            .authorize(&sess, &Call::Vault(VaultCall::Delete { ids: vec![id1] }))
+            .await;
+        assert!(matches!(ok, Ok(Some(_))), "持 id1 授權刪 id1 應放行：{ok:?}");
+        // 越權：批次含未授權的 id2 → 整批拒絕
+        let bad = hub
+            .authorize(
+                &sess,
+                &Call::Vault(VaultCall::Delete { ids: vec![id1, id2] }),
+            )
+            .await;
+        assert!(matches!(bad, Err(WtpError::Denied { .. })), "含他 id 應拒絕：{bad:?}");
+    }
+
+    #[tokio::test]
+    async fn merge_authorizes_dupes_not_only_keep() {
+        let hub = bare_hub().await;
+        let keep = Uuid::new_v4();
+        let dupe = Uuid::new_v4();
+        let sess = hub.new_session(
+            Uuid::new_v4().to_string(),
+            SessionKind::Agent,
+            parse_grants(&format!("mutate:delete item:{keep}")).unwrap(),
+            None,
+            json!({"kind": "agent", "name": "mrg"}),
+        );
+        // 只 keep 有權、dupe 無權 → 拒絕（不得把無權項目併掉）
+        let bad = hub
+            .authorize(
+                &sess,
+                &Call::Vault(VaultCall::Merge {
+                    keep,
+                    dupes: vec![dupe],
+                }),
+            )
+            .await;
+        assert!(matches!(bad, Err(WtpError::Denied { .. })), "{bad:?}");
+        // 無 dupes → 只判 keep → 放行
+        let ok = hub
+            .authorize(
+                &sess,
+                &Call::Vault(VaultCall::Merge {
+                    keep,
+                    dupes: vec![],
+                }),
+            )
+            .await;
+        assert!(matches!(ok, Ok(Some(_))), "{ok:?}");
     }
 }
