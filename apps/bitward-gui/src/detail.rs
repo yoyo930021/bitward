@@ -21,6 +21,21 @@ use crate::ui;
 /// 顯示值：detail 訊號的派生閉包（欄位塊與複製鈕共用同一份）。
 type Disp = Rc<dyn Fn() -> String>;
 
+/// item 9：只有 http/https 的項目 URI 才交給系統開啟。nsh `check_url` 已擋
+/// file／javascript／data，這裡補「僅 web scheme」白名單，擋 smb: 與自訂 scheme
+/// （避免點擊項目網址叫起非瀏覽器的協定處理常式）。
+fn is_web_uri(uri: &str) -> bool {
+    let s = uri.trim_start();
+    let lower = s.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+fn open_uri_if_web(uri: String) {
+    if is_web_uri(&uri) {
+        drop(open_url(uri));
+    }
+}
+
 pub fn pane(core: AppCore) -> View {
     let copied = signal::<Option<&'static str>>(None);
     // 批次 A＃2：同骨架原地變形——Route::Edit 時欄位換輸入框（綁 form 訊號），
@@ -291,7 +306,7 @@ fn identity_header(core: AppCore, editing: bool) -> View {
                                 .get()
                                 .and_then(|d| d.meta.uris.first().cloned())
                             {
-                                drop(open_url(uri));
+                                open_uri_if_web(uri);
                             }
                         })
                         .child(
@@ -1469,6 +1484,22 @@ fn countdown(core: AppCore) -> View {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_web_schemes_open() {
+        // item 9：http/https 放行（大小寫不敏感、前導空白容忍）
+        assert!(is_web_uri("https://github.com"));
+        assert!(is_web_uri("http://x.test/a"));
+        assert!(is_web_uri("HTTPS://X.TEST"));
+        assert!(is_web_uri("  http://x"));
+        // 其他協定一律擋（含 nsh check_url 沒擋的 smb/自訂 scheme）
+        assert!(!is_web_uri("smb://fileserver/share"));
+        assert!(!is_web_uri("ftp://x"));
+        assert!(!is_web_uri("customapp://open"));
+        assert!(!is_web_uri("mailto:a@b.c"));
+        assert!(!is_web_uri("javascript:alert(1)"));
+        assert!(!is_web_uri(""));
+    }
 
     #[test]
     fn totp_remaining_counts_down_and_floors_at_zero() {
