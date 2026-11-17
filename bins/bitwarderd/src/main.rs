@@ -527,6 +527,9 @@ async fn main() -> Result<(), String> {
                         // 鎖世代推進 ⇒ 事件之前存在的所有 session 撤銷；
                         // 之後 Enroll 的（含 AuthLocked 期間）不受影響。
                         let _ = hub.store.sessions_revoke_before(epoch.0);
+                        // D1：任何路徑的鎖定（含閒置 timeout、with_keys 惰性
+                        // 鎖）都截斷 WAL，治「舊頁留殘值」。
+                        let _ = hub.store.checkpoint_wal_truncate();
                         for s in hub.sessions.lock().unwrap().values_mut() {
                             if s.row.epoch < epoch.0 {
                                 s.revoked.store(true, std::sync::atomic::Ordering::Relaxed);

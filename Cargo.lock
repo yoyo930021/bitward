@@ -449,6 +449,7 @@ dependencies = [
 name = "bw-store"
 version = "0.0.1"
 dependencies = [
+ "bw-crypto",
  "bw-proto",
  "rusqlite",
  "serde",

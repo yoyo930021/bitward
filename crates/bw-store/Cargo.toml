@@ -16,3 +16,5 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 tempfile = "3"
+# D1 perf 框／HMAC 標籤測試用演算法單源（僅 dev 邊，bw-store 正式碼不碰金鑰）。
+bw-crypto.workspace = true

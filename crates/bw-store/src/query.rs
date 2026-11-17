@@ -1,13 +1,19 @@
 //! 讀路徑：只回 `ItemMeta`（Opaque+Identity），永不含 Secret。
 
 use bw_proto::{ItemKind, ItemMeta, Query, SortKey};
+use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, Row};
 use uuid::Uuid;
 
 use crate::{Store, StoreError, StoreResult};
 
 impl Store {
-    pub fn query(&self, q: &Query) -> StoreResult<Vec<ItemMeta>> {
+    /// 列表查詢。`password_hmac`＝呼叫端（daemon/Android，持解鎖金鑰者）以
+    /// `bw_crypto::index_value_tag(derive_index_key(user_key), q.value)` 換算的
+    /// 32 bytes 標籤，D1 後密碼項走 HMAC 等值比對（本層不碰金鑰，同
+    /// set_plain_secrets 紀律）。q.value 有值但標籤為 None ⇒ 密碼項永不命中
+    /// （NULL 不等於任何值），識別欄（username/末四碼/姓氏）照比。
+    pub fn query(&self, q: &Query, password_hmac: Option<&[u8]>) -> StoreResult<Vec<ItemMeta>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut sql = String::from(
             "SELECT m.id, m.name, m.uris, m.kind, m.folder, m.org, m.favorite,
@@ -20,7 +26,7 @@ impl Store {
                         FROM cipher_collections GROUP BY cipher) cc ON cc.cipher = m.id
              WHERE 1=1",
         );
-        let mut args: Vec<String> = Vec::new();
+        let mut args: Vec<SqlValue> = Vec::new();
         let mut like_fallback: Option<String> = None;
         let mut uri_host: Option<String> = None;
 
@@ -41,7 +47,7 @@ impl Store {
                     sql.push_str(
                         " AND m.rowid IN (SELECT rowid FROM meta_fts WHERE meta_fts MATCH ?",
                     );
-                    args.push(m);
+                    args.push(SqlValue::Text(m));
                     sql.push(')');
                 }
                 None => {
@@ -55,39 +61,44 @@ impl Store {
                 " AND (m.name LIKE ?1 ESCAPE '\\' OR m.uris LIKE ?1 ESCAPE '\\'
                        OR m.fields_plain LIKE ?1 ESCAPE '\\')",
             );
-            args.push(format!("%{esc}%"));
+            args.push(SqlValue::Text(format!("%{esc}%")));
         }
         if let Some(tag) = q.tag.as_deref().filter(|t| !t.is_empty()) {
             sql.push_str(
                 " AND EXISTS(SELECT 1 FROM json_each(COALESCE(o.tags,'[]')) WHERE value = ?)",
             );
-            args.push(tag.to_string());
+            args.push(SqlValue::Text(tag.to_string()));
         }
         if let Some(uri) = q.uri.as_deref().filter(|t| !t.is_empty()) {
             // host 錨定（P5-b3）：查詢可帶整頁 URL，比對 host 相等或子網域後綴。
             // SQL LIKE 用 host 做預篩，真實判定在 Rust 端對存儲 uris 逐筆比。
             let want = host_of(uri).unwrap_or_else(|| uri.to_ascii_lowercase());
             sql.push_str(" AND m.uris LIKE ?");
-            args.push(format!("%{want}%"));
+            args.push(SqlValue::Text(format!("%{want}%")));
             uri_host = Some(want);
         }
         if let Some(val) = q.value.as_deref().filter(|t| !t.is_empty()) {
-            // 值搜尋走明文索引欄（解鎖回填後才有資料）；大小寫敏感＝精確比對語意。
-            // PR1（Q4 准則做）：卡片末四碼與身分姓氏也進值搜尋（card_number_tail
-            // 精確對末四碼、identity_last_name 前綴配對姓氏）。
+            // 值搜尋（D1 稽核 2026-11-16 後形態；解鎖回填後才有資料，鎖態拒絕
+            // 在 daemon 層）：識別欄走明文等值/前綴、密碼走 HMAC 等值——
+            // 呼叫端帶 index_key 來，本層照樣不碰金鑰、只比位元組。
+            // 大小寫敏感＝精確比對語意（同 PR1 前）。卡片末四碼精確、
+            // 身分姓氏前綴（PR1 Q4 語意不變）。
             sql.push_str(
-                " AND (m.username_plain = ? OR m.password_plain = ?
+                " AND (m.username_plain = ? OR m.password_hmac = ?
                        OR m.card_number_tail = ? OR m.identity_last_name LIKE ? ESCAPE '\\')",
             );
-            args.push(val.to_string());
-            args.push(val.to_string());
-            args.push(val.to_string());
+            args.push(SqlValue::Text(val.to_string()));
+            args.push(match password_hmac {
+                Some(tag) => SqlValue::Blob(tag.to_vec()),
+                None => SqlValue::Null,
+            });
+            args.push(SqlValue::Text(val.to_string()));
             let esc = escape_like(val);
-            args.push(format!("{esc}%"));
+            args.push(SqlValue::Text(format!("{esc}%")));
         }
         if let Some(kind) = q.kind {
             sql.push_str(" AND m.kind = ?");
-            args.push(kind_index(kind).to_string());
+            args.push(SqlValue::Text(kind_index(kind).to_string()));
         }
         if let Some(col) = q.collection {
             // 集合過濾走歸屬關聯表（apply_sync / put_mirror 落庫時重建）
@@ -95,7 +106,7 @@ impl Store {
                 " AND EXISTS(SELECT 1 FROM cipher_collections cx
                                       WHERE cx.cipher = m.id AND cx.collection = ?)",
             );
-            args.push(col.to_string());
+            args.push(SqlValue::Text(col.to_string()));
         }
         if let Some(folder) = q.folder.as_deref() {
             // 三態（語意見 bw_proto::Query::folder）：空字串＝未歸屬。
@@ -104,7 +115,7 @@ impl Store {
                 sql.push_str(" AND m.folder IS NULL");
             } else {
                 sql.push_str(" AND m.folder = ?");
-                args.push(folder.to_string());
+                args.push(SqlValue::Text(folder.to_string()));
             }
         }
         sql.push_str(" ORDER BY ");
@@ -118,7 +129,7 @@ impl Store {
         sql.push_str(", m.id ASC");
         if q.limit > 0 {
             sql.push_str(" LIMIT ?");
-            args.push(q.limit.to_string());
+            args.push(SqlValue::Text(q.limit.to_string()));
         }
 
         let mut stmt = conn.prepare(&sql)?;

@@ -1,5 +1,5 @@
 /// schema 版本；每次加表/改表就 +1 並在本檔補一段遷移 SQL。
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 /// v1→v2：值搜尋明文索引欄。舊庫 ALTER；新庫 V1 已含，Duplicate column 容忍。
 pub const V2: &str = "ALTER TABLE meta_plain ADD COLUMN username_plain TEXT;
@@ -63,6 +63,19 @@ pub const V8: &str = "";
 pub const V9: &str = "ALTER TABLE meta_plain ADD COLUMN card_number_tail TEXT;
 ALTER TABLE meta_plain ADD COLUMN identity_last_name TEXT;";
 
+/// v9→v10（D1 落盤安全，稽核 2026-11-16）：秘密值明文不落盤——
+/// `password_plain`（明文密碼）退役，改 `password_hmac` BLOB：
+/// `HMAC-SHA256(derive_index_key(user_key), 密碼)`（演算法單源
+/// `bw_crypto::index`；金鑰只在解鎖期存在記憶體）。逐條執行、各自容忍
+/// 既定衝突（ADD 撞 Duplicate column＝新庫 V1 已含；DROP 撞 no such
+/// column＝已退役或全新庫），同 V2/V5/V7/V9 紀律。DROP COLUMN 由 SQLite
+/// 重寫全表行，配合連線級 `PRAGMA secure_delete=ON` 讓 freed 頁清零，
+/// 舊明文不留在盤上。識別欄 `username_plain`／`identity_last_name` 與
+/// 非秘密的 `card_number_tail`（末四碼，遮罩顯示同形）留明文——理由與
+/// 範圍見 NOTES.md「留明文欄位」節；值搜尋的鎖態拒絕在 daemon 層。
+pub const V10: &str = "ALTER TABLE meta_plain ADD COLUMN password_hmac BLOB;
+ALTER TABLE meta_plain DROP COLUMN password_plain;";
+
 /// v9 第二段（必成，不容錯）：FTS5 不支援加欄，`meta_fts` 整組重建加入
 /// 兩張型別節索引欄（走 V5_FTS 先例——連帶 DROP 舊 trigger 免撞新表欄位數）。
 /// 新建庫 V1 已是五欄形態，這裡 drop+recreate 收斂同一結果（冪等）。
@@ -109,8 +122,8 @@ CREATE TABLE IF NOT EXISTS meta_plain(
   favorite   INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT,
   pending    INTEGER NOT NULL DEFAULT 0,
-  username_plain TEXT,        -- v2：值搜尋索引（FR 11941），明文僅存於 0600 檔（§2.7 R3）
-  password_plain TEXT,        -- 同上
+  username_plain TEXT,        -- v2：值搜尋索引（FR 11941），識別欄留明文（理由見 NOTES.md）
+  password_hmac BLOB,         -- v10：HMAC-SHA256(index_key, 密碼)，秘密值明文不落盤（取代 v2 password_plain，D1 稽核 2026-11-16）
   fields_plain TEXT NOT NULL DEFAULT '[]',  -- v5：自訂欄欄名明文（JSON array；值不入）
   deleted_at TEXT,             -- v5：垃圾桶條目的伺服器 deletedDate；未刪 NULL
   archived_at TEXT,            -- v7：封存條目的伺服器 archivedDate；未封存 NULL

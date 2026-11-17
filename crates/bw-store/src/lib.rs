@@ -87,7 +87,8 @@ impl Store {
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
-             PRAGMA foreign_keys=ON;",
+             PRAGMA foreign_keys=ON;
+             PRAGMA secure_delete=ON;",
         )?;
         let blobs_dir = path
             .parent()
@@ -171,6 +172,17 @@ impl Store {
             }
             conn.execute_batch(schema::V9_FTS)?;
         }
+        if version < 10 {
+            // v10（D1 落盤安全）：password_plain 退役→password_hmac。逐條執行、
+            // 各自容忍既定衝突（ Duplicate column／no such column，見 schema::V10
+            // 註解）。DROP COLUMN 的舊行頁清零靠本連線已開的 secure_delete=ON。
+            for stmt in schema::V10.split(';').filter(|s| !s.trim().is_empty()) {
+                let _ = conn.execute_batch(&format!("{stmt};"));
+            }
+            // 遷移真的動過（舊庫）就把重寫頁從 WAL 併回主檔並截斷——舊明文
+            // 不留在主檔等下次 checkpoint；冪等，新庫跑過也無害。
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        }
         if version < schema::SCHEMA_VERSION {
             conn.execute_batch(&format!(
                 "PRAGMA user_version = {};",
@@ -204,6 +216,26 @@ impl Store {
             rusqlite::params![key, value],
         )?;
         Ok(())
+    }
+
+    /// 鎖定收口用：把 WAL 內容併回主檔並截斷 `-wal`（TRUNCATE checkpoint）。
+    /// 配合 secure_delete，鎖前寫入的舊頁殘值不留在 WAL 檔供離線讀取
+    /// （D1，稽核 2026-11-16）。回傳 SQLite 的 checkpoint 三元組
+    /// （busy 時回 (0, -1, -1) 不阻塞解鎖流程）。
+    pub fn checkpoint_wal_truncate(&self) -> StoreResult<(i32, i32, i32)> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let out = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        Ok(out)
+    }
+
+    /// 本連線是否開著 `secure_delete`（D1 驗證用；PRAGMA 是連線級狀態，
+    /// 另開_connection 讀不到本 Store 的設定）。
+    pub fn secure_delete_enabled(&self) -> StoreResult<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let v: i64 = conn.query_row("PRAGMA secure_delete", [], |r| r.get(0))?;
+        Ok(v != 0)
     }
 
     /// 供測試與 e2e：確認檔案權限收斂（0600）。SQLite 可能在後續寫入時重建

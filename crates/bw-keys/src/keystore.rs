@@ -1,5 +1,8 @@
 //! `KeyStore`：OS 級金鑰封存邊界（契約 §3.2）。
-//! `FileKeyStore` 是測試/開發用實作：wrapped user key 落 0600 檔、目錄 0700。
+//! `FileKeyStore` 是無生物辨識 ACL 後端的正式退路（Linux 全量、未啟用
+//! Keychain 的 macOS）：wrapped user key 落 0600 檔、目錄 0700。D2（稽核
+//! 2026-11-16）後此路徑預設 strict——只有自動解鎖 opt-in 才落盤封存，
+//! 其餘狀態由 `UnlockMachine` 的封存閘擋下並在鎖定時清除。
 //! macOS 另有 `KeychainKeystore`（biometric ACL）。
 
 use std::path::{Path, PathBuf};
@@ -84,7 +87,8 @@ pub trait KeyStore: Send + Sync {
     }
 }
 
-/// 測試/開發用：0600 檔封存。金鑰以 base64 存於 `<dir>/<hex(email)>.key`。
+/// 無生物辨識後端的正式封存路徑（strict 語意見模組頭；只有 opt-in 會寫到這裡）。
+/// 0600 檔封存：金鑰以 base64 存於 `<dir>/<hex(label)>.key`。
 pub struct FileKeyStore {
     dir: PathBuf,
 }

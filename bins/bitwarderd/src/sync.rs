@@ -2055,7 +2055,7 @@ mod tests {
             panic!("Import 應回 Imported，got {resp:?}")
         };
         assert_eq!(v.imported, 2);
-        assert_eq!(hub.store.query(&Query::default()).unwrap().len(), 2);
+        assert_eq!(hub.store.query(&Query::default(), None).unwrap().len(), 2);
         assert_eq!(hub.store.depth().unwrap().queued, 2);
         let id0 = v.ids[0];
         assert_eq!(
@@ -2087,7 +2087,7 @@ mod tests {
             },
         ];
         assert!(hub.write_import("s", &bad, false).await.is_err());
-        assert_eq!(hub.store.query(&Query::default()).unwrap().len(), 2);
+        assert_eq!(hub.store.query(&Query::default(), None).unwrap().len(), 2);
         assert_eq!(hub.store.depth().unwrap().queued, 2);
 
         // 上限 500 防呆
@@ -2266,7 +2266,7 @@ mod tests {
         // 主列表預設排除已封存（三態過濾的 store 層專測在 tests/store.rs）
         assert!(
             hub.store
-                .query(&Query::default())
+                .query(&Query::default(), None)
                 .unwrap()
                 .iter()
                 .all(|x| x.id != id)

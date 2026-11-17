@@ -260,6 +260,9 @@ pub struct PlainIndex {
     pub name: Option<String>,
     pub uris: Vec<String>,
     pub username: Option<String>,
+    /// 密碼明文——**只在記憶體過路**：落盤前呼叫端必須換算成
+    /// `bw_crypto::index_value_tag(derive_index_key(user_key), pw)` 的
+    /// HMAC 標籤（D1，稽核 2026-11-16；見 `crates/bw-store/NOTES.md`）。
     pub password: Option<String>,
     /// 自訂欄**欄名**（v5 三件套）。欄值是 Secret（§2.1 分級表
     /// `FieldValue`），hidden 欄值更不得落明文檔——這裡只收 name。

@@ -140,10 +140,13 @@ impl Hub {
         let want = norm_b64url(credential_id);
         let metas = self
             .store
-            .query(&Query {
-                limit: u32::MAX,
-                ..Default::default()
-            })
+            .query(
+                &Query {
+                    limit: u32::MAX,
+                    ..Default::default()
+                },
+                None,
+            )
             .map_err(denied)?;
         for m in metas {
             let Some(row) = self.store.item(m.id).map_err(denied)? else {
@@ -214,10 +217,13 @@ impl Hub {
         self.require_unlocked()?;
         let metas = self
             .store
-            .query(&Query {
-                limit: u32::MAX,
-                ..Default::default()
-            })
+            .query(
+                &Query {
+                    limit: u32::MAX,
+                    ..Default::default()
+                },
+                None,
+            )
             .map_err(denied)?;
         let mut out = Vec::new();
         for m in metas {
@@ -1029,10 +1035,13 @@ pub(crate) mod tests {
         let id = {
             let metas = hub
                 .store
-                .query(&Query {
-                    limit: u32::MAX,
-                    ..Default::default()
-                })
+                .query(
+                    &Query {
+                        limit: u32::MAX,
+                        ..Default::default()
+                    },
+                    None,
+                )
                 .unwrap();
             metas[0].id
         };

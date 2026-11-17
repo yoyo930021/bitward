@@ -11,6 +11,20 @@
 - `meta_plain.name/uris`：`apply_sync` 時先存伺服器原樣（多半是信封字串）；
   解鎖後 daemon 在 `with_keys` 內解密、經 `set_plain_meta` 覆寫為明文，
   FTS5 觸發器自動重建索引。bw-store 不知金鑰語意（§3 規則）。
+- `meta_plain` 值搜尋欄（D1 落盤安全，稽核 2026-11-16）。**留明文欄位如實聲明**：
+  - `username_plain`、`identity_last_name`（識別欄）與 `card_number_tail`
+    （卡號末四碼）**留明文**——三者都是 Masked 出口到處可見的識別資訊
+    （列表/詳情/autofill 候選/credential.match 都直接顯示 username 與末四碼），
+    加密它們不改變攻擊者能看到的集合，只犧牲精確值搜尋的簡單性。
+  - `password_hmac`（秘密值）**不留明文**：存
+    `HMAC-SHA256(derive_index_key(user_key), 密碼)`（演算法單源
+    `bw-crypto/src/index.rs`；派生金鑰經 HKDF info=`"index"`、只在解鎖期
+    存在記憶體）。值搜尋由呼叫端（daemon/Android）換算標籤後傳入比對；
+    鎖態值查詢在 daemon 層回 `Locked` 拒絕（防猜值 oracle）。卡號**全號**
+    從未落盤（v9 起就只存末四碼），故無全號 HMAC 項。
+  - 落盤 hygiene：連線級 `PRAGMA secure_delete=ON`（freed 頁清零）＋
+    鎖定路徑 `wal_checkpoint(TRUNCATE)`（daemon Lock 臂與 Revoked 事件泵），
+    治「舊頁留殘值」。
 - `orgs`（v3）：`/sync` 的 `profile.organizations[]`（VW）或
   `objects.organizations[]`（官方雲 v2）鏡像。`key`＝akey（org 對稱金鑰的
   包裝），`public_key`/`enc_private_key`＝org RSA 信封（VW 的 /sync 不含，
@@ -37,6 +51,7 @@
 | 檔權限 | db/wal/shm 0600、目錄 0700 | 契約 §3.4、任務出口條件 |
 | blob 目錄分片 | `blobs/<hex[0..2]>/<hex[2..]>` | git object store 形態：https://git-scm.com/docs/gitrepository-layout |
 | WAL + synchronous=NORMAL | — | https://sqlite.org/wal.html ；單寫者中樞（不變量 11）下 NORMAL 為崩潰安全上界 |
+| secure_delete=ON | 每連線開啟 | D1（稽核 2026-11-16）：秘密值頁 freed 即清零；https://sqlite.org/pragma.html#pragma_secure_delete |
 
 ## 已知邊界
 

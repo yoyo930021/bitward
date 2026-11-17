@@ -11,6 +11,7 @@
 
 mod envelope;
 mod generator;
+mod index;
 mod kdf;
 mod passkey;
 mod rsa;
@@ -20,6 +21,9 @@ mod totp;
 
 // b64/b64url helper（base64 crate 手寫包裝）：daemon 的 keyValue 明文形態用 b64。
 pub use kdf::{b64, b64_decode};
+
+// D1 值搜尋索引（稽核 2026-11-16）：派生金鑰與值 HMAC 的演算法單源。
+pub use index::{INDEX_INFO, derive_index_key, index_value_tag};
 
 pub use envelope::{
     CipherType, EncParts, decrypt_bytes, decrypt_bytes_with_key, decrypt_with_raw_key,

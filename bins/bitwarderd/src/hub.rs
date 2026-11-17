@@ -168,10 +168,21 @@ impl Hub {
         // 固定 label：首次登入時 account.json 還不存在，若用 email 作 label
         // 會造成封存與載入路徑不一致（A7b 實測教訓）。多帳號（P6）再拆 per-account。
         let label = AccountLabel::new("default");
+        // D2（稽核 2026-11-16）strict 封存閘：FileKeyStore（FilePermissions 強度）
+        // 只在自動解鎖 opt-in（lock_on_sleep_restart=false）時把封存金鑰落盤；
+        // Keychain（BiometricBound，ACL 保護）不受閘——Touch ID 便利照舊。
+        // strict 態開庫即清舊版殘留封存（鎖定即毀鑰，不等第一次解鎖）。
+        let initial_settings = Self::read_settings(&store);
+        let sealing = keystore.wrap_strength() == bw_keys::WrapStrength::BiometricBound
+            || !initial_settings.lock_on_sleep_restart;
+        if !sealing {
+            let _ = keystore.clear(&label);
+        }
         let builder = UnlockMachine::builder()
             .label(label)
             .kernel(Arc::new(BwCryptoKernel))
-            .keystore(keystore.clone());
+            .keystore(keystore.clone())
+            .sealing(sealing);
         let builder = match &account {
             Some(_) => builder.signed_out(false),
             None => builder.signed_out(true),
@@ -187,7 +198,6 @@ impl Hub {
             });
         }
         let (drain_tx, drain_rx) = tokio::sync::mpsc::unbounded_channel();
-        let initial_settings = Self::read_settings(&store);
         let hub = Arc::new(Hub {
             data_dir: data_dir.to_path_buf(),
             store: Arc::new(store),
@@ -493,6 +503,8 @@ impl Hub {
             Call::Auth(AuthCall::Lock) => {
                 let epoch = self.machine.lock(LockReason::User);
                 let n = self.store.sessions_revoke_before(epoch.0).unwrap_or(0);
+                // D1：鎖即截斷 WAL——鎖前回填的舊頁殘值不留在 -wal 檔供離線讀。
+                let _ = self.store.checkpoint_wal_truncate();
                 tracing::info!(epoch = epoch.0, revoked = n, "locked");
                 Ok(Response::Ok)
             }
@@ -514,7 +526,21 @@ impl Hub {
                 if *view > View::Metadata && !self.machine.is_unlocked() {
                     return Err(WtpError::Locked);
                 }
-                let metas = self.store.query(query).map_err(denied)?;
+                // D1（稽核 2026-11-16）鎖態語意：值查詢一律 Locked 拒絕——
+                // 鎖態下索引金鑰不在記憶體，盤上識別欄殘值可被當猜值 oracle。
+                let value_tag = match query.value.as_deref().filter(|v| !v.is_empty()) {
+                    None => None,
+                    Some(val) => {
+                        if !self.machine.is_unlocked() {
+                            return Err(WtpError::Locked);
+                        }
+                        Some(self.index_tag(val)?)
+                    }
+                };
+                let metas = self
+                    .store
+                    .query(query, value_tag.as_deref())
+                    .map_err(denied)?;
                 let mut rows = Vec::with_capacity(metas.len());
                 for m in metas {
                     if *view == View::Metadata {
@@ -1341,6 +1367,18 @@ impl Hub {
         }
     }
 
+    /// D1 值搜尋 HMAC 標籤（演算法單源 `bw_crypto::index`）：user key →
+    /// HKDF info="index" 派生金鑰 → HMAC-SHA256(key, 值)。金鑰只在閉包內
+    /// 存在；鎖態 `with_keys` 回錯（呼叫端已先判解鎖）。
+    pub(crate) fn index_tag(&self, value: &str) -> Result<Vec<u8>, WtpError> {
+        self.machine
+            .with_keys(|kb| {
+                let key = bw_crypto::derive_index_key(kb.user_key().as_bytes());
+                bw_crypto::index_value_tag(&key, value.as_bytes()).to_vec()
+            })
+            .map_err(|_| WtpError::Locked)
+    }
+
     /// 明文索引回填（全鏡像列：主列表／垃圾桶／已封存都要覆蓋——回填的範圍是
     /// 「庫裡有這筆」，不是某條列表查詢的三態組合；2026-11-11 使用者實錄缺陷
     /// 「已封存的項目名都像亂碼」＝此處以預設＋垃圾桶兩條 query 枚舉，
@@ -1355,6 +1393,12 @@ impl Hub {
     /// 與 item key 三態由解析器選定（見 [`Self::cipher_field_decryptor`]）。
     pub fn reindex_many(&self, ids: &[ItemId]) -> Result<(), WtpError> {
         let org_keys = self.org_key_map();
+        // D1：密碼值改存 HMAC 標籤——派生金鑰每批一次（HKDF 只吃 user key，
+        // 與逐列內容金鑰無關）；鎖態拿不到金鑰＝整批跳過標籤項。
+        let index_key = self
+            .machine
+            .with_keys(|kb| bw_crypto::derive_index_key(kb.user_key().as_bytes()))
+            .ok();
         for id in ids {
             let Some(row) = self.store.item(*id).map_err(denied)? else {
                 continue;
@@ -1370,9 +1414,15 @@ impl Hub {
             let _ =
                 self.store
                     .set_plain_meta(*id, idx.name.as_deref(), &idx.uris, &idx.field_names);
-            let _ =
-                self.store
-                    .set_plain_secrets(*id, idx.username.as_deref(), idx.password.as_deref());
+            let pw_tag = match (&index_key, idx.password.as_deref()) {
+                (Some(k), Some(pw)) => Some(bw_crypto::index_value_tag(k, pw.as_bytes())),
+                _ => None,
+            };
+            let _ = self.store.set_plain_secrets(
+                *id,
+                idx.username.as_deref(),
+                pw_tag.as_ref().map(|t| &t[..]),
+            );
             // 型別節值搜尋（PR1 子批 d）：卡片末四碼＋身分姓氏。
             let _ = self.store.set_plain_type_nodes(
                 *id,
@@ -2086,10 +2136,13 @@ mod tests {
         let store = bw_store::Store::open(std::path::Path::new(&dir).join("vault.db").as_path())
             .expect("開庫失敗");
         let metas = store
-            .query(&bw_proto::Query {
-                limit: u32::MAX,
-                ..Default::default()
-            })
+            .query(
+                &bw_proto::Query {
+                    limit: u32::MAX,
+                    ..Default::default()
+                },
+                None,
+            )
             .unwrap();
         let resp = Response::Items(metas.into_iter().map(bw_proto::ItemView::metadata).collect());
         let n = match &resp {
@@ -2633,11 +2686,14 @@ mod tests {
         // 投影端同一口徑：Metadata 視窗（列表）不得再吐信封字串。
         let listed = hub
             .store
-            .query(&bw_proto::Query {
-                archived: Some(true),
-                deleted: Some(true),
-                ..Default::default()
-            })
+            .query(
+                &bw_proto::Query {
+                    archived: Some(true),
+                    deleted: Some(true),
+                    ..Default::default()
+                },
+                None,
+            )
             .unwrap();
         assert_eq!(listed.len(), 1, "封存＋軟刪列只在該態組合查詢現形");
         assert_eq!(listed[0].name.as_deref(), Some("ArchivedTrashed"));
@@ -2702,8 +2758,20 @@ mod tests {
             "對密碼應解鎖：{resp:?}"
         );
         // 自動解鎖 opt-in（lock_on_sleep_restart=false）：裸解鎖照放行。
+        // D2 接線：opt-in 走 store_settings（封存閘同步開），解鎖一次讓封存
+        // 落盤後再鎖，才重現「重啟後 DeviceAssertion 自動解鎖」的形態。
         hub.machine.lock(LockReason::User);
-        hub.settings.lock().unwrap().lock_on_sleep_restart = false;
+        hub.store_settings(bw_proto::Settings {
+            lock_on_sleep_restart: false,
+            ..hub.current_settings()
+        })
+        .unwrap();
+        hub.machine
+            .submit(UnlockMaterial::MasterPassword(Zeroizing::new(
+                "test-master-pw".into(),
+            )))
+            .unwrap();
+        hub.machine.lock(LockReason::User);
         let resp = hub.dispatch(&sess, &bare).await.unwrap();
         assert!(
             {
@@ -2714,5 +2782,255 @@ mod tests {
             },
             "opt-in 模式裸解鎖應通行：{resp:?}"
         );
+    }
+
+    /// D1（稽核 2026-11-16）落盤安全三斷言：①解鎖態值搜尋走 HMAC 等值
+    /// （密碼命中、識別欄 username 命中）；②鎖態值查詢回 Locked 拒絕
+    /// （oracle 治癒）；③鎖定＋checkpoint 後拿真庫檔（vault.db 與 -wal）
+    /// 實掃——密碼明文零殘留、HMAC 標籤在盤上、留明文的識別欄如實存在。
+    #[tokio::test]
+    async fn d1_hmac_value_index_lock_disk_scrub() {
+        let (hub, _dir) = crate::passkey::tests::unlocked_hub("d1-hmac").await;
+        let sess = hub.new_session(
+            "d1-hmac".into(),
+            SessionKind::Interactive,
+            bw_agent::GrantSet::default_full(),
+            None,
+            json!({"kind": "local"}),
+        );
+        let user = hub
+            .machine
+            .with_keys(|kb| kb.user_key().as_bytes().to_vec())
+            .unwrap();
+        let enc = |pt: &str| bw_crypto::encrypt_bytes_key(&user, pt.as_bytes()).unwrap();
+        let id = Uuid::new_v4();
+        hub.store
+            .put_mirror(
+                id,
+                &json!({
+                    "id": id.to_string(), "type": 1,
+                    "name": enc("D1 Vault"),
+                    "login": {
+                        "username": enc("octo-d1"),
+                        "password": enc("s3cret-D1"),
+                        "uris": [{"uri": enc("https://d1.example.com"), "match": null}],
+                    },
+                }),
+            )
+            .unwrap();
+        hub.reindex_one(id).unwrap();
+        // ① 解鎖態：密碼值與 username 值都命中（HMAC 等值／明文等值）。
+        let list = |value: &str| {
+            Call::Vault(VaultCall::List {
+                query: bw_proto::Query {
+                    value: Some(value.into()),
+                    ..Default::default()
+                },
+                view: View::Metadata,
+            })
+        };
+        let resp = hub.dispatch(&sess, &list("s3cret-D1")).await.unwrap();
+        assert!(
+            matches!(&resp, Response::Items(rows) if rows.iter().any(|r| r.meta.id == id)),
+            "密碼值搜尋應命中 HMAC 列"
+        );
+        let resp = hub.dispatch(&sess, &list("octo-d1")).await.unwrap();
+        assert!(
+            matches!(&resp, Response::Items(rows) if rows.iter().any(|r| r.meta.id == id)),
+            "username 值搜尋應命中"
+        );
+        // ② 鎖態值查詢：明確 Locked，不拿盤上殘值當猜測 oracle。
+        hub.dispatch(&sess, &Call::Auth(AuthCall::Lock))
+            .await
+            .unwrap();
+        let err = hub.dispatch(&sess, &list("s3cret-D1")).await.unwrap_err();
+        assert!(
+            matches!(err, WtpError::Locked),
+            "鎖態值查詢應回 Locked：{err:?}"
+        );
+        // ③ 實掃庫檔：密碼明文零殘留（db＋wal 全檔），HMAC 標籤在盤上，
+        //   識別欄（username）留明文＝如實聲明的設計取態。標籤先在測試內
+        //   用同派生重算（暫時解鎖），再鎖回落盤後掃檔。
+        hub.dispatch(
+            &sess,
+            &Call::Auth(AuthCall::Unlock {
+                biometric: false,
+                password: Some("test-master-pw".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        let tag = hub
+            .machine
+            .with_keys(|kb| {
+                let k = bw_crypto::derive_index_key(kb.user_key().as_bytes());
+                bw_crypto::index_value_tag(&k, b"s3cret-D1")
+            })
+            .unwrap();
+        hub.dispatch(&sess, &Call::Auth(AuthCall::Lock))
+            .await
+            .unwrap();
+        let mut disk = Vec::new();
+        for suffix in ["vault.db", "vault.db-wal"] {
+            if let Ok(b) = std::fs::read(hub.data_dir.join(suffix)) {
+                disk.extend_from_slice(&b);
+            }
+        }
+        assert!(
+            !disk.windows("s3cret-D1".len()).any(|w| w == b"s3cret-D1"),
+            "鎖定後盤上不得殘留密碼明文"
+        );
+        assert!(
+            disk.windows(tag.len()).any(|w| w == tag),
+            "password_hmac 標籤應在盤上（值搜尋的載體）"
+        );
+        assert!(
+            disk.windows("octo-d1".len()).any(|w| w == b"octo-d1"),
+            "識別欄 username 留明文（NOTES.md 如實聲明項）"
+        );
+    }
+
+    /// D2（稽核 2026-11-16）strict 封存的 daemon 接線：FileKeyStore 路徑下
+    /// 預設 strict＝解鎖不落盤封存、鎖定毀鑰；opt-in（store_settings 轉
+    /// lock_on_sleep_restart=false）＝解鎖落盤、lock 保留；轉回 strict 即清。
+    #[tokio::test]
+    async fn d2_seal_file_follows_auto_unlock_setting() {
+        let (hub, dir) = crate::passkey::tests::unlocked_hub("d2-seal").await;
+        // unlocked_hub 已用主密碼解鎖：strict（預設）下不該有封存檔。
+        let seal_files = |dir: &std::path::Path| -> Vec<String> {
+            let d = dir.join("keys");
+            match std::fs::read_dir(d) {
+                Ok(rd) => rd
+                    .flatten()
+                    .map(|e| e.file_name().to_string_lossy().into())
+                    .collect(),
+                Err(_) => Vec::new(),
+            }
+        };
+        let dir_path = dir.clone();
+        assert!(
+            !hub.machine.sealing_enabled(),
+            "FileKeyStore＋預設設定應為 strict"
+        );
+        assert!(
+            seal_files(&dir_path).is_empty(),
+            "strict：解鎖後盤上無封存檔"
+        );
+        // opt-in：轉開關即在解鎖態補落封存；lock 保留（重啟自動解鎖材料）。
+        hub.store_settings(bw_proto::Settings {
+            lock_on_sleep_restart: false,
+            ..hub.current_settings()
+        })
+        .unwrap();
+        assert!(hub.machine.sealing_enabled(), "opt-in 應開閘");
+        assert!(
+            !seal_files(&dir_path).is_empty(),
+            "opt-in：解鎖態轉閘立即補落盤"
+        );
+        hub.machine.lock(bw_keys::LockReason::User);
+        assert!(
+            !seal_files(&dir_path).is_empty(),
+            "opt-in：lock 保留封存供重啟"
+        );
+        // 轉回 strict：關閘即刻清既有封存（不等下次鎖）。
+        hub.store_settings(bw_proto::Settings {
+            lock_on_sleep_restart: true,
+            ..hub.current_settings()
+        })
+        .unwrap();
+        assert!(seal_files(&dir_path).is_empty(), "strict：關閘即清封存檔");
+    }
+
+    /// D1 perf 框（讀側端到端）：556 筆鏡像上跑 daemon `List` 全鏈（dispatch→
+    /// store.query→投影），「純列表」與「值搜尋（帶 HMAC 標籤）」交錯 5 輪。
+    /// 口徑同使用者按「搜尋」實測的路徑；跑法：
+    /// `cargo test --release -p bitwarderd -- --ignored --nocapture d1_list_e2e`
+    #[tokio::test]
+    #[ignore = "perf 框：需 --release 與 --ignored"]
+    async fn d1_list_e2e_perf_556_interleaved() {
+        const N: usize = 556;
+        const ROUNDS: usize = 5;
+        let (hub, _dir) = crate::passkey::tests::unlocked_hub("d1-list-perf").await;
+        let user = hub
+            .machine
+            .with_keys(|kb| kb.user_key().as_bytes().to_vec())
+            .unwrap();
+        let enc = |pt: &str| bw_crypto::encrypt_bytes_key(&user, pt.as_bytes()).unwrap();
+        let ciphers: Vec<serde_json::Value> = (0..N)
+            .map(|i| {
+                json!({
+                    "id": Uuid::new_v4().to_string(), "type": 1,
+                    "revisionDate": format!("2026-11-17T00:00:{i:02}.000Z"),
+                    "name": enc(&format!("perf-{i}")),
+                    "login": {
+                        "username": enc(&format!("user-{i}")),
+                        "password": enc(&format!("pw-{i}")),
+                        "uris": [{"uri": enc("https://perf.example.com"), "match": null}],
+                    },
+                })
+            })
+            .collect();
+        hub.store
+            .apply_sync(&json!({ "ciphers": ciphers }))
+            .unwrap();
+        let t = std::time::Instant::now();
+        hub.reindex_all().unwrap();
+        println!(
+            "D1 perf：reindex_all（{N} 筆解密＋HMAC 回填）＝{:?}（含既有解密成本）",
+            t.elapsed()
+        );
+        let sess = hub.new_session(
+            "d1-list-perf".into(),
+            SessionKind::Interactive,
+            bw_agent::GrantSet::default_full(),
+            None,
+            json!({"kind": "local"}),
+        );
+        let mut plain_ms = Vec::new();
+        let mut value_ms = Vec::new();
+        for r in 0..ROUNDS {
+            let t0 = std::time::Instant::now();
+            let resp = hub
+                .dispatch(
+                    &sess,
+                    &Call::Vault(VaultCall::List {
+                        query: bw_proto::Query {
+                            limit: u32::MAX,
+                            ..Default::default()
+                        },
+                        view: View::Metadata,
+                    }),
+                )
+                .await
+                .unwrap();
+            plain_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+            assert!(matches!(&resp, Response::Items(rows) if rows.len() == N));
+            let probe = format!("pw-{r}");
+            let t1 = std::time::Instant::now();
+            let resp = hub
+                .dispatch(
+                    &sess,
+                    &Call::Vault(VaultCall::List {
+                        query: bw_proto::Query {
+                            value: Some(probe),
+                            ..Default::default()
+                        },
+                        view: View::Metadata,
+                    }),
+                )
+                .await
+                .unwrap();
+            value_ms.push(t1.elapsed().as_secs_f64() * 1000.0);
+            assert!(matches!(&resp, Response::Items(rows) if rows.len() == 1));
+        }
+        let fmt = |v: &[f64]| {
+            v.iter()
+                .map(|x| format!("{x:.2}"))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+        println!("D1 perf（{N} 筆，{ROUNDS} 輪交錯，release，dispatch 端到端 ms）");
+        println!("  純列表 ms    : {}", fmt(&plain_ms));
+        println!("  值搜尋 ms    : {}", fmt(&value_ms));
     }
 }

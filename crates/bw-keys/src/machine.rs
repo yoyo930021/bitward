@@ -132,6 +132,11 @@ pub struct UnlockMachine {
     clock: std::sync::Arc<dyn Clock>,
     kernel: std::sync::Arc<dyn UnlockKernel>,
     keystore: Option<std::sync::Arc<dyn KeyStore>>,
+    /// D2（稽核 2026-11-16）strict 封存閘：true＝解鎖成功可把封存金鑰交
+    /// keystore 落盤（自動解鎖 opt-in，或 keystore 本身有 ACL 保護如 macOS
+    /// Keychain）；false＝`finish_unlock` 不寫盤、`lock` 主動 `clear`——
+    /// 「鎖定即毀鑰」，盤上不留未包裝的 user key。由 daemon 依設定維持。
+    sealing: AtomicBool,
     label: AccountLabel,
     auth_context: Mutex<Option<AuthContext>>,
     policy: Mutex<TimeoutPolicy>,
@@ -373,7 +378,11 @@ impl UnlockMachine {
             hard_deadline_ms,
         };
         // enrollment：成功解鎖後把金鑰封存給離線解鎖用（若有 keystore）。
-        if let (Some(ks), VaultState::Unlocked { keys, .. }) = (&self.keystore, &*st) {
+        // D2 strict 態（sealing=false）不寫盤——未包裝 user key 落盤＝鎖定
+        // 只是拒免密碼解鎖的假象，金鑰仍在加密鏡像旁邊。
+        if self.sealing.load(Ordering::SeqCst)
+            && let (Some(ks), VaultState::Unlocked { keys, .. }) = (&self.keystore, &*st)
+        {
             let sealed = crate::keystore::SealedKey::from_bundle(keys);
             // 14.8：封存失敗不再靜默——未簽章 dev 進程撞 keychain entitlement
             // 壁時,log 直接可見（真機 re-seal 成敗以此行為準）。
@@ -400,10 +409,43 @@ impl UnlockMachine {
         *st = VaultState::AuthLocked {
             has_mirror: self.has_mirror.load(Ordering::SeqCst),
         };
+        // D2 strict 態：鎖即毀鑰——清掉封存（含本功能上線前落的舊檔）。
+        if !self.sealing.load(Ordering::SeqCst)
+            && let Some(ks) = &self.keystore
+        {
+            let _ = ks.clear(&self.label);
+        }
         self.needs_reauth.store(false, Ordering::SeqCst);
         self.broadcast(UnlockEvent::Revoked { epoch: new, reason });
         self.publish(&st);
         new
+    }
+
+    /// D2：切封存閘（daemon 依 `lock_on_sleep_restart`／keystore 強度維持）。
+    /// 關閘即刻清既有封存（不等下次鎖）；開閘時若已在解鎖態，立即補寫封存
+    /// （opt-in 生效不必等下次解鎖）。
+    pub fn set_sealing(&self, on: bool) {
+        self.sealing.store(on, Ordering::SeqCst);
+        let st = self.state.lock().unwrap();
+        match &*st {
+            VaultState::Unlocked { keys, .. } if on => {
+                if let Some(ks) = &self.keystore {
+                    let sealed = crate::keystore::SealedKey::from_bundle(keys);
+                    if let Err(e) = ks.store_wrapped(&self.label, &sealed) {
+                        tracing::warn!("keystore re-seal 失敗（下次生物解鎖不可用）：{e}");
+                    }
+                }
+            }
+            _ => {
+                if !on && let Some(ks) = &self.keystore {
+                    let _ = ks.clear(&self.label);
+                }
+            }
+        }
+    }
+
+    pub fn sealing_enabled(&self) -> bool {
+        self.sealing.load(Ordering::SeqCst)
     }
 
     /// 登出：清空封存與認證情境，回 SignedOut，epoch++（撤銷一切）。
@@ -562,6 +604,8 @@ pub struct UnlockMachineBuilder {
     keystore: Option<std::sync::Arc<dyn KeyStore>>,
     policy: TimeoutPolicy,
     signed_out: bool,
+    /// D2 封存閘；未設定＝true（既有行為：unlock 即 re-seal）。
+    sealing: Option<bool>,
 }
 
 impl UnlockMachineBuilder {
@@ -589,6 +633,10 @@ impl UnlockMachineBuilder {
         self.signed_out = v;
         self
     }
+    pub fn sealing(mut self, v: bool) -> Self {
+        self.sealing = Some(v);
+        self
+    }
 
     pub fn build(self) -> UnlockMachine {
         UnlockMachine {
@@ -602,6 +650,7 @@ impl UnlockMachineBuilder {
             egress: AtomicBool::new(true),
             needs_reauth: AtomicBool::new(false),
             mirror_items: AtomicU64::new(0),
+            sealing: AtomicBool::new(self.sealing.unwrap_or(true)),
             clock: self
                 .clock
                 .unwrap_or_else(|| std::sync::Arc::new(crate::clock::SystemClock)),
@@ -1022,6 +1071,63 @@ mod tests {
             Err(KeyError::NotAuthenticated)
         ));
         assert!(ks.load_wrapped(&label).unwrap().is_none());
+    }
+
+    /// D2（稽核 2026-11-16）strict 封存四態：strict 下解鎖不寫盤、lock 毀鑰、
+    /// 關閘即刻清既有封存；opt-in（自動解鎖）下解鎖落盤、lock 保留。
+    #[test]
+    fn t13b_strict_sealing_lock_destroys_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let ks = Arc::new(FileKeyStore::new(dir.path()).unwrap());
+        let clock = Arc::new(ManualClock::new());
+        let label = AccountLabel::new("dev@bitward.test");
+        let legacy = SealedKey {
+            user_key: Zeroizing::new(vec![9u8; 64]),
+            keys_fingerprint: None,
+            enc_private_key: None,
+        };
+        let m = UnlockMachine::builder()
+            .label(label.clone())
+            .clock(clock.clone())
+            .kernel(Arc::new(TestKernel))
+            .keystore(ks.clone())
+            .sealing(false)
+            .build();
+        m.set_auth_context(ctx(None));
+        let pw = || UnlockMaterial::MasterPassword(Zeroizing::new("correct".into()));
+        m.submit(pw()).unwrap();
+        assert!(
+            ks.load_wrapped(&label).unwrap().is_none(),
+            "strict：finish_unlock 不得寫盤"
+        );
+        // 升級遷移形態：舊版留下的封存檔，lock 即毀。
+        ks.store_wrapped(&label, &legacy).unwrap();
+        m.lock(LockReason::User);
+        assert!(
+            ks.load_wrapped(&label).unwrap().is_none(),
+            "strict：lock 毀鑰"
+        );
+        // 關閘即刻清（不等下次鎖）：模擬使用者把 opt-in 轉 strict。
+        m.submit(pw()).unwrap();
+        ks.store_wrapped(&label, &legacy).unwrap();
+        m.set_sealing(false);
+        assert!(
+            ks.load_wrapped(&label).unwrap().is_none(),
+            "set_sealing(false) 應即清既有封存"
+        );
+        // opt-in 態（自動解鎖）：解鎖落盤、lock 保留重啟材料。
+        m.set_sealing(true);
+        m.lock(LockReason::User);
+        m.submit(pw()).unwrap();
+        assert!(
+            ks.load_wrapped(&label).unwrap().is_some(),
+            "opt-in：unlock re-seal"
+        );
+        m.lock(LockReason::User);
+        assert!(
+            ks.load_wrapped(&label).unwrap().is_some(),
+            "opt-in：lock 保留封存供重啟自動解鎖"
+        );
     }
 
     #[test]

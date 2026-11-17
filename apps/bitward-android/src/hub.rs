@@ -307,6 +307,9 @@ impl Hub {
             let u = g.as_ref().ok_or("尚未解鎖")?;
             u.user_key.clone()
         };
+        // D1：密碼值改存 HMAC 標籤（演算法單源 bw_crypto::index，與 daemon
+        // reindex_many 同派生）——派生金鑰每批一次，明文不落盤。
+        let index_key = bw_crypto::derive_index_key(user_key.as_bytes());
         for id in ids {
             let Some(row) = self.store.item(id).map_err(|e| e.to_string())? else {
                 continue;
@@ -316,15 +319,18 @@ impl Hub {
             };
             let dec = decryptor_with_key(&key);
             let idx = bw_vault::plain_index(&row.enc_cipher, &dec);
-            let _ = self.store.set_plain_meta(
+            let _ = self
+                .store
+                .set_plain_meta(id, idx.name.as_deref(), &idx.uris, &idx.field_names);
+            let pw_tag = idx
+                .password
+                .as_deref()
+                .map(|pw| bw_crypto::index_value_tag(&index_key, pw.as_bytes()));
+            let _ = self.store.set_plain_secrets(
                 id,
-                idx.name.as_deref(),
-                &idx.uris,
-                &idx.field_names,
+                idx.username.as_deref(),
+                pw_tag.as_ref().map(|t| &t[..]),
             );
-            let _ =
-                self.store
-                    .set_plain_secrets(id, idx.username.as_deref(), idx.password.as_deref());
         }
         Ok(())
     }
@@ -339,7 +345,8 @@ impl Hub {
             limit: u32::MAX,
             ..Default::default()
         };
-        self.store.query(&q).unwrap_or_default()
+        // D1：孤島列表不走值搜尋（Query.value 恆 None）⇒ 密碼 HMAC 項無標籤可給。
+        self.store.query(&q, None).unwrap_or_default()
     }
 
     pub fn list(&self, text: &str) -> Vec<ItemMeta> {
@@ -360,12 +367,15 @@ impl Hub {
         }
         let metas = self
             .store
-            .query(&Query {
-                uri: Some(query.to_owned()),
-                kind: Some(bw_proto::ItemKind::Login),
-                limit,
-                ..Default::default()
-            })
+            .query(
+                &Query {
+                    uri: Some(query.to_owned()),
+                    kind: Some(bw_proto::ItemKind::Login),
+                    limit,
+                    ..Default::default()
+                },
+                None,
+            )
             .unwrap_or_default();
         metas
             .into_iter()
@@ -2198,11 +2208,14 @@ mod tests {
         // 投影端同一口徑：封存＋軟刪組合態查詢不得再吐信封字串。
         let listed = hub
             .store
-            .query(&Query {
-                archived: Some(true),
-                deleted: Some(true),
-                ..Default::default()
-            })
+            .query(
+                &Query {
+                    archived: Some(true),
+                    deleted: Some(true),
+                    ..Default::default()
+                },
+                None,
+            )
             .expect("query");
         assert_eq!(listed.len(), 1, "封存＋軟刪列只在該態組合查詢現形");
         assert_eq!(listed[0].name.as_deref(), Some("ArchivedTrashed"));

@@ -162,26 +162,35 @@ fn fts_search_after_plain_index() {
         .unwrap();
 
     let hits = store
-        .query(&Query {
-            text: Some("git".into()),
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                text: Some("git".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(hits.len(), 2, "前綴匹配兩筆");
     let hits = store
-        .query(&Query {
-            text: Some("github".into()),
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                text: Some("github".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id, gh);
     // uri 也在 FTS 範圍內
     let hits = store
-        .query(&Query {
-            text: Some("gitlab.com".into()),
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                text: Some("gitlab.com".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id, gl);
@@ -218,30 +227,39 @@ fn query_filters_tags_uri_and_sort() {
         .unwrap();
 
     let hits = store
-        .query(&Query {
-            tag: Some("work".into()),
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                tag: Some("work".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id, a);
     assert_eq!(hits[0].tags, vec!["work".to_string(), "vip".to_string()]);
 
     let hits = store
-        .query(&Query {
-            uri: Some("example.org".into()),
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                uri: Some("example.org".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id, b);
 
     // 名稱排序不分大小寫
     let hits = store
-        .query(&Query {
-            sort: SortKey::Name,
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                sort: SortKey::Name,
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(
         hits.iter().map(|h| h.id).collect::<Vec<_>>(),
@@ -251,19 +269,25 @@ fn query_filters_tags_uri_and_sort() {
 
     // Used 排序：有 last_used 的排前面
     let hits = store
-        .query(&Query {
-            sort: SortKey::Used,
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                sort: SortKey::Used,
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(hits[0].id, b);
 
     // kind 過濾：全部是 Login(0)
     let hits = store
-        .query(&Query {
-            kind: Some(ItemKind::Card),
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                kind: Some(ItemKind::Card),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert!(hits.is_empty());
 
@@ -642,30 +666,165 @@ fn v9_migration_adds_type_node_index_and_fts_rebuild() {
     store.set_plain_type_nodes(iid, None, Some("Chen")).unwrap();
     // 值搜尋命中卡片末四碼（精確）
     let hits = store
-        .query(&Query {
-            value: Some("4242".into()),
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                value: Some("4242".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(hits.len(), 1, "卡片末四碼值搜尋");
     assert_eq!(hits[0].id, cid);
     // 值搜尋命中身分姓氏（前綴）
     let hits = store
-        .query(&Query {
-            value: Some("Che".into()),
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                value: Some("Che".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(hits.len(), 1, "身分姓氏前綴值搜尋");
     assert_eq!(hits[0].id, iid);
     // FTS 重建後文字搜尋仍可用（name 欄命中）＋遷移沒破壞既有 trigger。
     let hits = store
-        .query(&Query {
-            text: Some("2.card".into()),
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                text: Some("2.card".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert!(hits.iter().any(|h| h.id == cid), "FTS 重建後文字搜尋存活");
+}
+
+/// v9→v10 遷移（D1 落盤安全）：password_plain 退役→password_hmac、遷移後
+/// 舊明文不殘留盤上（DROP COLUMN 重寫＋secure_delete）、值搜尋改標籤等值
+/// 語意（識別欄照舊、密碼項需呼叫端給 32 bytes HMAC 標籤）。
+#[test]
+fn v10_migration_password_hmac_scrubs_plaintext() {
+    let (_d, path) = tmp_vault("v10migrate");
+    let row_id = "11111111-1111-1111-1111-111111111111";
+    // 造 v9 舊庫（含 password_plain 明文行），user_version=9。
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta_plain(
+               id TEXT PRIMARY KEY, name TEXT, uris TEXT NOT NULL DEFAULT '[]',
+               kind INTEGER, folder TEXT, org TEXT, favorite INTEGER NOT NULL DEFAULT 0,
+               updated_at TEXT, pending INTEGER NOT NULL DEFAULT 0,
+               username_plain TEXT, password_plain TEXT,
+               fields_plain TEXT NOT NULL DEFAULT '[]', deleted_at TEXT, archived_at TEXT,
+               card_number_tail TEXT, identity_last_name TEXT);
+             CREATE VIRTUAL TABLE meta_fts USING fts5(
+               name, uris, fields_plain, card_number_tail, identity_last_name,
+               content='meta_plain', content_rowid='rowid', tokenize='unicode61');
+             CREATE TABLE ciphers(id TEXT PRIMARY KEY, enc_cipher BLOB NOT NULL, raw BLOB NOT NULL, rev TEXT, deleted INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE overlay(id TEXT PRIMARY KEY, tags TEXT NOT NULL DEFAULT '[]', pinned INTEGER NOT NULL DEFAULT 0, last_used INTEGER, sort_hint REAL);
+             CREATE TABLE outbox(seq INTEGER PRIMARY KEY AUTOINCREMENT, item TEXT NOT NULL, base_rev TEXT, payload BLOB NOT NULL, state TEXT NOT NULL, origin TEXT, created_at INTEGER NOT NULL, leased_at INTEGER);
+             CREATE TABLE audit(seq INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, session TEXT, action TEXT NOT NULL, item TEXT, field TEXT, sens INTEGER NOT NULL, outcome TEXT NOT NULL, bytes_out INTEGER NOT NULL, approval TEXT, epoch INTEGER NOT NULL, prev_hash TEXT NOT NULL, hash TEXT NOT NULL);
+             CREATE TABLE sessions(id TEXT PRIMARY KEY, principal TEXT NOT NULL, grants TEXT NOT NULL, epoch INTEGER NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER);
+             CREATE TABLE push_tokens(token TEXT PRIMARY KEY, platform TEXT NOT NULL, registered_at INTEGER NOT NULL);
+             CREATE TABLE blobs(ref TEXT PRIMARY KEY, size INTEGER NOT NULL, created_at INTEGER NOT NULL);
+             CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE orgs(id TEXT PRIMARY KEY, raw BLOB NOT NULL, name TEXT, key TEXT, public_key TEXT, enc_private_key TEXT, key_verified INTEGER NOT NULL DEFAULT 0, status INTEGER, atype INTEGER);
+             CREATE TABLE collections(id TEXT PRIMARY KEY, org TEXT NOT NULL, name TEXT, raw BLOB NOT NULL);
+             CREATE TABLE cipher_collections(cipher TEXT NOT NULL, collection TEXT NOT NULL, PRIMARY KEY(cipher,collection));
+             CREATE TABLE folders(id TEXT PRIMARY KEY, name TEXT, rev TEXT, raw BLOB NOT NULL);
+             CREATE TABLE attachments(id TEXT PRIMARY KEY, cipher TEXT NOT NULL, file_name TEXT, size INTEGER, size_name TEXT, key TEXT, url TEXT);
+             CREATE TABLE sends(id TEXT PRIMARY KEY, stype INTEGER NOT NULL, name TEXT, key TEXT, access_id TEXT, deletion_date TEXT, expiration_date TEXT, max_access_count INTEGER, access_count INTEGER NOT NULL DEFAULT 0, hide_email INTEGER NOT NULL DEFAULT 0, file_id TEXT, file_name TEXT, file_size INTEGER, rev TEXT, raw BLOB NOT NULL);
+             CREATE TRIGGER meta_plain_ai AFTER INSERT ON meta_plain BEGIN
+               INSERT INTO meta_fts(rowid, name, uris, fields_plain, card_number_tail, identity_last_name) VALUES (new.rowid, new.name, new.uris, new.fields_plain, new.card_number_tail, new.identity_last_name);
+             END;
+             CREATE TRIGGER meta_plain_ad AFTER DELETE ON meta_plain BEGIN
+               INSERT INTO meta_fts(meta_fts, rowid, name, uris, fields_plain, card_number_tail, identity_last_name) VALUES('delete', old.rowid, old.name, old.uris, old.fields_plain, old.card_number_tail, old.identity_last_name);
+             END;
+             CREATE TRIGGER meta_plain_au AFTER UPDATE ON meta_plain BEGIN
+               INSERT INTO meta_fts(meta_fts, rowid, name, uris, fields_plain, card_number_tail, identity_last_name) VALUES('delete', old.rowid, old.name, old.uris, old.fields_plain, old.card_number_tail, old.identity_last_name);
+               INSERT INTO meta_fts(rowid, name, uris, fields_plain, card_number_tail, identity_last_name) VALUES (new.rowid, new.name, new.uris, new.fields_plain, new.card_number_tail, new.identity_last_name);
+             END;
+             INSERT INTO ciphers(id, enc_cipher, raw, rev, deleted) VALUES('11111111-1111-1111-1111-111111111111', x'01', x'01', 'r', 0);
+             INSERT INTO meta_plain(id, name, username_plain, password_plain)
+               VALUES('11111111-1111-1111-1111-111111111111', 'Legacy', 'alice', 'legacy-secret-pw');
+             PRAGMA user_version = 9;",
+        )
+        .unwrap();
+        drop(conn);
+    }
+    let store = Store::open(&path).unwrap();
+    // 欄位形態：password_hmac 在、password_plain 退役；版本收斂 10；secure_delete 開。
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let cols: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('meta_plain')")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(cols.iter().any(|c| c == "password_hmac"), "{cols:?}");
+    assert!(!cols.iter().any(|c| c == "password_plain"), "{cols:?}");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 10);
+    drop(conn);
+    assert!(
+        store.secure_delete_enabled().unwrap(),
+        "D1：連線必開 secure_delete"
+    );
+    // 舊明文不殘留：主檔＋WAL 全檔掃。
+    let mut disk = Vec::new();
+    for suffix in ["", "-wal"] {
+        let p = format!("{}{}", path.display(), suffix);
+        if let Ok(b) = std::fs::read(&p) {
+            disk.extend_from_slice(&b);
+        }
+    }
+    assert!(
+        !disk
+            .windows(b"legacy-secret-pw".len())
+            .any(|w| w == b"legacy-secret-pw"),
+        "v10 遷移後盤上不得殘留舊密碼明文"
+    );
+    let id = Uuid::parse_str(row_id).unwrap();
+    // 未 reindex：密碼項永不命中（NULL 標籤）、識別欄照舊命中。
+    let hits = store
+        .query(
+            &Query {
+                value: Some("alice".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    assert_eq!(hits.len(), 1, "username 識別欄值搜尋不受遷移影響");
+    // 回填 HMAC 標籤後：同標籤命中、它標籤不命中（等值語意）。
+    store
+        .set_plain_secrets(id, Some("alice"), Some(&[7u8; 32]))
+        .unwrap();
+    let hits = store
+        .query(
+            &Query {
+                value: Some("anything".into()),
+                ..Default::default()
+            },
+            Some(&[7u8; 32]),
+        )
+        .unwrap();
+    assert_eq!(hits.len(), 1, "密碼 HMAC 等值命中");
+    let hits = store
+        .query(
+            &Query {
+                value: Some("anything".into()),
+                ..Default::default()
+            },
+            Some(&[8u8; 32]),
+        )
+        .unwrap();
+    assert!(hits.is_empty(), "錯標籤不得命中");
 }
 
 #[test]
@@ -724,10 +883,13 @@ fn query_uri_host_anchoring() {
 
     // 整頁 URL 查詢：精確 host ＋ 子網域都命中，notgithub.com 不得誤入
     let hits = store
-        .query(&Query {
-            uri: Some("https://github.com/login?x=1".into()),
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                uri: Some("https://github.com/login?x=1".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     let ids: Vec<_> = hits.iter().map(|h| h.id).collect();
     assert!(
@@ -737,19 +899,25 @@ fn query_uri_host_anchoring() {
 
     // 子網域後綴命中（gist.github.com ∈ github.com）
     let hits = store
-        .query(&Query {
-            uri: Some("github.com".into()),
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                uri: Some("github.com".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(hits.len(), 2);
 
     // 子字串不再誤命中：notgithub.com 不屬於 github.com
     let hits = store
-        .query(&Query {
-            uri: Some("otgithub.com".into()),
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                uri: Some("otgithub.com".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert!(hits.is_empty());
 }
@@ -831,10 +999,13 @@ fn apply_sync_lands_orgs_collections_and_membership() {
 
     // Query.collection 過濾只回該集合的項目
     let hits = store
-        .query(&Query {
-            collection: Some(Uuid::parse_str(&col).unwrap()),
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                collection: Some(Uuid::parse_str(&col).unwrap()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id, Uuid::parse_str(&shared).unwrap());
@@ -878,10 +1049,13 @@ fn apply_sync_accepts_v2_objects_shape() {
     assert_eq!(store.collection_list().unwrap().len(), 1);
     assert_eq!(
         store
-            .query(&Query {
-                collection: Some(Uuid::parse_str(&col).unwrap()),
-                ..Default::default()
-            })
+            .query(
+                &Query {
+                    collection: Some(Uuid::parse_str(&col).unwrap()),
+                    ..Default::default()
+                },
+                None
+            )
             .unwrap()
             .len(),
         1
@@ -992,10 +1166,13 @@ fn apply_sync_replays_recorded_org_sync() {
         assert!(!store.collection_list().unwrap().is_empty(), "{fixture}");
 
         let hits = store
-            .query(&Query {
-                collection: Some(Uuid::parse_str(col_id).unwrap()),
-                ..Default::default()
-            })
+            .query(
+                &Query {
+                    collection: Some(Uuid::parse_str(col_id).unwrap()),
+                    ..Default::default()
+                },
+                None,
+            )
             .unwrap();
         assert_eq!(hits.len(), 1, "{fixture}");
         assert_eq!(
@@ -1042,10 +1219,13 @@ fn apply_sync_lands_folders_and_folder_filter() {
     );
 
     let hits = store
-        .query(&Query {
-            folder: Some(folder.clone()),
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                folder: Some(folder.clone()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id.to_string(), in_folder);
@@ -1055,18 +1235,24 @@ fn apply_sync_lands_folders_and_folder_filter() {
         "ItemMeta.folder_id 投影自鏡像 folderId"
     );
     let unfiled_hits = store
-        .query(&Query {
-            folder: Some(String::new()),
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                folder: Some(String::new()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(unfiled_hits.len(), 1);
     assert_eq!(unfiled_hits[0].id.to_string(), unfiled);
     let all = store
-        .query(&Query {
-            folder: None,
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                folder: None,
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(all.len(), 2);
 
@@ -1107,20 +1293,26 @@ fn fields_plain_indexes_names_not_values() {
         .unwrap();
     // 欄名進 FTS：搜 "PIN" 命中
     let hits = store
-        .query(&Query {
-            text: Some("PIN".into()),
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                text: Some("PIN".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(hits.len(), 1);
     // hidden 欄值不入索引：值搜（q.value 走 username/password 明文欄）不經
     // fields_plain；欄名欄只由 set_plain_meta 寫入（PlainIndex.field_names
     // 端不收值，見 bw-vault 測試）。
     let by_value = store
-        .query(&Query {
-            value: Some("PIN".into()),
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                value: Some("PIN".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert!(by_value.is_empty());
 }
@@ -1142,10 +1334,13 @@ fn trash_tristate_and_purge() {
     // None 與 Some(false)：只列未刪（現行預設不回歸）
     for deleted in [None, Some(false)] {
         let hits = store
-            .query(&Query {
-                deleted,
-                ..Default::default()
-            })
+            .query(
+                &Query {
+                    deleted,
+                    ..Default::default()
+                },
+                None,
+            )
             .unwrap();
         assert_eq!(hits.len(), 1, "deleted={deleted:?}");
         assert_eq!(hits[0].id.to_string(), live);
@@ -1153,10 +1348,13 @@ fn trash_tristate_and_purge() {
     }
     // Some(true)：垃圾桶，帶伺服器軟刪時刻
     let trash = store
-        .query(&Query {
-            deleted: Some(true),
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                deleted: Some(true),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(trash.len(), 1);
     assert_eq!(trash[0].id.to_string(), gone);
@@ -1200,10 +1398,13 @@ fn trash_tristate_and_purge() {
     );
     assert_eq!(
         store
-            .query(&Query {
-                deleted: Some(true),
-                ..Default::default()
-            })
+            .query(
+                &Query {
+                    deleted: Some(true),
+                    ..Default::default()
+                },
+                None
+            )
             .unwrap()
             .len(),
         0
@@ -1332,10 +1533,13 @@ fn archived_tristate_projection_and_filter() {
     // 預設與 Some(false)：主列表排除已封存（使用者實錄缺陷的正解）
     for archived_q in [None, Some(false)] {
         let hits = store
-            .query(&Query {
-                archived: archived_q,
-                ..Default::default()
-            })
+            .query(
+                &Query {
+                    archived: archived_q,
+                    ..Default::default()
+                },
+                None,
+            )
             .unwrap();
         assert_eq!(hits.len(), 1, "archived={archived_q:?}");
         assert_eq!(hits[0].id.to_string(), live);
@@ -1343,10 +1547,13 @@ fn archived_tristate_projection_and_filter() {
     }
     // Some(true)：獨立檢視，帶封存時刻
     let only = store
-        .query(&Query {
-            archived: Some(true),
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                archived: Some(true),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(only.len(), 1);
     assert_eq!(only[0].id.to_string(), archived);
@@ -1356,11 +1563,14 @@ fn archived_tristate_projection_and_filter() {
     );
     // 與 deleted 正交合成：封存＋軟刪＝只命中 archived×true + deleted×true
     let mixed = store
-        .query(&Query {
-            archived: Some(true),
-            deleted: Some(true),
-            ..Default::default()
-        })
+        .query(
+            &Query {
+                archived: Some(true),
+                deleted: Some(true),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
     assert!(mixed.is_empty());
     // 回填範圍單源：`all_ids` 不分三態全覆蓋（列表 query 組合枚舉會漏列，
@@ -1400,4 +1610,97 @@ fn all_ids_covers_every_state() {
     let mut want = [live, arch, trash, both];
     want.sort();
     assert_eq!(ids, want.to_vec());
+}
+
+/// D1 perf 框（交錯 5 輪，release 跑）：556 筆 reindex 增量＝「明文寫入」
+/// vs「HMAC 派生＋標籤寫入」兩條回填路徑同庫交錯計時，另列值搜尋（帶標籤）
+/// 與純列表查詢的單次延遲。跑法：
+/// `cargo test --release -p bw-store --test store -- --ignored --nocapture d1_reindex`
+#[test]
+#[ignore = "perf 框：需 --release 與 --ignored"]
+fn d1_reindex_perf_556_interleaved() {
+    const N: usize = 556;
+    const ROUNDS: usize = 5;
+    let (_d, path) = tmp_vault("d1perf");
+    let store = Store::open(&path).unwrap();
+    let ciphers: Vec<Value> = (0..N)
+        .map(|i| {
+            cipher(
+                &Uuid::new_v4().to_string(),
+                &format!("perf-{i}"),
+                "2026-11-17T00:00:00.000Z",
+                false,
+            )
+        })
+        .collect();
+    store.apply_sync(&json!({ "ciphers": ciphers })).unwrap();
+    let ids = store.all_ids().unwrap();
+    assert_eq!(ids.len(), N);
+    let user_key = vec![3u8; 64];
+    let index_key = bw_crypto::derive_index_key(&user_key);
+    let rows: Vec<(Uuid, String, String)> = ids
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(i, id)| (id, format!("user-{i}"), format!("pw-{i}-reused")))
+        .collect();
+    let mut plain_ms = Vec::new();
+    let mut hmac_ms = Vec::new();
+    let mut value_q_us = Vec::new();
+    let mut list_q_us = Vec::new();
+    for _ in 0..ROUNDS {
+        // 基線：值明文直接入欄（v9 形態的寫入量）。
+        let t0 = std::time::Instant::now();
+        for (id, u, p) in &rows {
+            store
+                .set_plain_secrets(*id, Some(u), Some(p.as_bytes()))
+                .unwrap();
+        }
+        plain_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+        // D1：每筆多一次 HMAC-SHA256（派生金鑰每批一次，不計入迴圈）。
+        let t1 = std::time::Instant::now();
+        for (id, u, p) in &rows {
+            let tag = bw_crypto::index_value_tag(&index_key, p.as_bytes());
+            store.set_plain_secrets(*id, Some(u), Some(&tag)).unwrap();
+        }
+        hmac_ms.push(t1.elapsed().as_secs_f64() * 1000.0);
+        // 讀側：值搜尋（帶標籤）與純列表單次延遲。
+        let probe = rows[N / 2].2.clone();
+        let tag = bw_crypto::index_value_tag(&index_key, probe.as_bytes());
+        let t2 = std::time::Instant::now();
+        let hits = store
+            .query(
+                &Query {
+                    value: Some(probe),
+                    ..Default::default()
+                },
+                Some(&tag),
+            )
+            .unwrap();
+        value_q_us.push(t2.elapsed().as_secs_f64() * 1000.0 * 1000.0);
+        assert_eq!(hits.len(), 1, "標籤值搜尋必精確命中");
+        let t3 = std::time::Instant::now();
+        let listed = store
+            .query(
+                &Query {
+                    limit: u32::MAX,
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        list_q_us.push(t3.elapsed().as_secs_f64() * 1000.0 * 1000.0);
+        assert_eq!(listed.len(), N);
+    }
+    let fmt = |v: &Vec<f64>| {
+        v.iter()
+            .map(|x| format!("{x:.2}"))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    println!("D1 perf（{N} 筆，{ROUNDS} 輪交錯，release）");
+    println!("  明文回填 ms    : {}", fmt(&plain_ms));
+    println!("  HMAC 回填 ms   : {}", fmt(&hmac_ms));
+    println!("  值搜尋 us      : {}", fmt(&value_q_us));
+    println!("  列表 us        : {}", fmt(&list_q_us));
 }

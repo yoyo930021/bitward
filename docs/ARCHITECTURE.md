@@ -333,7 +333,7 @@ Transport 總表：
 | 缺口 | 負責模組 | 階段 | 交付 |
 |---|---|---|---|
 | 自動化（無 webhooks、CLI 綁主密碼、無 scope/audit、MCP 薄殼） | bw-agent、bw-btp（事件流+Pull）、bitward-mcp | **P3**（基礎共享解鎖在 P1 即成立） | 常駐 daemon 免 env var；事件流取代輪詢；enrollment/grant/budget/audit；`Run` 注入+出口淨化；TOTP 出碼不出 seed |
-| 資料管理（tags 492👍、排序 494👍、去重合併 392👍、unshare/批次 322👍、值搜尋 119👍） | bw-store（overlay+FTS5）、bw-vault、bw-sync | **P4**（overlay 表結構 P1 就在） | `LocalOverlay` tags（協定無此欄位，本地權威；官方上路後雙向合併）；`find_duplicates`/`merge` 在 daemon 內掃描只回 id；`unshare` 避開 bw move bug（#11689）；值搜尋走本地明文索引，不上傳 |
+| 資料管理（tags 492👍、排序 494👍、去重合併 392👍、unshare/批次 322👍、值搜尋 119👍） | bw-store（overlay+FTS5）、bw-vault、bw-sync | **P4**（overlay 表結構 P1 就在） | `LocalOverlay` tags（協定無此欄位，本地權威；官方上路後雙向合併）；`find_duplicates`/`merge` 在 daemon 內掃描只回 id；`unshare` 避開 bw move bug（#11689）；值搜尋走本地索引（D1 落盤安全：密碼欄存 HMAC 標籤、識別欄留明文，見 `crates/bw-store/NOTES.md`），不上傳 |
 | auto-type 與共享解鎖狀態（FR 158 719👍、FR 1635） | bw-fill（CGEvent 引擎+lease）、bw-keys（epoch 廣播） | **P4**（共享解鎖=P1 架構紅利） | epoch 訂閱讓本裝置解鎖 → 同機 CLI/extension/GUI 同時可用（FR 1635 的範圍就是裝置內；跨裝置各自解鎖，語意見 §1.1）；auto-type 由獲 TCC 授權的 GUI 執行、daemon 只給 ≤5s 單次 lease；剪貼簿不留痕（治 #2621/#2742） |
 | 離線可寫入（FR 107、離線解鎖 #19055） | bw-store.Outbox、bw-sync、bw-keys | **P2** | 寫入 API 從第一天就不設計成可失敗（Queued 語意）；DeviceAssertion 離線解鎖；衝突收件匣 |
 | macOS 系統級密碼（FR 93723；官方只有 passkey provider） | BitwardProvider.appex、identity store 寫入者（daemon 內）、XPC binding | **P5** | 能力宣告齊四項（ProvidesPasswords/Passkeys/OneTimeCodes/TextToInsert，缺項系統不列出）+ entitlement 雙掛；thin 路線避開 extension Argon2 記憶體上限；`invalidate(epoch)` 處理上鎖後系統快取 |

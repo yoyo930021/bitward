@@ -167,17 +167,20 @@ impl Store {
         Ok(())
     }
 
-    /// 值搜尋明文索引（FR 11941）。僅解鎖回填時呼叫；0600 檔承載（§2.7 R3）。
+    /// 值搜尋索引回填（FR 11941 → D1 落盤安全，稽核 2026-11-16）。僅解鎖
+    /// 回填時呼叫。`username` 屬識別欄留明文（理由見 NOTES.md）；密碼不傳
+    /// 明文——呼叫端以 `bw_crypto::index_value_tag` 換算 32 bytes HMAC 標籤
+    /// 送進來，本層只存不解釋（同 set_plain_meta 紀律：bw-store 不碰金鑰）。
     pub fn set_plain_secrets(
         &self,
         id: ItemId,
         username: Option<&str>,
-        password: Option<&str>,
+        password_hmac: Option<&[u8]>,
     ) -> StoreResult<()> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute(
-            "UPDATE meta_plain SET username_plain = ?2, password_plain = ?3 WHERE id = ?1",
-            rusqlite::params![id.to_string(), username, password],
+            "UPDATE meta_plain SET username_plain = ?2, password_hmac = ?3 WHERE id = ?1",
+            rusqlite::params![id.to_string(), username, password_hmac],
         )?;
         Ok(())
     }

@@ -43,11 +43,14 @@ impl Hub {
     pub fn duplicates(&self) -> Result<Response, WtpError> {
         let metas = self
             .store
-            .query(&bw_proto::Query {
-                kind: Some(bw_proto::ItemKind::Login),
-                limit: u32::MAX,
-                ..Default::default()
-            })
+            .query(
+                &bw_proto::Query {
+                    kind: Some(bw_proto::ItemKind::Login),
+                    limit: u32::MAX,
+                    ..Default::default()
+                },
+                None,
+            )
             .map_err(denied)?;
         let mut clusters: std::collections::BTreeMap<(String, String), Vec<ItemId>> =
             Default::default();
@@ -115,11 +118,14 @@ impl Hub {
         self.require_unlocked()?;
         let metas = self
             .store
-            .query(&bw_proto::Query {
-                kind: Some(bw_proto::ItemKind::Login),
-                limit: u32::MAX,
-                ..Default::default()
-            })
+            .query(
+                &bw_proto::Query {
+                    kind: Some(bw_proto::ItemKind::Login),
+                    limit: u32::MAX,
+                    ..Default::default()
+                },
+                None,
+            )
             .map_err(denied)?;
         let org_keys = self.org_key_map();
         let mut rows: Vec<bw_proto::WeakPasswordEntry> = Vec::new();
@@ -405,11 +411,14 @@ impl Hub {
         self.require_unlocked()?;
         let items = self
             .store
-            .query(&bw_proto::Query {
-                folder: Some(id.to_string()),
-                limit: u32::MAX,
-                ..Default::default()
-            })
+            .query(
+                &bw_proto::Query {
+                    folder: Some(id.to_string()),
+                    limit: u32::MAX,
+                    ..Default::default()
+                },
+                None,
+            )
             .map_err(denied)?;
         for m in items {
             self.write_patch(
@@ -454,7 +463,10 @@ impl Hub {
             id,
             op: bw_proto::ItemChangeOp::Purged,
         });
-        Ok(Response::Purged(bw_proto::PurgeReport { id, mirror_rows: n }))
+        Ok(Response::Purged(bw_proto::PurgeReport {
+            id,
+            mirror_rows: n,
+        }))
     }
 
     /// 原子批次匯入（`VaultCall::Import`；語意見 proto 端註解）：

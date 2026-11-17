@@ -64,6 +64,11 @@ impl Hub {
             .map_err(crate::hub::denied)?;
         *self.settings.lock().expect("settings mutex poisoned") = s;
         self.apply_timeout_policy();
+        // D2（稽核 2026-11-16）：重啟行為開關同步封裝閘——自動解鎖 opt-in
+        // 才允許封存金鑰落盤；轉回 strict 即清既有封存（鎖定即毀鑰語意）。
+        let sealing = self.keystore.wrap_strength() == bw_keys::WrapStrength::BiometricBound
+            || !s.lock_on_sleep_restart;
+        self.machine.set_sealing(sealing);
         Ok(Response::Ok)
     }
 
