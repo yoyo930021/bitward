@@ -446,6 +446,12 @@ pub enum Cmd {
     /// 本機設定（macOS 設定面）：右欄視角、讀取、改即存。
     OpenSettings,
     FetchSettings,
+    /// E5 多帳號：槽清單重讀（daemon `Auth:AccountList`，僅本機 Interactive 受理）、
+    /// 回包落地、切槽。切換＝重新 Enroll 到該槽，鎖態由新 Welcome 帶回，
+    /// 該槽鎖著就自然進既有的解鎖流（語意同 `RequestLock` 的 re-enroll）。
+    AccountRefresh,
+    AccountsLoaded(Result<Vec<bw_proto::AccountSummary>, String>),
+    AccountSwitch(String),
     /// 跨機中樞（PR6-E3b）：清單重讀（純檔案鏡）、配對加入、連線切換、
     /// 預設指標與撤銷。整個分節只有 HubJoin 走網路（一次性 TLS 握手）。
     HubRefresh,
@@ -1305,6 +1311,18 @@ pub fn totp_section_shown(code: Option<&str>, err: Option<&str>) -> bool {
     code.is_some() || err.is_some()
 }
 
+/// 本連線綁定的槽名（純函數測點）：Session 有表態就用它；沒表態＝daemon 的
+/// 預設槽（`accounts/.default`）；清單也缺席時回空字串（不吹一個不確定的名字）。
+pub fn active_slot_of(rows: &[bw_proto::AccountSummary], bound: Option<&str>) -> String {
+    if let Some(b) = bound {
+        return b.to_owned();
+    }
+    rows.iter()
+        .find(|r| r.is_default)
+        .map(|r| r.profile.clone())
+        .unwrap_or_default()
+}
+
 /// 側欄帳號列的顯示態（純函數，單測點）：needs_reauth 優先（憑證失效
 /// 時即使仍解鎖也要人看見）；未登入次之；其餘為已登入（email 可知則示）。
 #[derive(Debug, PartialEq, Eq)]
@@ -1429,6 +1447,10 @@ pub struct AppCore {
     /// 跨機中樞（PR6-E3b）：`remotes/` 檔案鏡＋配對表單＋進行旗。
     /// 清單/預設/撤銷是純檔案操作（reduce 直落）；只有 HubJoin 派 worker。
     pub hub_rows: Signal<Arc<Vec<hub::HubRow>>>,
+    /// E5 帳號槽鏡：daemon `AccountList` 回包＋本連線綁定的槽名。
+    /// 與 `hub_rows` 正交：hub 是「連哪台中樞」，槽是「那台中樞裡哪個帳號」。
+    pub accounts: Signal<Arc<Vec<bw_proto::AccountSummary>>>,
+    pub active_account: Signal<String>,
     pub hub_busy: Signal<bool>,
     pub hub_error: Signal<Option<String>>,
     pub hub_form: HubFormFields,
@@ -1560,6 +1582,8 @@ impl AppCore {
             theme_mode: signal(Appearance::System),
             settings: signal(bw_proto::Settings::default()),
             hub_rows: signal(Arc::new(Vec::new())),
+            accounts: signal(Arc::new(Vec::new())),
+            active_account: signal(String::new()),
             hub_busy: signal(false),
             hub_error: signal(None),
             hub_form: HubFormFields {
@@ -1791,6 +1815,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                 hub::touch_last_ok(&crate::data_dir(), &p);
             }
             core.send(Cmd::HubRefresh);
+            core.send(Cmd::AccountRefresh);
             core.send(Cmd::FetchFolders);
             fetch_list(core);
             // 設定鏡先行回填（剪貼簿清除閘在複製鈕、鎖定清搜尋閘在 StateUpdated，
@@ -3087,6 +3112,55 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         Cmd::SettingsLoaded(v) => {
             core.settle();
             core.settings.set(v);
+        }
+        // —— 帳號槽（PR6-E5）——
+        Cmd::AccountRefresh => {
+            // 槽拓撲是本機 daemon 的狀態；跨機 device session 不受理（同
+            // FetchSettings 的 Interactive 閘），不發免得多一條紅條。
+            if core.session.active_profile().is_some() {
+                return;
+            }
+            core.ipc_quiet(|s| match s.call(&Call::Auth(AuthCall::AccountList)) {
+                Ok(Response::Accounts(rows)) => Cmd::AccountsLoaded(Ok(rows)),
+                Ok(other) => {
+                    Cmd::AccountsLoaded(Err(format!("AccountList 回應形態不符：{other:?}")))
+                }
+                Err(e) => Cmd::AccountsLoaded(Err(e.display())),
+            });
+        }
+        Cmd::AccountsLoaded(Ok(rows)) => {
+            let bound = core.session.account();
+            let active = active_slot_of(&rows, bound.as_deref());
+            let row = rows.iter().find(|r| r.profile == active).cloned();
+            core.accounts.set(Arc::new(rows));
+            core.active_account.set(active);
+            // 切槽後帳號列要立刻換人：email/server 以槽鏡為準回填（Status 回包
+            // 同值，兩路徑收斂到同一顯示）。
+            if let Some(r) = row {
+                core.acct_email.set(r.email);
+                core.acct_server.set(r.server);
+            }
+        }
+        Cmd::AccountsLoaded(Err(_)) => {
+            // 舊 daemon 不識 AccountList：槽鏡缺席＝單帳號形態照舊（誠實不動現值，
+            // 不閃紅條——這是相容路徑不是使用者錯誤）。
+        }
+        Cmd::AccountSwitch(slot) => {
+            core.session.set_account(Some(slot));
+            // 舊帳號的所有現值作廢：重握手（以新槽 Enroll）→ 新 Welcome 鎖態 →
+            // refetch 清單。該槽鎖著則鎖屏自然出現（同 RequestLock 的 re-enroll）。
+            core.ipc(|s| match s.ensure() {
+                Ok(state) => Cmd::StateUpdated {
+                    state,
+                    refetch: true,
+                    reauth: false,
+                    email: None,
+                    server: None,
+                    biometric: None,
+                },
+                Err(e) => Cmd::Failed { err: e.display() },
+            });
+            core.send(Cmd::AccountRefresh);
         }
         // —— 跨機中樞（PR6-E3b）——
         // 清單／預設／撤銷＝純本機檔案操作（CLI `hub ls` 同語意：不連 daemon，
@@ -4918,6 +4992,35 @@ mod tests {
         // 全未支援（U2f=4、未知 99）：退回首個列出的（選了給 daemon 可懂錯誤，不沉默）。
         assert_eq!(default_provider(&[info(4), info(99)]), Some(4));
         assert_eq!(default_provider(&[]), None);
+    }
+
+    fn slot(profile: &str, default: bool) -> bw_proto::AccountSummary {
+        bw_proto::AccountSummary {
+            profile: profile.into(),
+            email: Some(format!("{profile}@bitward.test")),
+            server: Some("http://127.0.0.1:1".into()),
+            state: UnlockStateView::SignedOut,
+            epoch: 0,
+            items: 0,
+            is_default: default,
+            has_vault: true,
+        }
+    }
+
+    #[test]
+    fn active_slot_prefers_bound_then_daemon_default() {
+        let rows = vec![slot("work", true), slot("personal", false)];
+        // 使用者在切換器上按過＝Session 有表態，一律以它為準（預設指標動搖不了本連線）。
+        assert_eq!(active_slot_of(&rows, Some("personal")), "personal");
+        // 沒表態＝落 daemon 的預設槽。
+        assert_eq!(active_slot_of(&rows, None), "work");
+        // 舊 daemon 不識 AccountList（清單缺席）也不吹名字。
+        assert_eq!(active_slot_of(&[], None), "");
+        assert_eq!(active_slot_of(&[slot("default", false)], None), "");
+        assert_eq!(
+            active_slot_of(&[slot("default", false)], Some("default")),
+            "default"
+        );
     }
 
     #[test]

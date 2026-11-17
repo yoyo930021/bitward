@@ -240,6 +240,8 @@ pub fn App() -> impl IntoElement {
             shots::script_cand(dir, core.clone());
         } else if std::env::var_os("NSH_GUI_SHOTS_HUB").is_some() {
             shots::script_hub(dir, core.clone());
+        } else if std::env::var_os("NSH_GUI_SHOTS_ACCOUNT").is_some() {
+            shots::script_account(dir, core.clone());
         } else if std::env::var_os("NSH_GUI_SHOTS_HUBJOIN").is_some() {
             shots::script_hub_join(dir, core.clone());
         } else {
@@ -615,6 +617,7 @@ fn sidebar(core: AppCore) -> View {
                 .px_1()
                 .pb_3()
                 .child(account_row(sync_core.clone()))
+                .child(account_switcher(sync_core.clone()))
                 .child(side_text_button("立即同步", move || {
                     sync_core.send(Cmd::TriggerSync)
                 })),
@@ -1391,6 +1394,62 @@ fn account_row(core: AppCore) -> impl IntoElement {
                 c.child(sync_line(sync_email.clone()))
             }
         }
+    })
+}
+
+/// 側欄帳號切換器（PR6-E5）：兩槽以上才出現（單帳號裝機零變化）。每列一槽，
+/// 當前綁定槽高亮、daemon 預設槽（`accounts/.default`）帶 `*`。點擊＝以該槽
+/// 重新 Enroll（`btp::Session::set_account`），該槽鎖著則鎖屏自然接手。
+fn account_switcher(core: AppCore) -> impl IntoElement {
+    let cond = core.clone();
+    dynamic(move || {
+        let rows = cond.accounts.get();
+        if rows.len() < 2 {
+            return view();
+        }
+        let active = cond.active_account.get();
+        let mut col = view().flex_col().gap_0p5();
+        for r in rows.iter() {
+            let press = cond.clone();
+            let name = r.profile.clone();
+            let label = format!(
+                "{}{} · {}",
+                if r.is_default { "* " } else { "" },
+                r.profile,
+                r.email.as_deref().unwrap_or("未落帳號")
+            );
+            let is_active = r.profile == active;
+            col = col.child(
+                view()
+                    .h(px(20.0))
+                    .px_2()
+                    .rounded(px(theme::RADIUS_CONTROL))
+                    .flex_row()
+                    .items_center()
+                    .cursor_pointer()
+                    .transition_colors()
+                    .duration(120.0)
+                    .bg(move || {
+                        if is_active {
+                            theme::ACCENT.opacity(0.10)
+                        } else {
+                            AdaptiveColor::TRANSPARENT
+                        }
+                    })
+                    .on_press(move || press.send(Cmd::AccountSwitch(name.clone())))
+                    .child(
+                        text(label)
+                            .text_size(px(11.5))
+                            .text_color(if is_active {
+                                theme::TEXT_PRIMARY
+                            } else {
+                                theme::TEXT_SECONDARY
+                            })
+                            .number_of_lines(1),
+                    ),
+            );
+        }
+        col
     })
 }
 

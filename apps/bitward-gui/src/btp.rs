@@ -110,6 +110,9 @@ impl From<WtpError> for BtpError {
 /// worker 執行緒直接共用，不需額外排隊層。
 pub struct Session {
     transport: Arc<Mutex<Transport>>,
+    /// E5 帳號槽（`accounts/<profile>`）。None＝交 daemon 的預設槽指標。
+    /// 與 `transport` 正交：跨機 hub 是「連哪台中樞」，帳號槽是「那台中樞裡哪個帳號」。
+    account: Arc<Mutex<Option<String>>>,
     /// 傳輸切換計數：快取 conn 記開連世代，世代不符即重開——切換恰好落在
     /// 開連中途時，舊目標連線不會永久霸佔快取。
     switch_gen: Arc<AtomicU64>,
@@ -190,6 +193,7 @@ impl Session {
     fn with_transport(transport: Transport) -> Self {
         Session {
             transport: Arc::new(Mutex::new(transport)),
+            account: Arc::new(Mutex::new(None)),
             switch_gen: Arc::new(AtomicU64::new(0)),
             conn: Mutex::new(None),
             listen_h: Mutex::new(None),
@@ -202,6 +206,7 @@ impl Session {
     pub fn fork(&self) -> Session {
         Session {
             transport: self.transport.clone(),
+            account: self.account.clone(),
             switch_gen: self.switch_gen.clone(),
             conn: Mutex::new(None),
             listen_h: Mutex::new(None),
@@ -249,6 +254,26 @@ impl Session {
         }
     }
 
+    /// 目前連線綁定的帳號槽（E5；None＝daemon 預設槽）。
+    pub fn account(&self) -> Option<String> {
+        self.account.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// 切帳號槽（頂部帳號列的切換器）：換槽、進世代、丟快取連線、中斷事件幫浦
+    /// ——下一拍所有連線都以新槽重新 Enroll。語意同 `set_transport`，兩者正交。
+    pub fn set_account(&self, name: Option<String>) {
+        if let Ok(mut guard) = self.account.lock() {
+            *guard = name;
+        }
+        self.switch_gen.fetch_add(1, Ordering::Relaxed);
+        self.drop_conn();
+        if let Ok(mut h) = self.listen_h.lock()
+            && let Some(handle) = h.take()
+        {
+            handle.shutdown();
+        }
+    }
+
     /// 丟掉目前連線（下次 ensure/call 重連重握手）。
     pub fn drop_conn(&self) {
         if let Ok(mut guard) = self.conn.lock() {
@@ -275,7 +300,7 @@ impl Session {
                 .lock()
                 .map_err(|_| BtpError::Transport("transport mutex poisoned".into()))?
                 .clone();
-            let conn = Conn::open(transport, sg, Vec::new(), Some(IO_TIMEOUT))?;
+            let conn = Conn::open(transport, sg, Vec::new(), Some(IO_TIMEOUT), self.account())?;
             // 開連期間被切換：舊目標連線直接丟棄，下一輪以新世代重開。
             if conn.switch_gen == self.switch_gen.load(Ordering::Relaxed) {
                 let state = conn.welcome_state.clone();
@@ -336,7 +361,7 @@ impl Session {
             .map_err(|_| BtpError::Transport("transport mutex poisoned".into()))?
             .clone();
         let sg = self.switch_gen.load(Ordering::Relaxed);
-        let mut conn = Conn::open(transport, sg, wants.to_vec(), None)?;
+        let mut conn = Conn::open(transport, sg, wants.to_vec(), None, self.account())?;
         // 註冊可關閉句柄後才進讀迴圈；離開（任何路徑）即摘除。
         if let Some(handle) = conn.stream_handle()
             && let Ok(mut slot) = self.listen_h.lock()
@@ -466,6 +491,7 @@ impl Conn {
         switch_gen: u64,
         wants: Vec<EventTopic>,
         read_timeout: Option<Duration>,
+        account: Option<String>,
     ) -> Result<Conn, BtpError> {
         let mut stream = match &transport {
             // 呼叫連線不吃推播（wants 空）：事件走 `Session::listen` 專用連線，
@@ -490,7 +516,7 @@ impl Conn {
                 pairing: uuid::Uuid::new_v4().to_string(),
                 display_name: format!("gui:{}", std::process::id()),
                 pair_code: None,
-                profile: None,
+                profile: account,
             },
             Transport::Tls(t) => Auth::Session {
                 token: t.token.clone(),

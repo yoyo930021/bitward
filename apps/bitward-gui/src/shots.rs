@@ -1637,6 +1637,71 @@ pub fn script_hub(dir: PathBuf, core: AppCore) {
     });
 }
 
+/// PR6-E5 帳號切換器 e2e 腿（`NSH_GUI_SHOTS=<dir> NSH_GUI_SHOTS_ACCOUNT=1`）：
+/// 前提＝本機態已連著一個開了兩槽的 daemon（`dev/e2e/multiaccount.sh` 同形態），
+/// 兩槽各自的 email 不同。斷言鏈：槽鏡兩列＋恰一預設標記 → 按切換器換槽 →
+/// 帳號列換人（email 隨槽）且清單筆數隨槽 → 切回原槽資料原樣回來。
+/// 鎖態不在斷言內（自動鎖定政策兩槽各自生效，時序不適合定態截圖）。
+pub fn script_account(dir: PathBuf, core: AppCore) {
+    let c = core.clone();
+    let d = dir.clone();
+    at(3500, move || {
+        assert_eq!(c.phase.get(), Phase::Ready, "本機態前提：已連著 daemon");
+        let rows = c.accounts.get();
+        assert!(
+            rows.iter().any(|r| r.profile == "personal")
+                && rows.iter().any(|r| r.profile == "work"),
+            "槽鏡應含兩槽：{rows:?}"
+        );
+        assert_eq!(
+            rows.iter().filter(|r| r.is_default).count(),
+            1,
+            "恰一個預設槽標記：{rows:?}"
+        );
+        assert!(!c.active_account.get().is_empty(), "應回報綁定槽名");
+        capture(&d, "acct-1-two-slots.png");
+    });
+    let c = core.clone();
+    at(4200, move || {
+        let here = c.active_account.get();
+        let other = if here == "work" { "personal" } else { "work" };
+        c.send(Cmd::AccountSwitch(other.to_owned()));
+    });
+    let c = core.clone();
+    let d2 = dir.clone();
+    at(7000, move || {
+        let here = c.active_account.get();
+        assert!(
+            here == "work" || here == "personal",
+            "換槽後綁定名在位：{here}"
+        );
+        let rows = c.accounts.get();
+        let want = rows.iter().find(|r| r.profile == here).expect("槽鏡有這列");
+        assert_eq!(
+            c.acct_email.get().as_deref(),
+            want.email.as_deref(),
+            "帳號列 email 必須隨槽（切換器切的是帳號不是連線）"
+        );
+        assert_eq!(
+            c.items.get().len(),
+            want.items as usize,
+            "清單筆數隨槽（兩庫互不污染）"
+        );
+        capture(&d2, "acct-2-switched.png");
+    });
+    let c = core.clone();
+    at(7600, move || {
+        let here = c.active_account.get();
+        let back = if here == "work" { "personal" } else { "work" };
+        c.send(Cmd::AccountSwitch(back.to_owned()));
+    });
+    let d3 = dir.clone();
+    at(10500, move || {
+        capture(&d3, "acct-3-back.png");
+        quit();
+    });
+}
+
 /// PR6-E3b 配對加入腿（`NSH_GUI_SHOTS_HUBJOIN=1`）：前提＝本機態已連著 daemon、
 /// env `E3B_JOIN_URL/PIN/CODE` 帶一發未消耗的配對碼（e2e 側先 `pair start`）。
 /// 斷言鏈：設定頁填表→`HubJoin`→成功自動切 TLS 達 Ready→registry 鏡含新
