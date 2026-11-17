@@ -1076,8 +1076,12 @@ async fn run() -> Result<(), String> {
     }
     // E5：`account use` 換的是「不帶 --profile 時落哪個槽」，而快取的 token 已綁
     // 舊槽——不丟就會讓人按了切換卻還看到舊帳號（本輪回包已是新預設，照樣報）。
-    if matches!(args.cmd, Cmd::Account { cmd: AccountCmd::Use { .. } })
-        && matches!(reply, Ok(Response::Accounts(_)))
+    if matches!(
+        args.cmd,
+        Cmd::Account {
+            cmd: AccountCmd::Use { .. }
+        }
+    ) && matches!(reply, Ok(Response::Accounts(_)))
     {
         let _ = std::fs::remove_file(cli_session_file_for(&data_dir, None));
     }

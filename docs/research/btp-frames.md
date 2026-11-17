@@ -48,6 +48,8 @@ thin 端 std 適配 `apps/bitward-gui/src/btp.rs`，兩側都從同一模組取�
 |---|---|---|
 | 舊客戶端（Hello 不帶 `formats`） | `serde(default)` → 空偏好 → 選 `Json` | 舊端只實作 JSON |
 | 舊 daemon（Welcome 不帶 `format`） | `serde(default)` → `Json` | 同上 |
+| 舊客戶端（`Enroll` 不帶 `profile`、`Login` 不帶 `profile`/`two_factor`） | `serde(default)` → None → 落 daemon 的預設帳號槽（E5 單帳號行為） | 握手兩幀恆 JSON，缺欄寬容真生效（`hello-legacy-no-formats` 釘解碼路徑） |
+| 舊 daemon（`Welcome` 不帶 `profile`） | `serde(default)` → 空字串 → thin 端視為單帳號 | `welcome-legacy-no-format` 釘解碼路徑 |
 | 新↔新 | 客戶端偏好 `[Postcard, Json]` → 選 `Postcard` | 本檔 §2 |
 | 嚴格 postcard 客戶端 ↔ 只支援 JSON 的 daemon | `select_format` 回 None → 誠實拒（`Error` 幀） | 不得假成功降階 |
 | peer `proto > PROTO_VERSION` | 既有 ceiling 拒（`WtpError::Unsupported`／`Error` 幀） | §2.6 協定漂移防禦 |
@@ -74,23 +76,23 @@ postcard 是**索引**編碼，故協定型別的 variant/欄位只能**置尾�
     "name": "hello-negotiates-formats",
     "dir": "client",
     "format": "json",
-    "msg": {"Hello": {"version": 1, "auth": {"Enroll": {"pairing": "7c9e6679-7425-40de-944b-e07fc1f90ae7", "display_name": "cli:4242", "pair_code": null}}, "wants": ["VaultChanged"], "formats": ["Postcard", "Json"]}},
-    "frame": "be0000007b2248656c6c6f223a7b2276657273696f6e223a312c2261757468223a7b22456e726f6c6c223a7b2270616972696e67223a2237633965363637392d373432352d343064652d393434622d653037666331663930616537222c22646973706c61795f6e616d65223a22636c693a34323432222c22706169725f636f6465223a6e756c6c7d7d2c2277616e7473223a5b225661756c744368616e676564225d2c22666f726d617473223a5b22506f737463617264222c224a736f6e225d7d7d"
+    "msg": {"Hello": {"version": 1, "auth": {"Enroll": {"pairing": "7c9e6679-7425-40de-944b-e07fc1f90ae7", "display_name": "cli:4242", "pair_code": null, "profile": null}}, "wants": ["VaultChanged"], "formats": ["Postcard", "Json"]}},
+    "frame": "cd0000007b2248656c6c6f223a7b2276657273696f6e223a312c2261757468223a7b22456e726f6c6c223a7b2270616972696e67223a2237633965363637392d373432352d343064652d393434622d653037666331663930616537222c22646973706c61795f6e616d65223a22636c693a34323432222c22706169725f636f6465223a6e756c6c2c2270726f66696c65223a6e756c6c7d7d2c2277616e7473223a5b225661756c744368616e676564225d2c22666f726d617473223a5b22506f737463617264222c224a736f6e225d7d7d"
   },
   {
     "name": "hello-legacy-no-formats",
     "dir": "client",
     "format": "json",
     "decode_only": true,
-    "msg": {"Hello": {"version": 1, "auth": {"Enroll": {"pairing": "7c9e6679-7425-40de-944b-e07fc1f90ae7", "display_name": "cli:4242", "pair_code": null}}, "wants": []}},
+    "msg": {"Hello": {"version": 1, "auth": {"Enroll": {"pairing": "7c9e6679-7425-40de-944b-e07fc1f90ae7", "display_name": "cli:4242", "pair_code": null, "profile": null}}, "wants": []}},
     "frame": "920000007b2248656c6c6f223a7b2261757468223a7b22456e726f6c6c223a7b22646973706c61795f6e616d65223a22636c693a34323432222c22706169725f636f6465223a6e756c6c2c2270616972696e67223a2237633965363637392d373432352d343064652d393434622d653037666331663930616537227d7d2c2276657273696f6e223a312c2277616e7473223a5b5d7d7d"
   },
   {
     "name": "hello-negotiates-formats-postcard",
     "dir": "client",
     "format": "postcard",
-    "msg": {"Hello": {"version": 1, "auth": {"Enroll": {"pairing": "7c9e6679-7425-40de-944b-e07fc1f90ae7", "display_name": "cli:4242", "pair_code": null}}, "wants": ["VaultChanged"], "formats": ["Postcard", "Json"]}},
-    "frame": "370000000001012437633965363637392d373432352d343064652d393434622d65303766633166393061653708636c693a34323432000100020100"
+    "msg": {"Hello": {"version": 1, "auth": {"Enroll": {"pairing": "7c9e6679-7425-40de-944b-e07fc1f90ae7", "display_name": "cli:4242", "pair_code": null, "profile": null}}, "wants": ["VaultChanged"], "formats": ["Postcard", "Json"]}},
+    "frame": "380000000001012437633965363637392d373432352d343064652d393434622d65303766633166393061653708636c693a3432343200000100020100"
   },
   {
     "name": "invoke-list-metadata",
@@ -110,15 +112,15 @@ postcard 是**索引**編碼，故協定型別的 variant/欄位只能**置尾�
     "name": "welcome-selects-postcard",
     "dir": "server",
     "format": "json",
-    "msg": {"Welcome": {"proto": 1, "epoch": 3, "server": {"kind": "Vaultwarden", "version": "1.37.2", "features": []}, "state": {"Unlocked": {"epoch": 3, "deadline_epoch_ms": null}}, "events_from": 12, "format": "Postcard"}},
-    "frame": "c10000007b2257656c636f6d65223a7b2270726f746f223a312c2265706f6368223a332c22736572766572223a7b226b696e64223a225661756c7477617264656e222c2276657273696f6e223a22312e33372e32222c226665617475726573223a5b5d7d2c227374617465223a7b22556e6c6f636b6564223a7b2265706f6368223a332c22646561646c696e655f65706f63685f6d73223a6e756c6c7d7d2c226576656e74735f66726f6d223a31322c22666f726d6174223a22506f737463617264227d7d"
+    "msg": {"Welcome": {"proto": 1, "epoch": 3, "server": {"kind": "Vaultwarden", "version": "1.37.2", "features": []}, "state": {"Unlocked": {"epoch": 3, "deadline_epoch_ms": null}}, "events_from": 12, "format": "Postcard", "profile": ""}},
+    "frame": "ce0000007b2257656c636f6d65223a7b2270726f746f223a312c2265706f6368223a332c22736572766572223a7b226b696e64223a225661756c7477617264656e222c2276657273696f6e223a22312e33372e32222c226665617475726573223a5b5d7d2c227374617465223a7b22556e6c6f636b6564223a7b2265706f6368223a332c22646561646c696e655f65706f63685f6d73223a6e756c6c7d7d2c226576656e74735f66726f6d223a31322c22666f726d6174223a22506f737463617264222c2270726f66696c65223a22227d7d"
   },
   {
     "name": "welcome-legacy-no-format",
     "dir": "server",
     "format": "json",
     "decode_only": true,
-    "msg": {"Welcome": {"proto": 1, "epoch": 3, "server": {"kind": "Unknown", "version": null, "features": []}, "state": {"AuthLocked": {"items": 556}}, "events_from": 0}},
+    "msg": {"Welcome": {"proto": 1, "epoch": 3, "server": {"kind": "Unknown", "version": null, "features": []}, "state": {"AuthLocked": {"items": 556}}, "events_from": 0, "profile": ""}},
     "frame": "8f0000007b2257656c636f6d65223a7b2265706f6368223a332c226576656e74735f66726f6d223a302c2270726f746f223a312c22736572766572223a7b226665617475726573223a5b5d2c226b696e64223a22556e6b6e6f776e222c2276657273696f6e223a6e756c6c7d2c227374617465223a7b22417574684c6f636b6564223a7b226974656d73223a3535367d7d7d7d"
   },
   {

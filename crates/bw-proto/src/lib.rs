@@ -469,7 +469,7 @@ pub enum AuthCall {
 
 /// 帳號槽投影（`AuthCall::AccountList` 回包；E5）。只含 Identity 級欄位
 /// （email/server 是協定許可的識別級顯示欄，同 `StatusInfo`），鎖態逐槽獨立。
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AccountSummary {
     /// 槽名（`accounts/<profile>/`，同時是封存 label）
     pub profile: String,
