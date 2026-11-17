@@ -451,7 +451,7 @@ async fn vault_reveal_projects_only_requested_field() {
 
 #[tokio::test]
 async fn vault_reveal_rejects_unsupported_field() {
-    let (bridge, mut fake) = fake_daemon(Auth::Session { token: "t".into() }).await;
+    let (bridge, fake) = fake_daemon(Auth::Session { token: "t".into() }).await;
     let mut h = Harness::new(bridge);
     h.send(&call_line(
         1,
