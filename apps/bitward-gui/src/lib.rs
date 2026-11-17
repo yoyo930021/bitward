@@ -16,6 +16,7 @@ mod emergency;
 mod export;
 mod form;
 mod genpage;
+mod hub;
 mod import;
 mod list;
 mod passgen;
@@ -92,6 +93,14 @@ fn platform_data_dir() -> PathBuf {
     home_dir().join("Library/Application Support")
 }
 
+/// 與 CLI `default_data_dir` 同式：`BITWARD_DATA_DIR` 主、平台資料目錄/bitward 退。
+/// 跨機中樞 registry（`remotes/`）與見活標記落這裡——兩端共讀共寫（PR6-E3b）。
+pub(crate) fn data_dir() -> PathBuf {
+    if let Ok(d) = std::env::var("BITWARD_DATA_DIR") {
+        return d.into();
+    }
+    platform_data_dir().join("bitward")
+}
 #[cfg(target_os = "linux")]
 fn platform_data_dir() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
@@ -229,6 +238,10 @@ pub fn App() -> impl IntoElement {
             shots::script_duo(dir, core.clone());
         } else if std::env::var_os("NSH_GUI_SHOTS_CANDID").is_some() {
             shots::script_cand(dir, core.clone());
+        } else if std::env::var_os("NSH_GUI_SHOTS_HUB").is_some() {
+            shots::script_hub(dir, core.clone());
+        } else if std::env::var_os("NSH_GUI_SHOTS_HUBJOIN").is_some() {
+            shots::script_hub_join(dir, core.clone());
         } else {
             shots::script(dir, core.clone());
         }
@@ -1448,10 +1461,14 @@ fn centered_hint(core: AppCore, label: &'static str) -> View {
         )
 }
 
-/// daemon 不在：明確錯誤畫面（契約：落 not found 時報錯畫面）。
+/// daemon／hub 不在：明確錯誤畫面（契約：落 not found 時報錯畫面）。
+/// 目標列現讀傳輸槽（本機 sock 或跨機 hub，PR6-E3b），提示依形態分岔——
+/// 跨機態不誤導使用者去啟本機 bitwarderd。
 fn failed_card(core: AppCore) -> View {
     let retry = core.clone();
-    let path = core.session.path().display().to_string();
+    let target = core.session.describe();
+    let is_remote = core.session.active_profile().is_some();
+    let local = core.clone();
     view()
         .flex_1()
         .flex_col()
@@ -1483,20 +1500,39 @@ fn failed_card(core: AppCore) -> View {
                         .text_color(theme::TEXT_PRIMARY),
                 )
                 .child(
-                    text(format!("路徑：{path}"))
+                    text(format!("目標：{target}"))
                         .text_size(px(12.5))
                         .font_family(ui::mono_font())
                         .text_color(theme::TEXT_MUTED),
                 )
                 .child(
-                    text("先啟動 bitwarderd（--data-dir … --sock …），或以 --sock <path>／BITWARD_GUI_SOCK 指向正確位置。")
-                        .text_size(px(12.5))
-                        .line_height(px(19.0))
-                        .text_center()
-                        .text_color(theme::TEXT_SECONDARY),
+                    text(if is_remote {
+                        "跨機中樞不可達：確認 hub 端 bitwarderd 帶 --listen 在跑、此機到該位址可通（Tailscale 需在線）；或改連本機 daemon。"
+                    } else {
+                        "先啟動 bitwarderd（--data-dir … --sock …），或以 --sock <path>／BITWARD_GUI_SOCK 指向正確位置；跨機則在 hub 端 `bitward pair start` 後於設定頁「跨機中樞」配對。"
+                    })
+                    .text_size(px(12.5))
+                    .line_height(px(19.0))
+                    .text_center()
+                    .text_color(theme::TEXT_SECONDARY),
                 )
-                .child(ui::button("重新連線", ui::Btn::PrimaryWide, move || {
-                    retry.send(Cmd::Boot)
-                })),
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(ui::button("重新連線", ui::Btn::PrimaryWide, move || {
+                            retry.send(Cmd::Boot)
+                        }))
+                        .child(when(
+                            move || is_remote,
+                            move || {
+                                let local = local.clone();
+                                ui::button("改連本機 daemon", ui::Btn::Ghost, move || {
+                                    local.send(Cmd::HubUseLocal)
+                                })
+                            },
+                        )),
+                ),
         )
 }

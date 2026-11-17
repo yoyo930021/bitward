@@ -255,11 +255,45 @@ access token 壽命約 2 小時；daemon 自 4c 起**自動續期**（401 出口
 證據集不隨機器外觀漂移。跑前用 `bitward new` 塞幾筆明文名項目可讓截圖
 不全是信封字串——daemon 的明文名字索引只在 sync/reindex 後回填。
 
+### 跨機中樞配對 UI（PR6-E3b）
+
+設定頁新增「跨機中樞」分節（`hub.rs`），管的是 thin 端的 hub registry
+（`<data_dir>/remotes/`，與 CLI `pair join`/`hub ls`/`hub default` 同檔同格式）：
+
+- **清單**：本機 daemon 列＋各已配對 hub（url、預設標記、最近連線、目前連線徽章）。
+- **配對碼加入**：目標 `host[:port]`（port 留空＝8443，Tailscale 磁標直接填 hostname）
+  ＋pin＋一次性配對碼＋名稱；送出即 `btp::join_hub`（同步 rustls，pin 不符在 TLS
+  層擋死、不交出 token），成功落檔並自動切過去。
+- **設預設／取消**：寫 `remotes/.default`。本機 daemon 連不上時啟動即按它 failover
+  走 TLS（同 CLI `route_hub` 語意；已是跨機態不再跳，防換 hub 迴圈）。
+- **撤銷**：刪本機存檔與見活標記（預設指標指向它時一併清除；正連它則退回本機）。
+  hub 端 device token 歸 TTL／鎖態管轄，thin 端不越權代刪。
+
+跨機態下「自動鎖定／剪貼簿清除」等裝置政策列同步隱藏：那些是本機 daemon 的狀態，
+daemon 只受理本機 Interactive session（E5a 閘），遠端讀必拒、改必錯。
+
+驗證（兩腿，真 hub＋真 VW 實跑）：
+
+```sh
+# 腿一：thin 無本機 daemon、CLI 已 join＋設預設 → 啟動 failover 走 TLS 達 Ready，
+# 設定頁讀到 registry 鏡（預設標記在位）→「取消預設」落檔收斂。
+BITWARD_DATA_DIR=$THIN NSH_GUI_SHOTS=$OUT NSH_GUI_SHOTS_HUB=1 ./target/debug/nsh-app-bitward-gui
+# 腿二：本機態出發，env E3B_JOIN_URL/PIN/CODE 注入未消耗配對碼 → 填表 HubJoin →
+# 自動切 TLS 達 Ready；CLI 側 `hub ls` 見 GUI 落檔的 profile 與見活標記、
+# `--remote joinhub ls` 用該 token 真讀庫（雙向檔案契約實證）。
+BITWARD_DATA_DIR=$THIN2 BITWARD_GUI_SOCK=$HUB/s NSH_GUI_SHOTS=$OUT NSH_GUI_SHOTS_HUBJOIN=1 ...
+```
+
+單元面另以真 `bw_btp::tls` 憑證起一座同步 rustls 假 hub，釘住 TLS 握手三態
+（正確 pin＋`Auth::Session` 上車、錯 pin 無 Hello 抵達、配對碼拒因進文案）與
+切換傳播（`fork()` 的第二連線跟隨同一傳輸槽）。
+
 ## 架構（src/）
 
 | 檔 | 職責 |
 |---|---|
-| `btp.rs` | BTP 精簡同步 client：u32 LE 長度前綴 + JSON 幀、`Hello{Enroll pair_code:null}`→`Welcome`→`Invoke`/`Reply`；鎖撤銷（A6）自動重連重 Enroll 一次；`listen` 事件監聽連線（wants 訂閱，OutboxDrained/VaultChanged 交 state 幫浦） |
+| `btp.rs` | BTP 精簡同步 client：u32 LE 長度前綴 + JSON 幀、`Hello{...}`→`Welcome`→`Invoke`/`Reply`；傳輸兩形態（E3b）＝`Transport::Unix`（本機 UDS，`Enroll`）與 `Transport::Tls`（同步 rustls＋SPKI pin 走 `bw_btp::tls::client_config`，以配對 token 發 `Auth::Session`），transport 生存 Arc 可熱切換（`set_transport`：進世代、丟快取、shutdown 事件幫浦句柄）；鎖撤銷（A6）自動重連重握手一次；`listen` 事件監聽連線（wants 訂閱，OutboxDrained/VaultChanged 交 state 幫浦）；`join_hub` 一次性配對握手（配對碼換 device token） |
+| `hub.rs` | 跨機中樞編組＋設定分節（E3b）：與 CLI 共用 `<data_dir>/remotes/`（profile 檔、`.default`、`remote_*_last_ok` 見活標記）；清單/設預設/撤銷＝純檔案操作（同 `hub ls` 不連 daemon），配對加入走 `btp::join_hub`；本機不可達時按 `.default` failover（`failover_target` 純函數，同 CLI `route_hub` 語意） |
 | `state.rs` | 應用狀態機：`AppCore`（訊號集）+ `Cmd` 命令佇列 + 唯一 `reduce`；UI handler 只投遞命令，worker 執行緒只回傳命令，訊號全在引擎執行緒寫入；`watch_events` 事件幫浦（斷線 1s 重連；`EventsRefresh` 連詳情一起重取） |
 | `lib.rs` | 根元件 `App`：命令幫浦（`set_interval` 50ms + `batch`）、TOTP 心跳（1s 引擎計時器）、批准佇列節拍（1.5s 輪詢，照殼節奏）、主題 effect（`theme_mode`→`set_color_scheme`，即時翻轉不重建視窗；`theme.txt` 持久化）、頂部列（置中搜尋＋新增項目）、左側欄（批次 12 按 kind 分組：待批准＋計數徽章獨立在頂，其下「密碼庫」＝全部項目／(未分類)／資料夾樹／已共享／已封存／垃圾桶（庫視圖全回檯面）、「工具」＝產生密碼／Send／報告、「系統」＝設定；組標題 11px uppercase muted，「工具／系統」兩組可收合（session 記憶、純函數 `SidebarFold`），庫視圖恆常駐；底部僅帳號列（email＋上次同步／未登入／憑證失效三態）＋立即同步；快捷 cmd+1..4 直跳全部/垃圾桶/產生密碼/設定）、錯誤橫條、needs_reauth 橫幅（warning 色、點擊進登入卡）、Phase×Route 三欄版面與鎖態頁、SignedOut 登入卡（server/email/主密碼＋登入即解鎖）與側欄帳號列三態 |
 | `approvals.rs` | 批准佇列右欄視角（自殼批准中心併入）：每筆＝去敏 summary＋請求時間（`requested_at_ms`，daemon 補欄即顯示）＋單鍵批准/拒絕（官方語意無二次確認，按錯以拒絕補救）；空佇列佔位卡；epoch→UTC 時分純函數 |
@@ -272,7 +306,7 @@ access token 壽命約 2 小時；daemon 自 4c 起**自動續期**（401 出口
 | `export.rs` | 未加密 JSON 匯出：逐筆 Get(Reveal) → `~/Downloads/bitward-export-<UTC>.json`（0600） |
 | `theme.rs` | 設計 tokens：視圖層唯一顏色與尺寸真相源，禁散落 hex／魔數。**雙槽色板**（light＝官方淺色皮：白底、#175DDC 藍、6px 小圓角；dark＝藍紫暗色皮），語意色、文字三級、密度常量（三欄寬/列高/字級/留白/開關幾何）；外觀由 `set_color_scheme` 三態驅動、樣式閉包即時翻轉 |
 | `ui.rs` | 共用小元件：按鈕（primary 藍實色/ghost/destructive）、型別磚（單色字形，monogram 退役）、`icon_tile`（favicon 實圖磚，先字母後換圖不閃）、徽章、表單欄、下拉列、模態殼（absolute 鋪滿 + 置中白卡）、確認/改密模態、複製鈕 |
-| `shots.rs` | `NSH_GUI_SHOTS` 自我截圖器（AppKit `cacheDisplayInRect` 路徑，不需 TCC；objc2 經 `nsh_platform_macos` 再匯取）；`NSH_GUI_SHOTS_DRAIN` 徽章收斂時間軸；`NSH_GUI_SHOTS_LOGIN` 登入卡時間軸（gui-login.sh 驅動）；`NSH_GUI_SHOTS_LOGIN2FA` 登入第二步時間軸（login2fa.sh 驅動，碼填入時刻現算）；`NSH_GUI_SHOTS_CANDID` 真庫零寫入四連拍（主列表／已封存視角含名稱明文斷言／詳情查看／編輯 morph） |
+| `shots.rs` | `NSH_GUI_SHOTS` 自我截圖器（AppKit `cacheDisplayInRect` 路徑，不需 TCC；objc2 經 `nsh_platform_macos` 再匯取）；`NSH_GUI_SHOTS_DRAIN` 徽章收斂時間軸；`NSH_GUI_SHOTS_LOGIN` 登入卡時間軸（gui-login.sh 驅動）；`NSH_GUI_SHOTS_LOGIN2FA` 登入第二步時間軸（login2fa.sh 驅動，碼填入時刻現算）；`NSH_GUI_SHOTS_CANDID` 真庫零寫入四連拍（主列表／已封存視角含名稱明文斷言／詳情查看／編輯 morph）；`NSH_GUI_SHOTS_HUB`／`NSH_GUI_SHOTS_HUBJOIN` 跨機中樞兩腿（failover＋配對加入，見上節） |
 
 導航是 `Route` 狀態機 + `when` 區塊——不用 `nav_stack`（spike FINDINGS
 卡點 4：macOS dev host 不渲染）。

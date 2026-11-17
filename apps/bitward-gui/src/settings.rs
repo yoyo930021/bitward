@@ -35,10 +35,9 @@ const CLIPBOARD_LADDER: [(u8, &str); 5] = [
 /// 設定頁視角（右欄整塊）。
 pub fn pane(core: AppCore) -> View {
     let lock_core = core.clone();
-    let auto_core = core.clone();
-    let clip_core = core.clone();
-    let restart_core = core.clone();
-    let search_core = core.clone();
+    let dp_local = core.clone();
+    let dp_rows = core.clone();
+    let dp_remote = core.clone();
     let export_core = core.clone();
     let import_core = core.clone();
     let pw_cond = core.clone();
@@ -63,59 +62,84 @@ pub fn pane(core: AppCore) -> View {
                     .gap_5()
                     .w_full()
                     .max_w(px(560.0))
-                    .child(setting_row(
-                        "自動鎖定",
-                        "閒置多久後自動鎖庫（純狀態輪詢不計入活動）。",
-                        dropdown(
-                            core.settings,
-                            auto_core,
-                            |s| s.auto_lock_minutes,
-                            |mut s, v| {
-                                s.auto_lock_minutes = v;
-                                s
-                            },
-                            &AUTO_LOCK_LADDER,
-                        ),
+                    // 跨機連線時隱藏裝置政策四列（換說明顶替）：
+                    // 那些開關管的是「這台裝置的 daemon」，daemon 端
+                    // 只受理本機 Interactive session（E5a 閘），遠端
+                    // 讀必拒、改必錯，列出來就是誤導。
+                    .child(when(
+                        move || dp_local.session.active_profile().is_none(),
+                        move || {
+                            let a = dp_rows.clone();
+                            let b = dp_rows.clone();
+                            let c = dp_rows.clone();
+                            let d = dp_rows.clone();
+                            view()
+                                .flex_col()
+                                .gap_5()
+                                .child(setting_row(
+                                    "自動鎖定",
+                                    "閒置多久後自動鎖庫（純狀態輪詢不計入活動）。",
+                                    dropdown(
+                                        a.settings,
+                                        a.clone(),
+                                        |s| s.auto_lock_minutes,
+                                        |mut s, v| {
+                                            s.auto_lock_minutes = v;
+                                            s
+                                        },
+                                        &AUTO_LOCK_LADDER,
+                                    ),
+                                ))
+                                .child(setting_row(
+                                    "剪貼簿清除",
+                                    "複製敏感值後幾秒清空（中途另複製則讓位）。",
+                                    dropdown(
+                                        b.settings,
+                                        b.clone(),
+                                        |s| s.clipboard_clear_secs,
+                                        |mut s, v| {
+                                            s.clipboard_clear_secs = v;
+                                            s
+                                        },
+                                        &CLIPBOARD_LADDER,
+                                    ),
+                                ))
+                                .child(setting_row(
+                                    "重新啟動後鎖定",
+                                    "開啟＝重啟一律從鎖態起；關閉＝daemon 啟動自動解鎖。",
+                                    toggle(
+                                        c.settings,
+                                        c.clone(),
+                                        |s| s.lock_on_sleep_restart,
+                                        |mut s, v| {
+                                            s.lock_on_sleep_restart = v;
+                                            s
+                                        },
+                                    ),
+                                ))
+                                .child(setting_row(
+                                    "鎖定時清除最近搜尋",
+                                    "開啟＝進入鎖態即清掉搜尋框字串。",
+                                    toggle(
+                                        d.settings,
+                                        d,
+                                        |s| s.clear_search_on_lock,
+                                        |mut s, v| {
+                                            s.clear_search_on_lock = v;
+                                            s
+                                        },
+                                    ),
+                                ))
+                        },
                     ))
-                    .child(setting_row(
-                        "剪貼簿清除",
-                        "複製敏感值後幾秒清空（中途另複製則讓位）。",
-                        dropdown(
-                            core.settings,
-                            clip_core,
-                            |s| s.clipboard_clear_secs,
-                            |mut s, v| {
-                                s.clipboard_clear_secs = v;
-                                s
-                            },
-                            &CLIPBOARD_LADDER,
-                        ),
-                    ))
-                    .child(setting_row(
-                        "重新啟動後鎖定",
-                        "開啟＝重啟一律從鎖態起；關閉＝daemon 啟動自動解鎖。",
-                        toggle(
-                            core.settings,
-                            restart_core,
-                            |s| s.lock_on_sleep_restart,
-                            |mut s, v| {
-                                s.lock_on_sleep_restart = v;
-                                s
-                            },
-                        ),
-                    ))
-                    .child(setting_row(
-                        "鎖定時清除最近搜尋",
-                        "開啟＝進入鎖態即清掉搜尋框字串。",
-                        toggle(
-                            core.settings,
-                            search_core,
-                            |s| s.clear_search_on_lock,
-                            |mut s, v| {
-                                s.clear_search_on_lock = v;
-                                s
-                            },
-                        ),
+                    .child(when(
+                        move || dp_remote.session.active_profile().is_some(),
+                        move || {
+                            text("自動鎖定等裝置政策屬本機 daemon，跨機連線時不在這裡改。")
+                                .text_size(px(theme::TEXT_PAGE_SUB))
+                                .line_height(px(17.0))
+                                .text_color(theme::TEXT_MUTED)
+                        },
                     ))
                     .child(
                         view()
@@ -169,6 +193,8 @@ pub fn pane(core: AppCore) -> View {
                             .child(ui::section_title("外觀"))
                             .child(crate::theme_picker(theme_core.clone())),
                     )
+                    // PR6-E3b：跨機中樞編組（清單／配對碼加入／設預設／撤銷）。
+                    .child(crate::hub::section(core.clone()))
                     // PR3：雙重驗證管理面（清單／TOTP／Email／YubiKey／救援碼）。
                     .child(crate::twofa::section(core.clone())),
             ),

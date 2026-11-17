@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use nsh_core::prelude::*;
 
-use crate::state::{AppCore, Cmd, FieldDraft, Route, SendTab, SideGroup, name_is_envelope};
+use crate::state::{AppCore, Cmd, FieldDraft, Phase, Route, SendTab, SideGroup, name_is_envelope};
 
 /// 在 AppKit main thread 上執行 `f`（macOS 限定；其餘平台直接跑）。
 #[cfg(target_os = "macos")]
@@ -1531,7 +1531,11 @@ fn spawn_gated_pending(core: &AppCore) {
         eprintln!("bitward-gui: 找不到 Local OTP，跳過批准 e2e");
         return;
     };
-    let sock = core.session.path().display().to_string();
+    let Some(sock) = core.session.unix_path() else {
+        eprintln!("bitward-gui: 跨機連線無本機 sock，跳過批准 e2e");
+        return;
+    };
+    let sock = sock.display().to_string();
     let Ok(out) = std::process::Command::new("../../target/debug/bitward")
         .args([
             "--sock",
@@ -1590,4 +1594,90 @@ fn find_id(core: &AppCore, name: &str) -> Option<bw_proto::ItemId> {
         .iter()
         .find(|v| v.meta.name.as_deref() == Some(name))
         .map(|v| v.meta.id)
+}
+
+/// PR6-E3b 跨機中樞 e2e（`NSH_GUI_SHOTS=<dir> NSH_GUI_SHOTS_HUB=1`）：
+/// 前提＝thin 資料目錄內無本機 daemon、`remotes/.default` 指向已配對 hub
+/// （hub 端 `bitward pair start` ＋ thin 端 `bitward pair join`/`hub default` 建立）。
+/// 斷言鏈：啟動 failover 走 TLS 達 Ready（列表資料真從 hub 來）→ 設定頁分節
+/// 讀到 registry 鏡（預設標記在位）→ 「取消預設」落檔收斂。
+pub fn script_hub(dir: PathBuf, core: AppCore) {
+    let c = core.clone();
+    let d = dir.clone();
+    at(4000, move || {
+        assert_eq!(c.phase.get(), Phase::Ready, "failover 後應已連上 hub");
+        let p = c.session.active_profile().expect("應處跨機態");
+        assert_eq!(p, "e2ehub", "failover 目標應是預設 profile");
+        assert!(!c.items.get().is_empty(), "hub 庫應有項目");
+        capture(&d, "hub-1-list-tls.png");
+    });
+    let c = core.clone();
+    at(4600, move || c.send(Cmd::OpenSettings));
+    let c = core.clone();
+    let d2 = dir.clone();
+    at(5600, move || {
+        assert_eq!(c.route.get(), Route::Settings);
+        let rows = c.hub_rows.get();
+        assert!(
+            rows.iter().any(|r| r.profile == "e2ehub" && r.is_default),
+            "設定頁應讀到帶預設標記的 registry 鏡：{rows:?}"
+        );
+        capture(&d2, "hub-2-settings.png");
+    });
+    let c = core.clone();
+    at(6200, move || c.send(Cmd::HubSetDefault(None)));
+    let d3 = dir.clone();
+    at(7000, move || {
+        assert!(
+            crate::hub::read_default(&crate::data_dir()).is_none(),
+            "取消預設必須落檔（.default 清除）"
+        );
+        capture(&d3, "hub-3-default-cleared.png");
+        quit();
+    });
+}
+
+/// PR6-E3b 配對加入腿（`NSH_GUI_SHOTS_HUBJOIN=1`）：前提＝本機態已連著 daemon、
+/// env `E3B_JOIN_URL/PIN/CODE` 帶一發未消耗的配對碼（e2e 側先 `pair start`）。
+/// 斷言鏈：設定頁填表→`HubJoin`→成功自動切 TLS 達 Ready→registry 鏡含新
+/// profile（`remotes/joinhub.json` 落檔的讀側證據）。
+pub fn script_hub_join(dir: PathBuf, core: AppCore) {
+    let c = core.clone();
+    at(3000, move || {
+        assert_eq!(c.phase.get(), Phase::Ready, "本機態前提：已連著 daemon");
+        assert!(c.session.active_profile().is_none(), "加入腿應從本機態出發");
+        c.send(Cmd::OpenSettings);
+    });
+    let c = core.clone();
+    at(3600, move || {
+        let (Ok(url), Ok(pin), Ok(code)) = (
+            std::env::var("E3B_JOIN_URL"),
+            std::env::var("E3B_JOIN_PIN"),
+            std::env::var("E3B_JOIN_CODE"),
+        ) else {
+            panic!("缺 E3B_JOIN_URL/PIN/CODE（e2e 側 pair start 後注入）");
+        };
+        c.hub_form.url.set(url);
+        c.hub_form.pin.set(pin);
+        c.hub_form.code.set(code);
+        c.hub_form.name.set("joinhub".into());
+        c.send(Cmd::HubJoin);
+    });
+    let c = core.clone();
+    let d = dir.clone();
+    at(7000, move || {
+        assert_eq!(
+            c.session.active_profile().as_deref(),
+            Some("joinhub"),
+            "配對成功應自動切到該 hub（TLS 態）"
+        );
+        assert_eq!(c.phase.get(), Phase::Ready, "TLS 重連後應達 Ready");
+        assert!(
+            c.hub_rows.get().iter().any(|r| r.profile == "joinhub"),
+            "registry 鏡應含新落檔 profile"
+        );
+        assert!(!c.hub_busy.get(), "加入流程應已收斂");
+        capture(&d, "hubjoin-1-tls-ready.png");
+        quit();
+    });
 }

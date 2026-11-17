@@ -21,8 +21,9 @@ use bw_proto::{
 };
 use nsh_core::prelude::*;
 
-use crate::btp::Session;
+use crate::btp::{Session, Transport};
 use crate::export::{self, ExportOutcome};
+use crate::hub;
 use crate::passgen::GenState;
 use crate::twofa;
 
@@ -445,6 +446,20 @@ pub enum Cmd {
     /// 本機設定（macOS 設定面）：右欄視角、讀取、改即存。
     OpenSettings,
     FetchSettings,
+    /// 跨機中樞（PR6-E3b）：清單重讀（純檔案鏡）、配對加入、連線切換、
+    /// 預設指標與撤銷。整個分節只有 HubJoin 走網路（一次性 TLS 握手）。
+    HubRefresh,
+    HubJoin,
+    /// 配對結果：Ok＝(profile, 落檔形態)（寫檔在 reduce 落地）；Err＝拒因原文。
+    HubJoined(Result<(String, hub::RemoteProfile), String>),
+    /// 切到已配對 hub：讀檔→TLS 目標→set_transport→Boot 重連。
+    HubConnect(String),
+    /// 切回本機 daemon（sock 解析同啟動順序）。
+    HubUseLocal,
+    /// 設/清預設 hub（`remotes/.default` 指標；None＝清除＝關 failover）。
+    HubSetDefault(Option<String>),
+    /// 撤銷＝刪本機存檔（預設指標指向它時一併清除；正連它則回本機）。
+    HubRevoke(String),
     /// 報告儀表板（路線 4）：卡面彙整＋兩份清單＋詳情頁歷史節。
     OpenReports,
     /// 進入獨立密碼產生器頁（批次 9；進頁若無碼自動產生一組）。
@@ -1172,6 +1187,16 @@ impl LoginFields {
     }
 }
 
+/// 跨機中樞配對表單四欄（PR6-E3b）：url/pin/code 取自 hub 端 `bitward pair start`
+/// 回包＋使用者知的位址；name＝本地 profile 鍵（`remotes/<name>.json`）。
+#[derive(Clone)]
+pub struct HubFormFields {
+    pub url: Signal<String>,
+    pub pin: Signal<String>,
+    pub code: Signal<String>,
+    pub name: Signal<String>,
+}
+
 /// 伺服器 URL 正規化＋http(s) 閘（純函數，單測點）：缺 scheme 補 https、
 /// 非 http(s) 拒絕、host 空/含空白拒絕。回傳送 daemon 的正規形態。
 pub fn normalize_server(raw: &str) -> Result<String, &'static str> {
@@ -1401,6 +1426,12 @@ pub struct AppCore {
     /// 本機設定鏡（daemon 真態在 meta 表）：連線後 FetchSettings 回填、
     /// 設定頁改即存；複製鈕的剪貼簿清除倒數也讀這裡（ui::copy_button）。
     pub settings: Signal<bw_proto::Settings>,
+    /// 跨機中樞（PR6-E3b）：`remotes/` 檔案鏡＋配對表單＋進行旗。
+    /// 清單/預設/撤銷是純檔案操作（reduce 直落）；只有 HubJoin 派 worker。
+    pub hub_rows: Signal<Arc<Vec<hub::HubRow>>>,
+    pub hub_busy: Signal<bool>,
+    pub hub_error: Signal<Option<String>>,
+    pub hub_form: HubFormFields,
     /// 雙重驗證管理面（PR3）：主密碼只在送作瞬間經本機線（訊號態同
     /// login.password 紀律，進鎖態即清）；states＝已啟用因子鏡像。
     pub tf_pw: Signal<String>,
@@ -1460,7 +1491,8 @@ impl AppCore {
     /// 在元件上下文（`App`）裡呼叫：訊號隸屬目前 owner。
     pub fn boot(session: Arc<Session>) -> (AppCore, Receiver<Cmd>) {
         let (tx, rx) = channel();
-        let icon_session = Arc::new(Session::new(session.path().to_path_buf()));
+        // 第二連線共用傳輸槽：設定頁切 hub 時 favicon 連線一起換軌（E3b）。
+        let icon_session = Arc::new(session.fork());
         let core = AppCore {
             icon_session,
             session,
@@ -1527,6 +1559,15 @@ impl AppCore {
             att_state: signal(crate::attach::AttState::default()),
             theme_mode: signal(Appearance::System),
             settings: signal(bw_proto::Settings::default()),
+            hub_rows: signal(Arc::new(Vec::new())),
+            hub_busy: signal(false),
+            hub_error: signal(None),
+            hub_form: HubFormFields {
+                url: signal(String::new()),
+                pin: signal(String::new()),
+                code: signal(String::new()),
+                name: signal(String::new()),
+            },
             tf_pw: signal(String::new()),
             tf_states: signal(None),
             tf_fetched: signal(false),
@@ -1744,6 +1785,12 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.phase.set(Phase::Ready);
             core.vault.set(Some(state));
             core.error_text.set(None);
+            // E3b：跨機連線成功即打見活標記（同 CLI open_remote 的 last_ok，
+            // 清單「最近連線」欄與失聯提示共用同一檔案真相）。
+            if let Some(p) = core.session.active_profile() {
+                hub::touch_last_ok(&crate::data_dir(), &p);
+            }
+            core.send(Cmd::HubRefresh);
             core.send(Cmd::FetchFolders);
             fetch_list(core);
             // 設定鏡先行回填（剪貼簿清除閘在複製鈕、鎖定清搜尋閘在 StateUpdated，
@@ -1768,6 +1815,17 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         }
         Cmd::ConnectFailed { detail } => {
             core.settle();
+            // failover（§1.1，同 CLI route_hub）：本機不可達且設了預設 hub→
+            // 改走預設並重試一次；預設也失聯＝原錯照報（已是 TLS 態不再跳，防迴圈）。
+            if let Some(t) = hub::failover_target(&crate::data_dir(), &core.session.transport()) {
+                let p = t.profile.clone();
+                core.session.set_transport(Transport::Tls(t));
+                core.notice.set(Some(format!(
+                    "本機 daemon 不可達，改用預設 hub「{p}」（{detail}）"
+                )));
+                core.send(Cmd::Boot);
+                return;
+            }
             core.phase.set(Phase::Failed);
             core.error_text.set(Some(detail));
         }
@@ -3002,6 +3060,8 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             core.sort_menu.set(false);
             core.route.set(Route::Settings);
             core.send(Cmd::FetchSettings);
+            // E3b：跨機中樞分節的清單＝本機檔案鏡，進頁即重讀（無網路成本）。
+            core.send(Cmd::HubRefresh);
             // PR3：首次進設定頁自動拉 2FA 清單（本 session 只拉一次，
             // 重開頁不轟打伺服器；手動「重新載入清單」永遠可用）。
             if !core.tf_fetched.get() {
@@ -3010,6 +3070,12 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
             }
         }
         Cmd::FetchSettings => {
+            // 裝置政策（自動鎖定等）是本機 daemon 的狀態，daemon 只受理
+            // Interactive session（E5a 閘）；跨機態拉了必拒＝每進設定頁閃一條
+            // 授權紅條，直接不發，對應控件同步隱藏（settings 分節）。
+            if core.session.active_profile().is_some() {
+                return;
+            }
             core.ipc(|s| match s.call(&Call::Admin(AdminCall::GetSettings)) {
                 Ok(Response::Settings(v)) => Cmd::SettingsLoaded(v),
                 Ok(other) => Cmd::Failed {
@@ -3021,6 +3087,131 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
         Cmd::SettingsLoaded(v) => {
             core.settle();
             core.settings.set(v);
+        }
+        // —— 跨機中樞（PR6-E3b）——
+        // 清單／預設／撤銷＝純本機檔案操作（CLI `hub ls` 同語意：不連 daemon，
+        // 本機中樞缺席時照樣能修編組），直接在引擎執行緒落地；只有配對走網路。
+        Cmd::HubRefresh => {
+            core.hub_rows.set(Arc::new(hub::list(&crate::data_dir())));
+        }
+        Cmd::HubJoin => {
+            let url = core.hub_form.url.get().trim().to_owned();
+            let pin = core.hub_form.pin.get().trim().to_owned();
+            let code = core.hub_form.code.get().trim().to_owned();
+            let name = core.hub_form.name.get().trim().to_owned();
+            let (host, port) = match hub::split_url(&url) {
+                Ok(v) => v,
+                Err(e) => {
+                    core.hub_error.set(Some(e));
+                    return;
+                }
+            };
+            if let Err(e) = hub::check_profile(&name) {
+                core.hub_error.set(Some(e));
+                return;
+            }
+            if pin.is_empty() {
+                core.hub_error.set(Some(
+                    "pin 不可為空白（hub 端 `bitward pair start` 回包）".into(),
+                ));
+                return;
+            }
+            if code.len() != 9 {
+                core.hub_error
+                    .set(Some("配對碼為 9 字元大寫英數（未過期的一次性碼）".into()));
+                return;
+            }
+            core.hub_busy.set(true);
+            core.hub_error.set(None);
+            let tx = core.tx.clone();
+            std::thread::spawn(move || {
+                let res = crate::btp::join_hub(&host, port, &pin, &code, &name)
+                    .map(|token| {
+                        (
+                            name,
+                            hub::RemoteProfile {
+                                // 落檔一律正規形態（磁標/缺 port 輸入在此收斂，同 CLI）
+                                url: hub::canonical_url(&host, port),
+                                pin,
+                                token,
+                                wake: None,
+                            },
+                        )
+                    })
+                    .map_err(|e| e.display());
+                let _ = tx.send(Cmd::HubJoined(res));
+            });
+        }
+        Cmd::HubJoined(res) => {
+            core.hub_busy.set(false);
+            match res {
+                Ok((name, prof)) => {
+                    if let Err(e) = hub::save(&crate::data_dir(), &name, &prof) {
+                        core.hub_error.set(Some(format!("配對成功但落檔失敗：{e}")));
+                        return;
+                    }
+                    core.hub_form.url.set(String::new());
+                    core.hub_form.pin.set(String::new());
+                    core.hub_form.code.set(String::new());
+                    core.hub_form.name.set(String::new());
+                    core.notice.set(Some(format!("已配對 hub「{name}」")));
+                    // 配對的意圖就是用它（Experience First）：成功即切過去重連。
+                    core.send(Cmd::HubConnect(name));
+                }
+                Err(e) => core.hub_error.set(Some(e)),
+            }
+        }
+        Cmd::HubConnect(name) => {
+            let d = crate::data_dir();
+            match hub::load(&d, &name).and_then(|p| hub::target(&name, &p)) {
+                Ok(t) => {
+                    core.hub_error.set(None);
+                    core.session.set_transport(Transport::Tls(t));
+                    core.send(Cmd::Boot);
+                }
+                Err(e) => core.hub_error.set(Some(e)),
+            }
+        }
+        Cmd::HubUseLocal => {
+            core.hub_error.set(None);
+            core.session
+                .set_transport(Transport::Unix(crate::sock_path()));
+            core.send(Cmd::Boot);
+        }
+        Cmd::HubSetDefault(profile) => {
+            let d = crate::data_dir();
+            match &profile {
+                Some(p) => {
+                    if let Err(e) = hub::set_default(&d, Some(p)) {
+                        core.hub_error.set(Some(e));
+                        return;
+                    }
+                    core.notice.set(Some(format!(
+                        "預設 hub＝{p}（本機 daemon 不可達時自動改用）"
+                    )));
+                }
+                None => {
+                    let _ = hub::set_default(&d, None);
+                    core.notice
+                        .set(Some("已清除預設 hub（failover 關閉）".into()));
+                }
+            }
+            core.send(Cmd::HubRefresh);
+        }
+        Cmd::HubRevoke(name) => {
+            let d = crate::data_dir();
+            if let Err(e) = hub::remove(&d, &name) {
+                core.hub_error.set(Some(e));
+                return;
+            }
+            core.notice.set(Some(format!(
+                "已撤銷本機存檔「{name}」（hub 端 device token 到期前仍有效）"
+            )));
+            // 正連的就是它：存檔已沒，連線退回本機，不留掛空的 TLS 目標。
+            if core.session.active_profile().as_deref() == Some(name.as_str()) {
+                core.send(Cmd::HubUseLocal);
+            }
+            core.send(Cmd::HubRefresh);
         }
         Cmd::ToggleSidebarGroup(g) => {
             let next = core.sidebar_fold.get().toggled(g);

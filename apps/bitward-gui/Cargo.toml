@@ -14,6 +14,12 @@ nsh-base = "0.3.0"
 env_logger = "0.11"
 # BTP 型別單一來源；GUI 零業務邏輯，分級/過濾語意全在 daemon（契約 §2.5）。
 bw-proto = { path = "../../crates/bw-proto" }
+# 跨機中樞（PR6-E3b）：SPKI pin verifier 與 client_config 的真相源（同 daemon/CLI）。
+# 只取其同步 rustls 面（`btp::tls_connect`）；tokio 是 bw-btp 的編譯期附屬、非執行期。
+bw-btp = { path = "../../crates/bw-btp" }
+# 同步 TLS 流（StreamOwned）。provider 固定 ring——同 workspace 裁決（14.6），
+# 關 default 避免 aws-lc-rs 並存觸發 auto-detect panic。
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
 # 產生器頁強度條分級：借 bw-crypto::password_score（與報告同一真相源）。
 bw-crypto = { path = "../../crates/bw-crypto" }
 serde = { version = "1", features = ["derive"] }
