@@ -25,6 +25,7 @@ use std::os::unix::io::AsRawFd;
 use clap::Parser;
 use uuid::Uuid;
 
+use accounts::Profile;
 use bw_btp::{read_client, write_server};
 use bw_proto::wire::{WireFormat, select_format};
 use bw_proto::{Auth, ClientMsg, PROTO_VERSION, Response, ServerMsg, WtpError};
