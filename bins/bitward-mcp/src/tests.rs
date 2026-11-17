@@ -642,20 +642,22 @@ async fn btp_drop_ends_serve_with_error() {
 #[test]
 fn server_identity_follows_frozen_env_contract() {
     // 有 token：Session 續用，正名。
-    let (name, auth) = super::server_identity(Some("abc"), 42, "pair".into());
+    let (name, auth) = super::server_identity(Some("abc"), 42, "pair".into(), None);
     assert_eq!(name, "bitward-mcp");
     assert!(matches!(auth, Auth::Session { ref token } if token == "abc"));
     // 無 token：本機全權 Enroll，name=mcp:pid（凍結介面）。
-    let (name, auth) = super::server_identity(None, 42, "pair".into());
+    let (name, auth) = super::server_identity(None, 42, "pair".into(), Some("work".into()));
     assert_eq!(name, "mcp:42");
     match auth {
         Auth::Enroll {
             pairing,
             display_name,
+            profile,
             ..
         } => {
             assert_eq!(display_name, "mcp:42");
             assert_eq!(pairing, "pair");
+            assert_eq!(profile.as_deref(), Some("work"), "BITWARD_PROFILE 必須上車");
         }
         other => panic!("{other:?}"),
     }

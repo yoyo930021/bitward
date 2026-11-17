@@ -19,8 +19,22 @@ pub fn data_dir() -> PathBuf {
         .join("bitward")
 }
 
+/// E5 多帳號：本 extension 服務哪個槽由 `BITWARD_PROFILE` 表態（manifest 的
+/// env 由安裝腳本寫入）；缺席＝daemon 的預設槽指標，單帳號部署行為不變。
+pub fn profile() -> Option<String> {
+    std::env::var("BITWARD_PROFILE")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// token 檔逐槽一份：兩個瀏覽器的 extension 指不同槽時，不得互搶 token
+/// （搶了就是每開一個頁面都重 Enroll 一次）。預設槽沿用既有檔名。
 pub fn token_file(data_dir: &Path) -> PathBuf {
-    data_dir.join("nm_session")
+    match profile() {
+        None => data_dir.join("nm_session"),
+        Some(p) => data_dir.join(format!("nm_session-{p}")),
+    }
 }
 
 /// 依凍結介面連線 daemon：有存檔 token ⇒ `Auth::Session` 續用；
@@ -68,7 +82,7 @@ async fn try_connect(sock: &Path, dir: &Path, use_saved: bool) -> Result<Bridge,
             pairing: pairing.clone(),
             display_name: format!("browser-nm:{}", std::process::id()),
             pair_code: None,
-            profile: None,
+            profile: profile(),
         },
     };
     let bridge = Bridge::connect(stream, auth).await?;

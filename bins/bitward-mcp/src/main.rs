@@ -41,6 +41,12 @@ async fn run() -> Result<(), String> {
     let token = std::env::var("BITWARD_AGENT_TOKEN")
         .ok()
         .filter(|t| !t.is_empty());
+    // E5 多帳號：MCP 服務哪個槽由 `BITWARD_PROFILE` 表態（shim 沒有别的身分通道）；
+    // 缺席＝daemon 的預設槽指標（`accounts/.default`），單帳號部署行為不變。
+    let profile = std::env::var("BITWARD_PROFILE")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty());
     let stream = tokio::net::UnixStream::connect(&sock)
         .await
         .map_err(|e| format!("cannot connect to daemon ({}): {e}", sock.to_string_lossy()))?;
@@ -48,6 +54,7 @@ async fn run() -> Result<(), String> {
         token.as_deref(),
         std::process::id(),
         uuid::Uuid::new_v4().to_string(),
+        profile,
     );
     let bridge = Bridge::connect(stream, auth).await?;
     serve(
@@ -62,7 +69,12 @@ async fn run() -> Result<(), String> {
 /// 凍結介面：有 token ⇒ Auth::Session 續用（serverInfo 掛正名）；
 /// 無 token ⇒ 本機全權 Enroll，serverInfo 與 display_name 都標 `mcp:<pid>`，
 /// 讓人在 `agent list` 看得到是誰開的（契約 §2.3 Enrollment）。
-fn server_identity(token: Option<&str>, pid: u32, pairing: String) -> (String, Auth) {
+fn server_identity(
+    token: Option<&str>,
+    pid: u32,
+    pairing: String,
+    profile: Option<String>,
+) -> (String, Auth) {
     match token {
         Some(t) => (
             "bitward-mcp".to_owned(),
@@ -78,7 +90,7 @@ fn server_identity(token: Option<&str>, pid: u32, pairing: String) -> (String, A
                     pairing,
                     display_name: name,
                     pair_code: None,
-                    profile: None,
+                    profile,
                 },
             )
         }
