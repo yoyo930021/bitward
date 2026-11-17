@@ -29,6 +29,11 @@ struct Args {
     /// 以跨機 device profile 連線（`pair join` 建立），值為 profile 名稱
     #[arg(long, global = true)]
     remote: Option<String>,
+    /// E5 多帳號：綁定的帳號槽（daemon 端 `accounts/<profile>/`）。
+    /// 缺席時退 `BITWARD_PROFILE` 環境變數，再退 daemon 的預設槽指標
+    /// （`accounts/.default`，由 `bitward account use` 維護）。
+    #[arg(long, global = true)]
+    profile: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -347,6 +352,12 @@ enum Cmd {
         #[command(subcommand)]
         cmd: HubCmd,
     },
+    /// E5 多帳號：本 daemon 的帳號槽（清單/設預設）。語意對照 `hub`：
+    /// `ls` 列槽與鎖態、`use` 改預設槽指標（之後不帶 --profile 的連線都落它）。
+    Account {
+        #[command(subcommand)]
+        cmd: AccountCmd,
+    },
     /// e2e/開發用：向（自架）server 註冊新帳號，不寫入 daemon 狀態
     #[command(hide = true)]
     DevRegister {
@@ -369,8 +380,26 @@ enum Cmd {
     },
 }
 
-fn session_file(data_dir: &std::path::Path) -> PathBuf {
-    data_dir.join("cli_session")
+/// 槽選取（純函數測點）：明示 `--profile` 贏過環境變數；兩者皆空＝None
+/// （交由 daemon 的預設槽指標決定）。空字串視為未表態，免得 `--profile ""`
+/// 在 daemon 端吃非法名錯誤。
+fn effective_profile(flag: Option<&str>, env: Option<&str>) -> Option<String> {
+    [flag, env]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+/// 本機專屬閘：session token 檔逐槽一份（token 綁槽，混用會把 A 的連線
+/// 當成 B 的舊 token 而白白重 Enroll）。預設槽沿用既有檔名，遷移無感。
+/// 純函數便單測。
+fn cli_session_file_for(data_dir: &std::path::Path, profile: Option<&str>) -> PathBuf {
+    match profile {
+        None | Some("default") | Some("") => data_dir.join("cli_session"),
+        Some(p) => data_dir.join(format!("cli_session-{p}")),
+    }
 }
 
 #[derive(Subcommand)]
@@ -687,6 +716,17 @@ enum PairCmd {
 }
 
 #[derive(Subcommand)]
+enum AccountCmd {
+    /// 列帳號槽（名稱、email、server、鎖態、項目數、預設標記）
+    Ls,
+    /// 設預設槽（不帶 `--profile` 的新連線都落它）
+    Use {
+        /// 槽名（`accounts/<profile>`，見 `account ls`）
+        profile: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum HubCmd {
     /// 列已配對 hub（profile、url、預設標記、last_seen）；--probe 實測可達性
     Ls {
@@ -855,6 +895,7 @@ fn verify_server_peer(stream: &tokio::net::UnixStream) -> Result<(), String> {
 async fn open_session(
     sock: &std::path::Path,
     data_dir: &std::path::Path,
+    profile: Option<&str>,
 ) -> Result<
     (
         tokio::net::unix::OwnedReadHalf,
@@ -863,6 +904,7 @@ async fn open_session(
     ),
     String,
 > {
+    let token_file = cli_session_file_for(data_dir, profile);
     // 一次 Session 續用；被拒（daemon 重啟過）則刪檔重 Enroll 一次。
     for attempt in 0..2u8 {
         let stream = tokio::net::UnixStream::connect(sock)
@@ -873,7 +915,7 @@ async fn open_session(
         verify_server_peer(&stream)?;
         let (mut rd, mut wr) = stream.into_split();
         let saved: Option<SessionToken> = if attempt == 0 {
-            std::fs::read_to_string(session_file(data_dir))
+            std::fs::read_to_string(&token_file)
                 .ok()
                 .map(|s| s.trim().to_owned())
                 .filter(|s| !s.is_empty())
@@ -887,7 +929,7 @@ async fn open_session(
                 pairing: fresh.clone(),
                 display_name: format!("cli:{}", std::process::id()),
                 pair_code: None,
-                profile: None,
+                profile: profile.map(str::to_owned),
             },
         };
         write_client(
@@ -908,7 +950,7 @@ async fn open_session(
                     return Err(s);
                 }
                 if matches!(auth, Auth::Enroll { .. }) {
-                    let _ = std::fs::write(session_file(data_dir), &fresh);
+                    let _ = std::fs::write(&token_file, &fresh);
                 }
                 return Ok((rd, wr, format));
             }
@@ -916,7 +958,7 @@ async fn open_session(
                 // daemon 明確拒絕（重啟過/隨鎖撤銷）：刪檔重 Enroll 續跑，但必須留痕
                 // （readpath A6 的可觀察性）——靜默癒合會把「lock＝撤銷」洗成無感成功。
                 eprintln!("warning: session 失效（{message}）；已重入會（enroll）並續跑指令");
-                let _ = std::fs::remove_file(session_file(data_dir));
+                let _ = std::fs::remove_file(&token_file);
             }
             Ok(ServerMsg::Error { message }) => return Err(message),
             Ok(other) => return Err(format!("expected Welcome, got {other:?}")),
@@ -924,7 +966,7 @@ async fn open_session(
                 // 撤銷/失效必須留痕（readpath A6 的可觀察性）：靜默重 Enroll 會把
                 // 「lock 級聯撤銷」這個安全語意洗成無感成功。
                 eprintln!("warning: session 失效（{e}）；已重入會（enroll）並續跑指令");
-                let _ = std::fs::remove_file(session_file(data_dir));
+                let _ = std::fs::remove_file(&token_file);
             }
             Err(e) => return Err(e.to_string()),
         }
@@ -979,12 +1021,16 @@ async fn run() -> Result<(), String> {
         return hub_cmd(cmd, &data_dir, args.json).await;
     }
     let sock = args.sock.clone().unwrap_or_else(|| default_sock(&data_dir));
+    let profile = effective_profile(
+        args.profile.as_deref(),
+        std::env::var("BITWARD_PROFILE").ok().as_deref(),
+    );
     let (mut rd, mut wr, fmt): (
         Box<dyn tokio::io::AsyncRead + Unpin + Send>,
         Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
         WireFormat,
     ) = match &args.remote {
-        None => match open_session(&sock, &data_dir).await {
+        None => match open_session(&sock, &data_dir, profile.as_deref()).await {
             Ok((r, w, f)) => (Box::new(r), Box::new(w), f),
             Err(le) => {
                 // 編組 failover（§1.1）：本地中樞不可達且設了預設 hub→改用預設並
@@ -1005,7 +1051,7 @@ async fn run() -> Result<(), String> {
         Some(profile) => open_remote(profile, &data_dir).await?,
     };
 
-    let call = build_call(&args.cmd)?;
+    let call = build_call(&args.cmd, profile.as_deref())?;
     if matches!(args.cmd, Cmd::Autotype { .. }) {
         // 倒數在 daemon 端跑，stderr 提示讓使用者抓時機切視窗
         eprintln!("AutoType: 準備倒數 3 秒後注入按鍵，請切到目標視窗");
@@ -1570,7 +1616,7 @@ fn chrono_now_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn build_call(cmd: &Cmd) -> Result<Call, String> {
+fn build_call(cmd: &Cmd, profile: Option<&str>) -> Result<Call, String> {
     Ok(match cmd {
         Cmd::Login {
             server,
@@ -1589,7 +1635,7 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                 password: pw,
                 api_key: None,
                 two_factor: None,
-                profile: None,
+                profile: profile.map(str::to_owned),
             })
         }
         Cmd::Unlock {
@@ -2101,6 +2147,12 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
             PairCmd::Join { .. } => unreachable!("join 不經 daemon 分派"),
         },
         Cmd::Hub { .. } => unreachable!("hub 純本機，run() 提前返回"),
+        Cmd::Account { cmd } => match cmd {
+            AccountCmd::Ls => Call::Auth(AuthCall::AccountList),
+            AccountCmd::Use { profile } => Call::Auth(AuthCall::AccountUse {
+                profile: profile.clone(),
+            }),
+        },
         Cmd::SignOut => Call::Auth(AuthCall::SignOut),
         Cmd::Attach { cmd } => match cmd {
             AttachCmd::Add { item, path } => {
@@ -2472,6 +2524,41 @@ fn parse_approval(s: &str) -> Result<Uuid, String> {
     Uuid::parse_str(s).map_err(|e| format!("approval/session id: {e}"))
 }
 
+/// `account ls` 的人讀表格（純函數測點）：預設槽以 `*` 標記，鎖態用短名。
+/// 形態對照 `hub ls`（同欄寬、同標記），兩套 registry 讀起來是一回事。
+fn accounts_table(rows: &[bw_proto::AccountSummary]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    out.push_str("    PROFILE      EMAIL                        SERVER                       STATE    ITEMS\n");
+    for r in rows {
+        let _ = writeln!(
+            out,
+            "{:<3} {:<12} {:<28} {:<28} {:<8} {}",
+            if r.is_default { "*" } else { "" },
+            r.profile,
+            r.email.clone().unwrap_or_else(|| "-".into()),
+            r.server.clone().unwrap_or_else(|| "-".into()),
+            state_short(&r.state),
+            r.items
+        );
+    }
+    if rows.iter().all(|r| !r.is_default) {
+        let _ = writeln!(out, "hint: 無預設槽標記（`bitward account use <profile>`）");
+    }
+    out
+}
+
+/// `UnlockStateView` 的表格短名（人讀一欄寬 8 字元內）。
+fn state_short(state: &bw_proto::UnlockStateView) -> &'static str {
+    match state {
+        bw_proto::UnlockStateView::SignedOut => "signed-out",
+        bw_proto::UnlockStateView::AuthLocked { .. } => "locked",
+        bw_proto::UnlockStateView::Unlocking => "unlocking",
+        bw_proto::UnlockStateView::Unlocked { .. } => "unlocked",
+        bw_proto::UnlockStateView::Stale { .. } => "stale",
+    }
+}
+
 fn print_response(resp: &Response, json: bool) {
     use serde_json::json;
     match resp {
@@ -2630,6 +2717,13 @@ fn print_response(resp: &Response, json: bool) {
         // 展開 newtype variant，jq 路徑直接命中欄位（避免 {"Status":{...}} 外殼）
         Response::Status(s) => println!("{}", serde_json::to_string_pretty(&s).unwrap()),
         Response::Account(a) => println!("{}", serde_json::to_string_pretty(&a).unwrap()),
+        Response::Accounts(rows) => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(rows).unwrap());
+            } else {
+                print!("{}", accounts_table(rows));
+            }
+        }
         Response::AuditChain(c) => println!("{}", serde_json::to_string_pretty(&c).unwrap()),
         Response::Conflicts(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap()),
         Response::AgentSessions(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap()),
@@ -3340,6 +3434,99 @@ mod hub_tests {
             "其他可用 hub：desk（`bitward hub default <name>` 切預設、`--remote <name>` 單次指定）"
         );
         assert!(failover_hint("home", &["home".to_string()]).contains("無其他已配對 hub"));
+    }
+
+    #[test]
+    fn profile_flag_beats_env_and_blanks_are_unset() {
+        assert_eq!(
+            effective_profile(Some("work"), Some("personal")).as_deref(),
+            Some("work")
+        );
+        assert_eq!(
+            effective_profile(None, Some("personal")).as_deref(),
+            Some("personal")
+        );
+        assert_eq!(
+            effective_profile(Some("  "), Some("personal")).as_deref(),
+            Some("personal")
+        );
+        assert_eq!(
+            effective_profile(None, None),
+            None,
+            "未表態＝交 daemon 預設槽"
+        );
+        assert_eq!(effective_profile(Some(""), Some("")), None);
+    }
+
+    #[test]
+    fn session_token_file_is_per_profile() {
+        let d = std::path::Path::new("/tmp/dd");
+        // 既有單帳號使用者不得被遷移踢掉 token：預設槽沿用原檔名
+        assert_eq!(cli_session_file_for(d, None), d.join("cli_session"));
+        assert_eq!(
+            cli_session_file_for(d, Some("default")),
+            d.join("cli_session")
+        );
+        assert_eq!(
+            cli_session_file_for(d, Some("work")),
+            d.join("cli_session-work")
+        );
+        assert_ne!(
+            cli_session_file_for(d, Some("work")),
+            cli_session_file_for(d, Some("personal")),
+            "兩槽兩份 token：混用會把 A 的連線當成 B 的失效 token"
+        );
+    }
+
+    #[test]
+    fn accounts_table_marks_default_and_shortens_states() {
+        let rows = vec![
+            bw_proto::AccountSummary {
+                profile: "work".into(),
+                email: Some("a@bitward.test".into()),
+                server: Some("https://vault.example".into()),
+                state: bw_proto::UnlockStateView::Unlocked {
+                    epoch: 3,
+                    deadline_epoch_ms: None,
+                },
+                epoch: 3,
+                items: 42,
+                is_default: true,
+                has_vault: true,
+            },
+            bw_proto::AccountSummary {
+                profile: "default".into(),
+                email: None,
+                server: None,
+                state: bw_proto::UnlockStateView::AuthLocked { items: 7 },
+                epoch: 1,
+                items: 0,
+                is_default: false,
+                has_vault: true,
+            },
+        ];
+        let t = accounts_table(&rows);
+        let lines: Vec<&str> = t.lines().collect();
+        assert!(lines[0].contains("PROFILE") && lines[0].contains("STATE"));
+        assert!(
+            lines[1].starts_with('*') && lines[1].contains(" work "),
+            "預設槽列首＋星號：{}",
+            lines[1]
+        );
+        assert!(lines[1].contains("unlocked") && lines[1].contains("42"));
+        assert!(
+            !lines[2].starts_with('*') && lines[2].contains(" default "),
+            "非預設槽不標記：{}",
+            lines[2]
+        );
+        assert!(
+            lines[2].contains("locked") && lines[2].contains("- "),
+            "空帳號欄位以 - 缺席"
+        );
+        assert_eq!(
+            state_short(&bw_proto::UnlockStateView::SignedOut),
+            "signed-out"
+        );
     }
 
     #[test]
