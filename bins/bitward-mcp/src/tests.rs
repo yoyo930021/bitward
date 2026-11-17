@@ -435,7 +435,10 @@ async fn vault_reveal_projects_only_requested_field() {
     assert_eq!(p["value"], "hunter2");
     // item 4：只回被點名的欄，其他明文欄不得進 context
     assert!(p.get("notes").is_none(), "未要求的 notes 不得外洩：{p}");
-    assert!(p.get("username").is_none(), "未要求的 username 不得外洩：{p}");
+    assert!(
+        p.get("username").is_none(),
+        "未要求的 username 不得外洩：{p}"
+    );
     h.close_stdin();
     assert!(
         timeout(Duration::from_secs(5), &mut h.serve)
@@ -459,7 +462,10 @@ async fn vault_reveal_rejects_unsupported_field() {
     // 不支援欄位應在送 daemon 前即明拒（不出 Call）
     let r = h.json().await;
     let err = r.get("error").expect("參數錯誤應回 JSON-RPC error");
-    assert!(err["message"].as_str().unwrap().contains("vault_reveal"), "{err}");
+    assert!(
+        err["message"].as_str().unwrap().contains("vault_reveal"),
+        "{err}"
+    );
     drop(fake);
     h.close_stdin();
     assert!(

@@ -281,7 +281,8 @@ impl Hub {
             .apply_sync(&raw)
             .map_err(|e| format!("鏡像落地失敗：{e}"))?;
         self.reindex_plain()?;
-        self.last_sync_ms.store(self.store.now_ms(), Ordering::Relaxed);
+        self.last_sync_ms
+            .store(self.store.now_ms(), Ordering::Relaxed);
         Ok(self.list("").len())
     }
 
@@ -379,7 +380,12 @@ impl Hub {
             .unwrap_or_default();
         metas
             .into_iter()
-            .map(|m| (m.id, m.name.clone().unwrap_or_else(|| "(未命名)".to_owned())))
+            .map(|m| {
+                (
+                    m.id,
+                    m.name.clone().unwrap_or_else(|| "(未命名)".to_owned()),
+                )
+            })
             .collect()
     }
 
@@ -479,10 +485,7 @@ impl Hub {
     /// 倒數由 UI 心跳遞減、跨週期重取。
     pub fn totp_code(&self, id: ItemId) -> Result<Option<(String, u32)>, String> {
         let user_key = self.unlocked_user_key().ok_or("尚未解鎖")?;
-        let row = self
-            .store
-            .item(id)
-            .map_err(|e| e.to_string())?;
+        let row = self.store.item(id).map_err(|e| e.to_string())?;
         let row = match row {
             Some(r) => r,
             None => return Err("找不到這筆項目".to_owned()),
@@ -615,7 +618,9 @@ pub fn sealed_matches(rec: &SealedRecord, acc: &Account) -> bool {
 /// blob 解碼（base64 破損或短於 `IV(12)+tag(16)+最小 key(1)` 視同無封存）。
 pub fn sealed_blob(rec: &SealedRecord) -> Option<Vec<u8>> {
     use base64::Engine;
-    let raw = base64::engine::general_purpose::STANDARD.decode(&rec.blob_b64).ok()?;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(&rec.blob_b64)
+        .ok()?;
     (raw.len() >= 29).then_some(raw)
 }
 
@@ -674,7 +679,8 @@ impl Hub {
             puk,
             blob_b64: base64::engine::general_purpose::STANDARD.encode(blob.as_slice()),
         };
-        let text = serde_json::to_string_pretty(&rec).map_err(|e| format!("封存序列化失敗：{e}"))?;
+        let text =
+            serde_json::to_string_pretty(&rec).map_err(|e| format!("封存序列化失敗：{e}"))?;
         std::fs::write(self.sealed_path(), text).map_err(|e| format!("封存落地失敗：{e}"))?;
         log::info!("keystore sealed user key（冷啟免重派生就緒）");
         Ok(())
@@ -685,7 +691,9 @@ impl Hub {
     /// （失敗不擋：鏡像本來就在本地，離線照讀）。
     pub async fn unseal(self: &Arc<Self>, prompt: bool) -> Result<Snapshot, String> {
         if self.is_unlocked() {
-            return self.local_snapshot().ok_or_else(|| "已解鎖但帳號檔缺失".to_owned());
+            return self
+                .local_snapshot()
+                .ok_or_else(|| "已解鎖但帳號檔缺失".to_owned());
         }
         let acc = self.account().ok_or("尚未登入過，無從解封")?;
         let Some(rec) = self.read_sealed() else {
@@ -700,7 +708,11 @@ impl Hub {
         let plain = crate::island::unseal(blob, prompt).await.map_err(|e| {
             // 靜默路失敗只是「驗證視窗過了」，封存保留；彈窗路失敗（取消／
             // 逾時／金鑰作廢）由 Kotlin 側自行清鑰，這裡不誤刪記錄。
-            if prompt { e } else { format!("{e}（需生物辨識或主密碼）") }
+            if prompt {
+                e
+            } else {
+                format!("{e}（需生物辨識或主密碼）")
+            }
         })?;
         let user_key = bw_crypto::UserKey::from_bytes(plain.to_vec())
             .map_err(|e| format!("解封出的金鑰形態不對：{e}"))?;
@@ -734,7 +746,10 @@ impl Hub {
         }
         {
             let mut g = self.unlocked.lock().expect("hub mutex poisoned");
-            *g = Some(Unlocked { client: client.clone(), user_key });
+            *g = Some(Unlocked {
+                client: client.clone(),
+                user_key,
+            });
         }
         log::info!("keystore unseal ok（免重派生解鎖）");
         // 保命先起再拉：FGS 覆蓋整個 unseal-sync（drain_lock 單飛讓背景輪
@@ -743,7 +758,8 @@ impl Hub {
         if let Err(e) = self.pull_and_index(client).await {
             log::warn!("unseal 後同步未完成（本地鏡像照讀）：{e}");
         }
-        self.local_snapshot().ok_or_else(|| "解封後狀態丟失".to_owned())
+        self.local_snapshot()
+            .ok_or_else(|| "解封後狀態丟失".to_owned())
     }
 
     /// 本地態 Snapshot（帳號檔＋鏡像計數；unseal／背景路徑共用）。
@@ -872,9 +888,7 @@ impl Hub {
         validate_edits(&base, edits)?;
         let key = cipher_content_key(&user_key, &base)
             .ok_or("金鑰解析失敗（item key 解不開，請重新同步或重解）")?;
-        let enc = |v: &str| {
-            bw_crypto::encrypt_bytes_key(&key, v.as_bytes()).unwrap_or_default()
-        };
+        let enc = |v: &str| bw_crypto::encrypt_bytes_key(&key, v.as_bytes()).unwrap_or_default();
         let map: bw_vault::FieldMap = edits
             .iter()
             .filter_map(|e| match e {
@@ -1152,9 +1166,8 @@ impl Hub {
             return false;
         };
         let their_key = cipher_content_key(user_key, &theirs);
-        let enc = |v: &str| {
-            bw_crypto::encrypt_bytes_key(&our_key, v.as_bytes()).unwrap_or_default()
-        };
+        let enc =
+            |v: &str| bw_crypto::encrypt_bytes_key(&our_key, v.as_bytes()).unwrap_or_default();
         let body = if m.base_rev.is_some() && their_rev == m.base_rev {
             ours_enc
         } else {
@@ -1318,7 +1331,12 @@ pub fn host_of(uri: &str) -> Option<String> {
     let rest = uri.split_once("://").map(|(_, r)| r).unwrap_or(uri);
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     let hostport = authority.rsplit('@').next().unwrap_or("");
-    let host = hostport.split(':').next().unwrap_or("").trim().to_ascii_lowercase();
+    let host = hostport
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     if host.is_empty() || (!host.contains('.') && host != "localhost") {
         return None;
     }
@@ -1415,9 +1433,7 @@ fn cipher_content_key(uk: &bw_crypto::UserKey, cipher: &Value) -> Option<Zeroizi
 
 /// 依解析出的內容金鑰構造欄位解密閉包（形態同 daemon `cipher_field_decryptor`
 /// 的个人項目分支；單欄解不開回 None，容忍漂移）。
-fn decryptor_with_key(
-    key: &Zeroizing<Vec<u8>>,
-) -> impl Fn(&str) -> Option<String> + '_ {
+fn decryptor_with_key(key: &Zeroizing<Vec<u8>>) -> impl Fn(&str) -> Option<String> + '_ {
     move |s: &str| {
         bw_crypto::decrypt_bytes_with_key(key, s)
             .ok()
@@ -1443,7 +1459,9 @@ fn validate_edits(base: &Value, edits: &[FieldEdit]) -> Result<(), String> {
         match e {
             FieldEdit::SetType { index, .. } | FieldEdit::RemoveField { index } => {
                 if (*index as usize) >= n_fields {
-                    return Err(format!("field.{index} 越界：本項目只有 {n_fields} 個自訂欄位"));
+                    return Err(format!(
+                        "field.{index} 越界：本項目只有 {n_fields} 個自訂欄位"
+                    ));
                 }
             }
             FieldEdit::RemoveUri { index } => {
@@ -1474,7 +1492,9 @@ fn validate_edits(base: &Value, edits: &[FieldEdit]) -> Result<(), String> {
                 if let Some(rest) = path.strip_prefix("field.") {
                     let (id_s, leaf) = rest.rsplit_once('.').unwrap_or((rest, ""));
                     if !matches!(leaf, "name" | "value" | "type") {
-                        return Err(format!("欄位路徑需 field.<n>.name|value|type，got {path:?}"));
+                        return Err(format!(
+                            "欄位路徑需 field.<n>.name|value|type，got {path:?}"
+                        ));
                     }
                     let n = id_s
                         .parse::<usize>()
@@ -1724,7 +1744,9 @@ mod tests {
             special: false,
             avoid_ambiguous: false,
         };
-        let pw = hub.generate_password(&only_digits).expect("digits-only generates");
+        let pw = hub
+            .generate_password(&only_digits)
+            .expect("digits-only generates");
         assert_eq!(pw.len(), 12);
         assert!(pw.chars().all(|c| c.is_ascii_digit()), "got {pw}");
         // 引擎錯誤在本邊界翻成可懂字串（UI 直接顯示）。
@@ -1741,8 +1763,11 @@ mod tests {
             "請至少啟用一個字元集"
         );
         assert_eq!(
-            hub.generate_password(&bw_crypto::PasswordOptions { length: 4, ..Default::default() })
-                .unwrap_err(),
+            hub.generate_password(&bw_crypto::PasswordOptions {
+                length: 4,
+                ..Default::default()
+            })
+            .unwrap_err(),
             "長度需介於 5–128"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1804,7 +1829,10 @@ mod tests {
             ..draft("name-only")
         };
         let c = encrypt_login_draft(&uk, &bare, ItemId::new_v4());
-        assert!(c.get("login").is_some_and(Value::is_object), "Login 恒帶 login 物件");
+        assert!(
+            c.get("login").is_some_and(Value::is_object),
+            "Login 恒帶 login 物件"
+        );
         let note = CipherDraft {
             kind: bw_proto::ItemKind::SecureNote,
             ..bare
@@ -2028,11 +2056,22 @@ mod tests {
         assert!(!valid_icon_host("*.example.com"));
         assert!(valid_icon_host("io.bitward.android")); // 含點 package 名可當檔名
         let png = [0x89u8, b'P', b'N', b'G', 1, 2, 3];
-        assert!(icon_data_uri(&png).expect("png").starts_with("data:image/png;base64,"));
+        assert!(
+            icon_data_uri(&png)
+                .expect("png")
+                .starts_with("data:image/png;base64,")
+        );
         let ico = [0x00u8, 0x00, 0x01, 0x00, 9];
-        assert!(icon_data_uri(&ico).expect("ico").starts_with("data:image/x-icon;base64,"));
+        assert!(
+            icon_data_uri(&ico)
+                .expect("ico")
+                .starts_with("data:image/x-icon;base64,")
+        );
         assert!(icon_data_uri(b"garbage").is_none());
-        assert_eq!(host_of("https://GitHub.com/x"), Some("github.com".to_owned()));
+        assert_eq!(
+            host_of("https://GitHub.com/x"),
+            Some("github.com".to_owned())
+        );
         assert_eq!(host_of("myapp"), None);
         assert_eq!(
             host_of("io.bitward.android"),
@@ -2047,10 +2086,13 @@ mod tests {
         assert!(hub.folders().is_empty());
         let fid = uuid::Uuid::new_v4().to_string();
         hub.store
-            .folder_put(uuid::Uuid::parse_str(&fid).unwrap(), &json!({
-                "id": fid,
-                "name": format!("2.aa|bb|cc"),
-            }))
+            .folder_put(
+                uuid::Uuid::parse_str(&fid).unwrap(),
+                &json!({
+                    "id": fid,
+                    "name": format!("2.aa|bb|cc"),
+                }),
+            )
             .expect("folder put");
         hub.create(&CipherDraft {
             folder_id: Some(fid.clone()),
@@ -2088,8 +2130,20 @@ mod tests {
         };
         assert!(!sealed_matches(&rec, &rotated));
         // 換帳號（email 漂移）同判；版本不認得也作廢。
-        assert!(!sealed_matches(&rec, &Account { email: "b@x.io".to_owned(), ..acc.clone() }));
-        assert!(!sealed_matches(&SealedRecord { v: 9, ..rec.clone() }, &acc));
+        assert!(!sealed_matches(
+            &rec,
+            &Account {
+                email: "b@x.io".to_owned(),
+                ..acc.clone()
+            }
+        ));
+        assert!(!sealed_matches(
+            &SealedRecord {
+                v: 9,
+                ..rec.clone()
+            },
+            &acc
+        ));
         // JSON round-trip（落盤形態就是 serde_json）。
         let text = serde_json::to_string(&rec).expect("encode");
         let back: SealedRecord = serde_json::from_str(&text).expect("decode");
@@ -2107,15 +2161,20 @@ mod tests {
             blob_b64: "!!!not base64!!!".to_owned(),
         };
         assert!(sealed_blob(&rec).is_none());
-        let short = SealedRecord { blob_b64: base64::engine::general_purpose::STANDARD.encode(&[0u8; 28]), ..rec };
+        let short = SealedRecord {
+            blob_b64: base64::engine::general_purpose::STANDARD.encode(&[0u8; 28]),
+            ..rec
+        };
         assert!(sealed_blob(&short).is_none());
     }
 
     #[test]
     fn hub_has_sealed_tracks_file_and_account() {
         use base64::Engine;
-        let dir =
-            std::env::temp_dir().join(format!("bitward-android-test-seal-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!(
+            "bitward-android-test-seal-{}",
+            uuid::Uuid::new_v4()
+        ));
         let hub = Hub::open(dir.clone()).expect("hub opens");
         let acc = Account {
             server: "http://127.0.0.1:1".to_owned(),
@@ -2134,11 +2193,17 @@ mod tests {
             puk: "2.puk".to_owned(),
             blob_b64: base64::engine::general_purpose::STANDARD.encode(vec![1u8; 92]),
         };
-        std::fs::write(dir.join("sealed.json"), serde_json::to_string(&rec).unwrap())
-            .expect("write sealed");
+        std::fs::write(
+            dir.join("sealed.json"),
+            serde_json::to_string(&rec).unwrap(),
+        )
+        .expect("write sealed");
         assert!(hub.has_sealed());
         // PUK 換掉（下次登入的帳號檔形態）→ 舊封存不再可用。
-        hub.persist_account(&Account { protected_user_key: Some("2.puk2".to_owned()), ..acc.clone() });
+        hub.persist_account(&Account {
+            protected_user_key: Some("2.puk2".to_owned()),
+            ..acc.clone()
+        });
         assert!(!hub.has_sealed());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2147,15 +2212,24 @@ mod tests {
     fn drain_backoff_sequence_caps_at_ten_minutes() {
         use std::time::Duration;
         assert_eq!(drain_backoff(0), Duration::ZERO);
-        for (n, secs) in [(1, 30), (2, 60), (3, 120), (4, 240), (5, 480), (6, 600), (7, 600), (64, 600)] {
+        for (n, secs) in [
+            (1, 30),
+            (2, 60),
+            (3, 120),
+            (4, 240),
+            (5, 480),
+            (6, 600),
+            (7, 600),
+            (64, 600),
+        ] {
             assert_eq!(drain_backoff(n), Duration::from_secs(secs), "n={n}");
         }
     }
 
     #[tokio::test]
     async fn background_run_locked_hub_converges_immediately() {
-        let dir = std::env::temp_dir()
-            .join(format!("bitward-android-test-bg-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("bitward-android-test-bg-{}", uuid::Uuid::new_v4()));
         let hub = Hub::open(dir.clone()).expect("hub opens");
         assert_eq!(hub.background_run().await, "locked");
         let _ = std::fs::remove_dir_all(&dir);

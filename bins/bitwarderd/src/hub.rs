@@ -441,7 +441,10 @@ impl Hub {
             Call::Auth(AuthCall::Login { .. }) => Err(denied(
                 "P1: daemon-side password challenge 未実装；請由 CLI 傳入密碼",
             )),
-            Call::Auth(AuthCall::Unlock { biometric, password }) => {
+            Call::Auth(AuthCall::Unlock {
+                biometric,
+                password,
+            }) => {
                 // 批次 14：三條解鎖路徑。主密碼＝離線 PSK MAC（錯密碼統一
                 // 「主密碼錯誤」，不外洩細節）；生物辨識＝Keychain ACL 載入
                 // （系統級 Touch ID prompt）；裸裝置憑證僅自動解鎖 opt-in
@@ -583,9 +586,7 @@ impl Hub {
             // 三件套（v5）：資料夾與硬刪的業務在 datamanage.rs。
             Call::Vault(VaultCall::CreateFolder { name }) => self.create_folder(name).await,
             Call::Vault(VaultCall::ListFolders) => self.list_folders(),
-            Call::Vault(VaultCall::DeleteFolder { id }) => {
-                self.delete_folder(session, *id).await
-            }
+            Call::Vault(VaultCall::DeleteFolder { id }) => self.delete_folder(session, *id).await,
             Call::Vault(VaultCall::Purge { id }) => self.purge_item(*id).await,
             Call::Vault(VaultCall::Import { items, format }) => {
                 self.write_import(session, items, *format).await
@@ -595,7 +596,10 @@ impl Hub {
                     item_id,
                     file_name,
                     bytes,
-                } => self.attach_upload(session, *item_id, file_name, bytes).await,
+                } => {
+                    self.attach_upload(session, *item_id, file_name, bytes)
+                        .await
+                }
                 bw_proto::AttachmentOp::Download {
                     item_id,
                     attachment_id,
@@ -612,9 +616,7 @@ impl Hub {
             Call::Vault(VaultCall::Reports { sub }) => match sub {
                 bw_proto::Reports::PasswordReuse => self.duplicates(),
                 bw_proto::Reports::WeakPasswords => self.reports_weak_passwords(),
-                bw_proto::Reports::CipherHistory { id } => {
-                    self.reports_cipher_history(*id).await
-                }
+                bw_proto::Reports::CipherHistory { id } => self.reports_cipher_history(*id).await,
             },
             Call::Vault(VaultCall::Send { sub }) => self.send_op(sub).await,
             Call::Use(UseCall::TotpCode { id }) => self.totp(*id),
@@ -2144,7 +2146,12 @@ mod tests {
                 None,
             )
             .unwrap();
-        let resp = Response::Items(metas.into_iter().map(bw_proto::ItemView::metadata).collect());
+        let resp = Response::Items(
+            metas
+                .into_iter()
+                .map(bw_proto::ItemView::metadata)
+                .collect(),
+        );
         let n = match &resp {
             Response::Items(v) => v.len(),
             _ => unreachable!(),

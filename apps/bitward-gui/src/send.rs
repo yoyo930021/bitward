@@ -487,7 +487,10 @@ mod tests {
             Some("http://127.0.0.1:51234/#/send/A/seed")
         );
         let no_web = bw_proto::SendList {
-            items: vec![wire_row(Some("6fe8bae0-e019-48fb-a651-f9e3514d156e"), false)],
+            items: vec![wire_row(
+                Some("6fe8bae0-e019-48fb-a651-f9e3514d156e"),
+                false,
+            )],
         };
         assert_eq!(send_rows(&no_web)[0].web_url, None);
         assert!(send_rows(&bw_proto::SendList { items: Vec::new() }).is_empty());

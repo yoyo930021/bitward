@@ -3207,10 +3207,17 @@ mod tests {
             platform: "ios".into(),
         }]);
         let b = postcard::to_allocvec(&resp).unwrap();
-        assert_eq!(postcard::from_bytes::<Response>(&b).unwrap().push_tokens_len(), Some(1));
+        assert_eq!(
+            postcard::from_bytes::<Response>(&b)
+                .unwrap()
+                .push_tokens_len(),
+            Some(1)
+        );
         let j = serde_json::to_string(&resp).unwrap();
         assert_eq!(
-            serde_json::from_str::<Response>(&j).unwrap().push_tokens_len(),
+            serde_json::from_str::<Response>(&j)
+                .unwrap()
+                .push_tokens_len(),
             Some(1)
         );
     }
@@ -3636,7 +3643,9 @@ mod tests {
         // 兩者都不得帶值；遮罩欄另席。斷言用 `== null` 式，對缺席態同樣成立。
         let parsed: serde_json::Value = serde_json::from_str(&j).unwrap();
         assert!(
-            parsed.get("password").is_none_or(serde_json::Value::is_null),
+            parsed
+                .get("password")
+                .is_none_or(serde_json::Value::is_null),
             "password 明文欄必須恆空：{j}"
         );
         assert!(!j.contains("1234"));

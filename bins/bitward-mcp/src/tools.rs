@@ -381,7 +381,9 @@ mod tests {
         assert_eq!(reveal_field(&json!({"id": id()})).unwrap(), None);
         for ok in ["password", "username", "notes"] {
             assert_eq!(
-                reveal_field(&json!({"id": id(), "field": ok})).unwrap().as_deref(),
+                reveal_field(&json!({"id": id(), "field": ok}))
+                    .unwrap()
+                    .as_deref(),
                 Some(ok)
             );
         }
@@ -423,7 +425,10 @@ mod tests {
         assert_eq!(p["value"], "hunter2");
         assert_eq!(p["name"], "GitHub");
         // 未點名的欄位不得出現在投影輸出（只回被要求的那一欄）
-        assert!(p.get("notes").is_none() && p.get("username").is_none(), "{p}");
+        assert!(
+            p.get("notes").is_none() && p.get("username").is_none(),
+            "{p}"
+        );
 
         let pu = project_reveal(&resp, Some("username"));
         assert_eq!(pu["field"], "username");
