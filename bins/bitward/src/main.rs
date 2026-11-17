@@ -887,6 +887,7 @@ async fn open_session(
                 pairing: fresh.clone(),
                 display_name: format!("cli:{}", std::process::id()),
                 pair_code: None,
+                profile: None,
             },
         };
         write_client(
@@ -1216,6 +1217,7 @@ async fn login_2fa_rounds(
             email: email.clone(),
             password: password.clone(),
             api_key: api_key.clone(),
+            profile: None,
             two_factor: Some(TwoFactorInput {
                 provider: pick,
                 token: code,
@@ -1327,6 +1329,7 @@ async fn pair_join(args: &Args, data_dir: &Path) -> Result<(), String> {
                 pairing: fresh.clone(),
                 display_name: format!("remote:{name}"),
                 pair_code: Some(code.clone()),
+                profile: None,
             },
             wants: vec![],
             formats: wire::supported_formats(),
@@ -1586,6 +1589,7 @@ fn build_call(cmd: &Cmd) -> Result<Call, String> {
                 password: pw,
                 api_key: None,
                 two_factor: None,
+                profile: None,
             })
         }
         Cmd::Unlock {

@@ -638,6 +638,7 @@ where
                 display_name,
                 pairing,
                 pair_code,
+                ..
             } => {
                 // 本機 UDS 的 Enroll = Interactive 全權；TLS 連線必須帶配對碼（§1.2）
                 let token = if pairing.is_empty() {
@@ -729,6 +730,7 @@ where
             state: hub.machine.state(),
             events_from: hub.store.cursor().unwrap_or(0),
             format: fmt,
+            profile: String::new(),
         },
     )
     .await

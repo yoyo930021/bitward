@@ -27,6 +27,7 @@ fn welcome() -> ServerMsg {
     ServerMsg::Welcome {
         proto: PROTO_VERSION,
         epoch: 7,
+        profile: String::new(),
         server: ServerProfile {
             kind: ServerKind::Vaultwarden,
             version: Some("1.37.2".into()),

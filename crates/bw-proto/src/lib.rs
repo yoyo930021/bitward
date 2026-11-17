@@ -372,6 +372,11 @@ pub enum Auth {
         /// Some(配對碼) = 跨機 Device session（§1.2 異機配對）；
         /// None = 本機 UDS 互動端（peer uid 已驗）
         pair_code: Option<String>,
+        /// 綁定的帳號槽（E5 單 daemon 多 profile）：None = daemon 的預設槽
+        /// （`accounts/.default` 指標，無指標＝既有單帳號庫的 `default`）。
+        /// 置尾＋`serde(default)`：握手幀恆 JSON，舊端缺欄即預設槽，行為不變。
+        #[serde(default)]
+        profile: Option<String>,
     },
     Resume {
         session: SessionId,
@@ -416,6 +421,12 @@ pub enum AuthCall {
         /// 呼叫端原樣重發 Login（理由見 hub::login 註解）。
         #[serde(default)]
         two_factor: Option<TwoFactorInput>,
+        /// E5 多 profile：登入落到的帳號槽。None＝連線綁定的槽
+        /// （`Auth::Enroll::profile`）。Some 且不同綁定槽時，只有該槽尚未落
+        /// 帳號才改綁，否則拒——不把已登入的帳號寫進別人的槽。
+        /// 置尾＋`default`：舊幀缺欄＝None（單 profile 行為不變）。
+        #[serde(default)]
+        profile: Option<String>,
     },
     Unlock {
         biometric: bool,
@@ -446,6 +457,34 @@ pub enum AuthCall {
         current: Option<String>,
         new: Option<String>,
     },
+    /// E5 多帳號：列本 daemon 的帳號槽（名稱、帳號、鎖態、是否預設）。
+    /// 置尾紀律同 ChangePassword。僅本機 Interactive session 受理——槽清單是
+    /// 這台裝置的帳號拓扑，跨機 device/agent 不必知道別人有哪些帳號。
+    AccountList,
+    /// E5 多帳號：設預設槽（之後不帶 profile 的新連線都綁它）。僅本機 Interactive。
+    AccountUse {
+        profile: String,
+    },
+}
+
+/// 帳號槽投影（`AuthCall::AccountList` 回包；E5）。只含 Identity 級欄位
+/// （email/server 是協定許可的識別級顯示欄，同 `StatusInfo`），鎖態逐槽獨立。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AccountSummary {
+    /// 槽名（`accounts/<profile>/`，同時是封存 label）
+    pub profile: String,
+    /// 未落帳號的空槽（首次登入前）＝None
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub server: Option<String>,
+    pub state: UnlockStateView,
+    pub epoch: u64,
+    pub items: u32,
+    /// 是否為 `accounts/.default` 指標指向的槽
+    pub is_default: bool,
+    /// 鏡像庫存在與否（遷移前舊路徑偵測用；空槽 false）
+    pub has_vault: bool,
 }
 
 /// 登入第二步的使用者輸入。`provider` 是 upstream `TwoFactorProviderType` 編號
@@ -1806,6 +1845,8 @@ pub enum Response {
     SendUrl(SendUrl),
     /// `Send:Password` 回包。
     SendPasswordState(SendPasswordState),
+    /// `Auth:AccountList` / `Auth:AccountUse` 回包（E5 多帳號；置尾紀律同 Passkey）。
+    Accounts(Vec<AccountSummary>),
 }
 
 /// 伺服器宣告的可用第二因子（daemon 由 `bw-server` 挑戰映射而來的輕量形態）。
@@ -2370,6 +2411,10 @@ pub struct StatusInfo {
     /// GUI 據此顯示「使用 Touch ID 解鎖」鈕；舊 daemon 缺欄＝false。
     #[serde(default)]
     pub biometric_available: bool,
+    /// E5 多帳號：本回應所屬的帳號槽名。置尾＋`default`：舊 daemon 缺欄＝空字串
+    /// （單帳號語意，thin 端不顯示槽名）。
+    #[serde(default)]
+    pub profile: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2465,6 +2510,10 @@ pub enum ServerMsg {
         /// `serde(default)`＝JSON：舊 daemon 不帶此欄的語意（它只可能說 JSON）。
         #[serde(default)]
         format: crate::wire::WireFormat,
+        /// E5 多帳號：本連線綁定的帳號槽（`Auth::Enroll::profile` 解析結果）。
+        /// 握手幀恆 JSON ⇒ 舊 daemon 缺欄＝空字串，thin 端視為單帳號。
+        #[serde(default)]
+        profile: String,
     },
     Reply {
         rid: u64,
@@ -2754,6 +2803,71 @@ mod tests {
         );
     }
 
+    /// E5 紀律：`profile` 欄置尾＋`serde(default)`——舊端 Enroll/Login 幀（無此欄）
+    /// 解析為 None（＝單 profile 行為不變），新端 postcard 往返仍保槽名。
+    #[test]
+    fn profile_fields_tolerate_legacy_frames() {
+        let legacy_enroll = serde_json::json!({
+            "Enroll": {"pairing": "p", "display_name": "cli:1", "pair_code": null}
+        });
+        assert!(
+            matches!(
+                serde_json::from_value::<Auth>(legacy_enroll).unwrap(),
+                Auth::Enroll { profile: None, .. }
+            ),
+            "舊 Enroll 幀缺 profile 欄 must 解析為 None"
+        );
+        let legacy_login = serde_json::json!({
+            "Login": {"server": "http://h", "email": "a@b.test",
+                      "password": "pw", "api_key": null}
+        });
+        assert!(
+            matches!(
+                serde_json::from_value::<AuthCall>(legacy_login).unwrap(),
+                AuthCall::Login {
+                    profile: None,
+                    two_factor: None,
+                    ..
+                }
+            ),
+            "舊 Login 幀缺 profile/two_factor 欄 must 解析為 None"
+        );
+        let enroll = Auth::Enroll {
+            pairing: "p".into(),
+            display_name: "cli:1".into(),
+            pair_code: Some("CODE".into()),
+            profile: Some("work".into()),
+        };
+        let back: Auth = postcard::from_bytes(&postcard::to_allocvec(&enroll).unwrap()).unwrap();
+        assert!(
+            matches!(back, Auth::Enroll { profile: Some(p), .. } if p == "work"),
+            "postcard 往返保槽名"
+        );
+        let welcome = ServerMsg::Welcome {
+            proto: PROTO_VERSION,
+            epoch: 4,
+            server: ServerProfile {
+                kind: ServerKind::Vaultwarden,
+                version: None,
+                features: vec![],
+            },
+            state: UnlockStateView::SignedOut,
+            events_from: 0,
+            format: crate::wire::WireFormat::Json,
+            profile: "personal".into(),
+        };
+        let legacy_welcome: ServerMsg = serde_json::from_str(
+            &serde_json::to_string(&welcome)
+                .unwrap()
+                .replace(",\"profile\":\"personal\"", ""),
+        )
+        .unwrap();
+        assert!(
+            matches!(legacy_welcome, ServerMsg::Welcome { profile, .. } if profile.is_empty()),
+            "舊 daemon 的 Welcome 缺 profile 欄 must 解析為空字串"
+        );
+    }
+
     /// 批次 8 紀律：StatusInfo 尾附 email/server 兩欄 must `default`——
     /// 舊 daemon 的 JSON 幀（無此欄）要能解析成 None，不得互炸。
     #[test]
@@ -2779,11 +2893,13 @@ mod tests {
             email: Some("a@b.test".into()),
             server: Some("http://127.0.0.1:1".into()),
             biometric_available: true,
+            profile: "personal".into(),
         };
         let bytes = postcard::to_allocvec(&full).unwrap();
         let back: StatusInfo = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(back.email.as_deref(), Some("a@b.test"));
         assert_eq!(back.server.as_deref(), Some("http://127.0.0.1:1"));
+        assert_eq!(back.profile, "personal", "postcard 往返保槽名");
         let j = serde_json::to_string(&full).unwrap();
         let back: StatusInfo = serde_json::from_str(&j).unwrap();
         assert_eq!(back.email, full.email);
@@ -2854,10 +2970,16 @@ mod tests {
             }
         });
         let call: AuthCall = serde_json::from_value(legacy).unwrap();
-        let AuthCall::Login { two_factor, .. } = &call else {
+        let AuthCall::Login {
+            two_factor,
+            profile,
+            ..
+        } = &call
+        else {
             panic!("形態不符")
         };
         assert!(two_factor.is_none());
+        assert!(profile.is_none(), "E5：舊幀缺 profile 欄＝None");
         let with = Call::Auth(AuthCall::Login {
             server: "http://127.0.0.1:18097".into(),
             email: "a@b.test".into(),
@@ -2868,6 +2990,7 @@ mod tests {
                 token: "123456".into(),
                 remember: true,
             }),
+            profile: Some("work".into()),
         });
         let bytes = postcard::to_allocvec(&with).unwrap();
         let back: Call = postcard::from_bytes(&bytes).unwrap();

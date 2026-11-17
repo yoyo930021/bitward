@@ -932,6 +932,8 @@ fn auth_summary(call: &AuthCall) -> String {
         AuthCall::PairRevoke { .. } => "pair revoke <code>".into(),
         AuthCall::WhoAmI => "whoami".into(),
         AuthCall::ChangePassword { .. } => "change-password".into(),
+        AuthCall::AccountList => "account list".into(),
+        AuthCall::AccountUse { profile } => format!("account use {profile}"),
     }
 }
 
@@ -1130,6 +1132,7 @@ mod tests {
             password: Some("master-SENTINEL".into()),
             api_key: None,
             two_factor: None,
+            profile: None,
         }));
         assert!(login.contains("me@example.com"), "{login}");
         assert!(

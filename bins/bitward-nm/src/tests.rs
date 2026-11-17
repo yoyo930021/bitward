@@ -93,6 +93,7 @@ async fn conn(stream: UnixStream, d: Daemon) {
         &ServerMsg::Welcome {
             proto: PROTO_VERSION,
             epoch: 1,
+            profile: String::new(),
             server: ServerProfile {
                 kind: ServerKind::Vaultwarden,
                 version: None,

@@ -357,6 +357,7 @@ impl Hub {
             email,
             server,
             biometric_available: self.keystore.biometric_available(),
+            profile: String::new(),
         }
     }
 
@@ -437,6 +438,7 @@ impl Hub {
                 password: Some(pw),
                 api_key: None,
                 two_factor,
+                ..
             }) => self.login(server, email, pw, two_factor.as_ref()).await,
             Call::Auth(AuthCall::Login { .. }) => Err(denied(
                 "P1: daemon-side password challenge 未実装；請由 CLI 傳入密碼",
@@ -783,6 +785,13 @@ impl Hub {
                 Self::require_interactive(sess)?;
                 self.store_settings(*s)
             }
+            // E5 帳號槽協議欄位在此批只上線格式；容器化在下一批接上分派。
+            Call::Auth(AuthCall::AccountList) => Err(WtpError::Unsupported {
+                feature: "多帳號（E5）尚未落地".into(),
+            }),
+            Call::Auth(AuthCall::AccountUse { .. }) => Err(WtpError::Unsupported {
+                feature: "多帳號（E5）尚未落地".into(),
+            }),
         }
     }
 
@@ -1903,6 +1912,8 @@ fn action_tag(c: &Call) -> String {
         Call::Auth(AuthCall::PairRevoke { .. }) => "Auth.PairRevoke",
         Call::Auth(AuthCall::WhoAmI) => "Auth.WhoAmI",
         Call::Auth(AuthCall::ChangePassword { .. }) => "Auth.ChangePassword",
+        Call::Auth(AuthCall::AccountList) => "Auth.AccountList",
+        Call::Auth(AuthCall::AccountUse { .. }) => "Auth.AccountUse",
         Call::Vault(VaultCall::List { view, .. }) => return format!("Vault.List.{view:?}"),
         Call::Vault(VaultCall::Get { view, .. }) => return format!("Vault.Get.{view:?}"),
         Call::Vault(VaultCall::Create { .. }) => "Vault.Create",

@@ -78,6 +78,7 @@ fn server_identity(token: Option<&str>, pid: u32, pairing: String) -> (String, A
                     pairing,
                     display_name: name,
                     pair_code: None,
+                    profile: None,
                 },
             )
         }

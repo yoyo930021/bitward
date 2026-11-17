@@ -2226,6 +2226,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                             password: Some(pw),
                             api_key: None,
                             two_factor: None,
+                            profile: None,
                         })) {
                             // 登入即解鎖：成功直接回 Status，走 StateUpdated。
                             Ok(Response::Status(info)) => Cmd::StateUpdated {
@@ -2300,6 +2301,7 @@ pub fn reduce(core: &AppCore, cmd: Cmd) {
                             password: Some(pw),
                             api_key: None,
                             two_factor: Some(tf),
+                            profile: None,
                         })) {
                             Ok(Response::Status(info)) => Cmd::StateUpdated {
                                 state: info.state,

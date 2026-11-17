@@ -203,6 +203,7 @@ impl Conn {
                     pairing,
                     display_name: format!("gui:{}", std::process::id()),
                     pair_code: None,
+                    profile: None,
                 },
                 wants,
                 formats: wire::supported_formats(),
@@ -346,6 +347,7 @@ mod tests {
                 &ServerMsg::Welcome {
                     proto: PROTO_VERSION,
                     epoch: 1,
+                    profile: String::new(),
                     server: ServerProfile {
                         kind: ServerKind::Vaultwarden,
                         version: None,
