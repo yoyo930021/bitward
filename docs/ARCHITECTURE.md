@@ -423,7 +423,7 @@ P1 是最早失敗點：自寫 crypto 正確性與無 spec 互通性是風險最
 ## 10. 開放問題
 
 1. （已裁決 2026-10-29，見 §1.2）無 `--standalone` 降級持鑰模式，亦無 thin 自動 provision：surface 不註冊任何東西，可用性＝同機中樞在線（由 Full 套件註冊）或異機配對＋推播喚醒；headless `bitwardd` 保留為刻意選擇的 Full 形態。
-2. 多帳號：單 daemon 多 profile（各自 KeyBundle/epoch/outbox，共用 socket）vs per-profile socket。
+2. （已裁決 2026-11-17 並落地 PR6-E5，見 `docs/design/candidate-1-daemon-hub.md` §7.3-2）多帳號＝單 daemon 多 profile：`<data_dir>/accounts/<profile>/` 各自一套 `vault.db`／`UnlockMachine`（獨立 LockEpoch）／server handle＋token／`device.id`／事件匯流／outbox／設定鏡／核准佇列，封存按 `AccountLabel`（槽名）分條目；socket 共用一條，槽由 `Hello{Auth::Enroll{profile}}` 綁定、連線終身有效，不帶 profile 落 `accounts/.default` 指標指向的槽。既有單帳號庫首啟無感遷移進 `default` 槽。CLI `--profile`／`bitward account ls|use`、MCP/NM `BITWARD_PROFILE`；GUI 帳號切換器隨 E3b 車。隔離斷言＝`dev/e2e/multiaccount.sh`（三斷言＋併發 sync ≤ 串行 1.2×）。
 3. tags overlay 跨裝置同步（隱藏 SecureNote 載體方案）是否推遲到真實使用確認之後。
 4. 本地 metadata 索引是否需加密（先量測再決定）。
 5. 瀏覽器 extension 完整化與 iOS 版是否列 P6 後獨立設計包。

@@ -721,8 +721,11 @@ enum AccountCmd {
     Ls,
     /// 設預設槽（不帶 `--profile` 的新連線都落它）
     Use {
-        /// 槽名（`accounts/<profile>`，見 `account ls`）
-        profile: String,
+        /// 槽名（`accounts/<profile>`，見 `account ls`）。欄位名刻意不叫
+        /// `profile`：全域 `--profile` 已佔那個 id，同名會讓 clap 把這個位置
+        /// 值回填成連線槽，結果「設預設」變成「開新槽」。
+        #[arg(value_name = "PROFILE")]
+        slot: String,
     },
 }
 
@@ -1070,6 +1073,13 @@ async fn run() -> Result<(), String> {
     let mut reply = await_reply(&mut rd, fmt, rid).await?;
     if matches!(args.cmd, Cmd::Login { .. }) {
         reply = login_2fa_rounds(&mut rd, &mut wr, fmt, &call, reply, rid).await?;
+    }
+    // E5：`account use` 換的是「不帶 --profile 時落哪個槽」，而快取的 token 已綁
+    // 舊槽——不丟就會讓人按了切換卻還看到舊帳號（本輪回包已是新預設，照樣報）。
+    if matches!(args.cmd, Cmd::Account { cmd: AccountCmd::Use { .. } })
+        && matches!(reply, Ok(Response::Accounts(_)))
+    {
+        let _ = std::fs::remove_file(cli_session_file_for(&data_dir, None));
     }
     match reply {
         Ok(resp) => {
@@ -2149,8 +2159,8 @@ fn build_call(cmd: &Cmd, profile: Option<&str>) -> Result<Call, String> {
         Cmd::Hub { .. } => unreachable!("hub 純本機，run() 提前返回"),
         Cmd::Account { cmd } => match cmd {
             AccountCmd::Ls => Call::Auth(AuthCall::AccountList),
-            AccountCmd::Use { profile } => Call::Auth(AuthCall::AccountUse {
-                profile: profile.clone(),
+            AccountCmd::Use { slot } => Call::Auth(AuthCall::AccountUse {
+                profile: slot.clone(),
             }),
         },
         Cmd::SignOut => Call::Auth(AuthCall::SignOut),

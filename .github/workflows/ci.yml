@@ -204,3 +204,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -q -p bitwarderd -p bitward
       - run: ./dev/e2e/pushpath.sh
+
+  # PR6-E5：單 daemon 多 profile 的隔離三斷言＋併發 sync perf 框（Lane 9 的 CI 面）。
+  # 自架 Vaultwarden 服務容器，兩個 VW 帳號同 daemon 兩槽。
+  multiaccount:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -q -p bitwarderd -p bitward
+      - run: ./dev/e2e/multiaccount.sh
