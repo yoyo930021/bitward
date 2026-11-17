@@ -124,6 +124,28 @@ N --profile ../escape status >/dev/null 2>&1 && fail "非法槽名竟然受理" 
 N account use nope >/dev/null 2>&1 && fail "未知槽可設預設" || true
 pass "槽名校驗與未知槽拒收"
 
+# GUI 面（E5f 帳號切換器）：`nsh run` 開窗按到切換器，三幀齊備才算收據；
+# 無 nsh 的環境（CI ubuntu job）如實 skip，GUI 由裝機車收據。
+if command -v nsh >/dev/null 2>&1; then
+  OUT=${1:-$PWD/apps/bitward-gui}
+  DAA="$PWD/$DA"
+  rm -f "$OUT"/acct-*.png
+  set +e
+  (cd apps/bitward-gui && NSH_GUI_SHOTS="$OUT" NSH_GUI_SHOTS_ACCOUNT=1 \
+    BITWARD_DATA_DIR="$DAA" BITWARD_GUI_SOCK="$DAA/s" nsh run --target macos)
+  RC=$?
+  set -e
+  [[ "$RC" == "0" ]] || fail "GUI 切換器腿 nsh exit $RC"
+  for n in acct-1-two-slots acct-2-switched acct-3-back; do
+    [[ -f "$OUT/$n.png" ]] || fail "缺 GUI 幀 $n.png（nsh exit $RC）"
+  done
+  mkdir -p docs/reviews
+  cp "$OUT/acct-2-switched.png" docs/reviews/p6-multiaccount.png
+  pass "GUI 面：帳號切換器換槽三幀齊備（docs/reviews/p6-multiaccount.png）"
+else
+  echo "skip: GUI 面（本機無 nsh，由裝機車收據）"
+fi
+
 # perf 框（plan：雙帳號併發 sync 總牆鐘 ≤ 串行 1.2×）：5 輪交錯，取中位數
 now_ms() { python3 -c 'import time;print(int(time.time()*1000))'; }
 serial=(); parallel=()
