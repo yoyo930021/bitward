@@ -25,7 +25,7 @@ use bw_proto::{
 use bw_server::DeleteKind;
 use bw_store::{MutState, Mutation, MutationDraft};
 
-use crate::hub::Hub;
+use crate::accounts::Profile;
 
 /// 409/412 之外的「服務器上該 cipher 不存在」判定
 fn is_not_found(e: &bw_server::ServerError) -> bool {
@@ -57,7 +57,7 @@ pub(crate) fn drain_tick(failures: u32) -> std::time::Duration {
     }
 }
 
-impl Hub {
+impl Profile {
     pub fn trigger_drain(&self) {
         let _ = self.drain_tx.send(());
     }
@@ -1346,7 +1346,7 @@ mod tests {
         tag: &str,
         with_akey: bool,
     ) -> (
-        std::sync::Arc<Hub>,
+        std::sync::Arc<Profile>,
         std::path::PathBuf,
         Uuid,
         Uuid,

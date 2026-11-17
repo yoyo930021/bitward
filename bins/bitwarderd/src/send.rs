@@ -18,7 +18,8 @@ use bw_crypto::{SendKey, b64url, unwrap_seed};
 use bw_proto::{ItemId, Response, SendContent, SendOp, WtpError};
 use bw_server::ServerError;
 
-use crate::hub::{DispatchResult, Hub, denied, drift, map_server_err};
+use crate::accounts::Profile;
+use crate::hub::{DispatchResult, denied, drift, map_server_err};
 
 /// 檔案 Send 上限：借附件 32 MiB 紀律（同一條 BTP 幀容量推導，
 /// 見 `crate::attach::MAX_ATTACHMENT_BYTES`）。
@@ -28,7 +29,7 @@ pub const MAX_SEND_FILE_BYTES: usize = crate::attach::MAX_ATTACHMENT_BYTES;
 /// 實錄超界回 400 "deletion date that far into the future"）。
 const MAX_DELETION_HOURS: u32 = 720;
 
-impl Hub {
+impl Profile {
     pub async fn send_op(&self, sub: &SendOp) -> DispatchResult {
         match sub {
             SendOp::Create {

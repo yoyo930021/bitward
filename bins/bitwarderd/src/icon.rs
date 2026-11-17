@@ -35,7 +35,7 @@ fn valid_host(host: &str) -> bool {
     ok && !host.starts_with('*')
 }
 
-impl crate::hub::Hub {
+impl crate::accounts::Profile {
     /// 取圖：快取命中（未過 TTL）直接回；miss → 單飛閘內再檢查一次
     /// （併發同 host 只放一發外連）→ 打伺服器 → 落盤 → 回位元組。
     pub async fn get_icon(&self, host: &str) -> Result<Response, WtpError> {

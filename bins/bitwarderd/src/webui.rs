@@ -286,55 +286,76 @@ async fn respond(
 }
 
 impl Hub {
-    /// 代理存取：base 取帳號 server 值（頁端無從指定）；四態換成本頁文案鍵。
+    /// 代理存取：一條 loopback 頁服務全 daemon，而 Send 屬於某個帳號槽——
+    /// 逐槽用該槽帳號的 server base 試，命中（非 404）即回；全數 404 才報
+    /// inaccessible，沒有任何已登入槽才報 no-server。
     pub(crate) async fn webui_access(&self, aid: &str, password: Option<&str>) -> (u16, Value) {
-        let Some(base) = self.server_base().await else {
-            return (503, json!({"error":"no-server"}));
-        };
-        let Ok(client) = Client::new(&base) else {
-            return (503, json!({"error":"no-server"}));
-        };
-        match client.send_access(aid, password).await {
-            Ok(SendAccessOutcome::Send(v)) => (200, v),
-            Ok(SendAccessOutcome::PasswordRequired) => (401, json!({"error":"password-required"})),
-            Ok(SendAccessOutcome::PasswordInvalid) => (400, json!({"error":"password-invalid"})),
-            Ok(SendAccessOutcome::Inaccessible) => (404, json!({"error":"inaccessible"})),
-            Err(e) => (502, json!({"error":"transport", "detail": e.to_string()})),
+        let mut fallback = (503, json!({"error":"no-server"}));
+        for p in self.profiles() {
+            let Some(base) = p.server_base().await else {
+                continue;
+            };
+            fallback = (404, json!({"error":"inaccessible"}));
+            let Ok(client) = Client::new(&base) else {
+                continue;
+            };
+            match client.send_access(aid, password).await {
+                Ok(SendAccessOutcome::Send(v)) => return (200, v),
+                Ok(SendAccessOutcome::PasswordRequired) => {
+                    return (401, json!({"error":"password-required"}));
+                }
+                Ok(SendAccessOutcome::PasswordInvalid) => {
+                    return (400, json!({"error":"password-invalid"}));
+                }
+                Ok(SendAccessOutcome::Inaccessible) => {}
+                Err(e) => {
+                    fallback = (502, json!({"error":"transport", "detail": e.to_string()}));
+                }
+            }
         }
+        fallback
     }
 
     /// 代理取檔：回密文檔身位元組（解密屬頁內 WebCrypto；本層不碰明文）。
+    /// 槽的搜尋語意同 [`Hub::webui_access`]。
     pub(crate) async fn webui_file(
         &self,
         sid: &str,
         fid: &str,
         password: Option<&str>,
     ) -> (u16, String, Vec<u8>) {
-        let Some(base) = self.server_base().await else {
-            return json_resp(503, json!({"error":"no-server"}));
-        };
-        let Ok(client) = Client::new(&base) else {
-            return json_resp(503, json!({"error":"no-server"}));
-        };
+        let mut fallback = json_resp(503, json!({"error":"no-server"}));
         let Ok(id) = bw_proto::ItemId::parse_str(sid) else {
             return json_resp(400, json!({"error":"bad-send-id"}));
         };
-        match client.send_file_download(id, fid, password).await {
-            Ok(bytes) => (200, "application/octet-stream".into(), bytes),
-            Err(bw_server::ServerError::Http { status: 404, .. }) => {
-                json_resp(404, json!({"error":"inaccessible"}))
+        for p in self.profiles() {
+            let Some(base) = p.server_base().await else {
+                continue;
+            };
+            fallback = json_resp(404, json!({"error":"inaccessible"}));
+            let Ok(client) = Client::new(&base) else {
+                continue;
+            };
+            match client.send_file_download(id, fid, password).await {
+                Ok(bytes) => return (200, "application/octet-stream".into(), bytes),
+                Err(bw_server::ServerError::Http { status: 400, .. }) => {
+                    return json_resp(400, json!({"error":"password-invalid"}));
+                }
+                Err(bw_server::ServerError::Http { status: 404, .. }) => {}
+                Err(e) => {
+                    fallback =
+                        json_resp(502, json!({"error":"transport", "detail": e.to_string()}));
+                }
             }
-            Err(bw_server::ServerError::Http { status: 400, .. }) => {
-                json_resp(400, json!({"error":"password-invalid"}))
-            }
-            Err(e) => json_resp(502, json!({"error":"transport", "detail": e.to_string()})),
         }
+        fallback
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accounts::Profile;
     use crate::passkey::tests::unlocked_hub;
     use bw_proto::{Response, SendOp};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -356,10 +377,10 @@ mod tests {
         )
     }
 
-    async fn live_webui(tag: &str) -> (Arc<Hub>, u16, String) {
+    async fn live_webui(tag: &str) -> (Arc<Profile>, u16, String) {
         let (hub, _dir) = unlocked_hub(tag).await;
-        let (port, tcp) = bind(hub.clone()).await.unwrap();
-        tokio::spawn(serve(hub.clone(), tcp));
+        let (port, tcp) = bind(hub.hub.clone()).await.unwrap();
+        tokio::spawn(serve(hub.hub.clone(), tcp));
         let (status, _, html) = one_shot(port, "GET / HTTP/1.1\r\nHost: x\r\n\r\n").await;
         assert_eq!(status, 200);
         let nonce = html

@@ -7,9 +7,10 @@ use uuid::Uuid;
 use bw_proto::{DupGroup, ItemId, OverlayOpWire, Response, WtpError};
 use bw_store::{MutationDraft, Overlay, OverlayOp};
 
-use crate::hub::{Hub, denied};
+use crate::accounts::Profile;
+use crate::hub::denied;
 
-impl Hub {
+impl Profile {
     pub fn overlay_op(
         &self,
         session: &str,

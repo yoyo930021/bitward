@@ -10,7 +10,8 @@
 use bw_keys::{TimeoutPolicy, UnlockMaterial, UnlockReceipt};
 use bw_proto::{Response, Settings, UnlockStateView};
 
-use crate::hub::{DispatchResult, Hub};
+use crate::accounts::Profile;
+use crate::hub::DispatchResult;
 
 /// meta 表落點鍵（本機設定的唯一真相源；JSON 形態＝`Settings` serde 預設）。
 pub(crate) const META_KEY: &str = "settings";
@@ -20,7 +21,7 @@ const AUTO_LOCK_TIERS: &[u8] = &[1, 5, 15, 30, 60, 240];
 /// 官方剪貼簿清除層級（秒）；0＝從不。
 const CLIPBOARD_TIERS: &[u8] = &[10, 20, 40, 60];
 
-impl Hub {
+impl Profile {
     /// 從 meta 表讀設定；缺行或破損＝官方預設（相容性：舊庫沒有這行）。
     pub(crate) fn read_settings(store: &bw_store::Store) -> Settings {
         store
@@ -128,7 +129,9 @@ mod tests {
         };
         hub.store_settings(want).unwrap();
         drop(hub);
-        let hub2 = crate::hub::Hub::open(&dir, None, None).await.unwrap();
+        let hub2 = crate::passkey::tests::default_slot(
+            &crate::hub::Hub::open(&dir, None, None).await.unwrap(),
+        );
         assert_eq!(hub2.current_settings(), want);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -179,7 +182,9 @@ mod tests {
         // 手動鎖上 → 模擬重啟：開新 Hub 走啟動自動解鎖（封存金鑰在 disk）
         hub.machine.lock(bw_keys::LockReason::User);
         drop(hub);
-        let hub2 = crate::hub::Hub::open(&dir, None, None).await.unwrap();
+        let hub2 = crate::passkey::tests::default_slot(
+            &crate::hub::Hub::open(&dir, None, None).await.unwrap(),
+        );
         assert!(!hub2.machine.is_unlocked());
         hub2.auto_unlock_on_start();
         assert!(hub2.machine.is_unlocked());
@@ -191,7 +196,9 @@ mod tests {
         .unwrap();
         hub2.machine.lock(bw_keys::LockReason::User);
         drop(hub2);
-        let hub3 = crate::hub::Hub::open(&dir, None, None).await.unwrap();
+        let hub3 = crate::passkey::tests::default_slot(
+            &crate::hub::Hub::open(&dir, None, None).await.unwrap(),
+        );
         hub3.auto_unlock_on_start();
         assert!(!hub3.machine.is_unlocked());
         let _ = std::fs::remove_dir_all(dir);

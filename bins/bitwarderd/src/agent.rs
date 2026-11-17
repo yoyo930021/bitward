@@ -16,6 +16,7 @@ use bw_proto::{
 };
 use bw_store::{SessionRow, SessionState};
 
+use crate::accounts::Profile;
 use crate::hub::Hub;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +34,9 @@ pub struct PairingSpec {
     pub grants: GrantSet,
     pub expires_at_ms: u64,
     pub ttl_secs: u64,
+    /// 簽發碼的帳號槽（E5）：配對後的跨機 session 落回同槽，不因預設槽被
+    /// 別人改過而跑錯帳號。
+    pub profile: String,
 }
 
 pub struct LiveSession {
@@ -44,6 +48,15 @@ pub struct LiveSession {
     pub ledger: Mutex<Ledger>,
     /// unix ms；None = 跟隨鎖世代
     pub expires_at_ms: Option<u64>,
+    /// 綁定的帳號槽（E5）。Enroll 決定；`Login{profile}` 只有在原槽尚未落帳號
+    /// 時才改綁一次（見 `Profile::login`）。此後該連線的所有呼叫只碰這個槽。
+    pub profile: std::sync::RwLock<Arc<Profile>>,
+}
+
+impl LiveSession {
+    pub(crate) fn profile_arc(&self) -> Arc<Profile> {
+        self.profile.read().unwrap().clone()
+    }
 }
 
 pub struct PendingApproval {
@@ -67,9 +80,9 @@ fn denied(gap: impl std::fmt::Display) -> WtpError {
     }
 }
 
-impl Hub {
+impl Profile {
     pub fn new_session(
-        &self,
+        self: &Arc<Self>,
         token: String,
         kind: SessionKind,
         grants: GrantSet,
@@ -91,6 +104,7 @@ impl Hub {
             grants: std::sync::RwLock::new(grants),
             ledger: Mutex::new(Ledger::default()),
             expires_at_ms,
+            profile: std::sync::RwLock::new(self.clone()),
         });
         self.sessions
             .lock()
@@ -448,7 +462,7 @@ impl Hub {
     // —— AgentCall 治理面 ——
 
     pub fn open_session(
-        &self,
+        self: &Arc<Self>,
         caller: &Arc<LiveSession>,
         scopes: &[String],
         ttl_secs: u64,
@@ -520,7 +534,9 @@ impl Hub {
             return Err(denied("只有互動端能撤銷"));
         }
         let key = session.0.to_string();
-        if let Some(s) = self.sessions.lock().unwrap().get(&key) {
+        if let Some(s) = self.sessions.lock().unwrap().get(&key)
+            && s.profile_arc().name == self.name
+        {
             s.revoked.store(true, std::sync::atomic::Ordering::Relaxed);
             let _ = self.store.session_set_state(&key, SessionState::Revoked);
             Ok(Response::Ok)
@@ -538,6 +554,7 @@ impl Hub {
             .lock()
             .unwrap()
             .values()
+            .filter(|s| s.profile_arc().name == self.name)
             .map(|s| bw_proto::AgentSessionInfo {
                 id: s.row.id.clone(),
                 kind: format!("{:?}", s.kind),
@@ -576,7 +593,7 @@ impl Hub {
     // —— 跨機配對（§1.2）——
 
     pub fn restore_session(
-        &self,
+        self: &Arc<Self>,
         row: SessionRow,
         kind: crate::agent::SessionKind,
         grants: bw_agent::GrantSet,
@@ -588,6 +605,7 @@ impl Hub {
             kind,
             grants: std::sync::RwLock::new(grants),
             ledger: std::sync::Mutex::new(bw_agent::Ledger::default()),
+            profile: std::sync::RwLock::new(self.clone()),
         });
         self.sessions
             .lock()
@@ -624,6 +642,7 @@ impl Hub {
                 grants,
                 expires_at_ms: expires,
                 ttl_secs: ttl_secs.max(60),
+                profile: self.name.clone(),
             },
         );
         Ok(Response::PairInfo(bw_proto::PairInfo {
@@ -640,7 +659,7 @@ impl Hub {
             .lock()
             .unwrap()
             .iter()
-            .filter(|(_, s)| s.expires_at_ms > now)
+            .filter(|(_, s)| s.expires_at_ms > now && s.profile == self.name)
             .map(|(code, s)| bw_proto::PairedCode {
                 code: code.clone(),
                 name: s.name.clone(),
@@ -651,21 +670,15 @@ impl Hub {
     }
 
     pub fn pair_revoke_code(&self, code: &str) -> Result<Response, WtpError> {
-        self.pairings
-            .lock()
-            .unwrap()
-            .remove(code)
-            .map(|_| Response::Ok)
-            .ok_or(WtpError::NotFound)
-    }
-
-    /// join 時消耗：過期/不存在 → None。
-    pub fn consume_pairing(&self, code: &str) -> Option<PairingSpec> {
-        let spec = self.pairings.lock().unwrap().remove(code)?;
-        if spec.expires_at_ms < self.store.now_ms() {
-            return None;
+        let mut g = self.pairings.lock().unwrap();
+        // 只撤本槽簽的碼：A 的互動端不該悄悄撤掉 B 剛發出的配對碼。
+        match g.get(code) {
+            Some(s) if s.profile == self.name => {
+                g.remove(code);
+                Ok(Response::Ok)
+            }
+            _ => Err(WtpError::NotFound),
         }
-        Some(spec)
     }
 
     /// 信令副發（§1.2 推播路徑）：ntfy（自架形態）與 APNs（正式分發形態）同源同時機，
@@ -831,6 +844,22 @@ impl Hub {
     }
 }
 
+impl Hub {
+    /// join 時消耗：過期/不存在 → None。配對階段還沒綁槽，故用裝置級時鐘，
+    /// 落點槽由 `spec.profile` 決定（見 serve_conn 的 Enroll 臂）。
+    pub fn consume_pairing(&self, code: &str) -> Option<PairingSpec> {
+        let spec = self.pairings.lock().unwrap().remove(code)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or_default();
+        if spec.expires_at_ms < now {
+            return None;
+        }
+        Some(spec)
+    }
+}
+
 fn parse_err(e: ParseError) -> WtpError {
     denied(e)
 }
@@ -955,7 +984,7 @@ fn two_factor_summary(call: &TwoFactorCall) -> String {
 mod tests {
     use super::*;
 
-    async fn bare_hub() -> Arc<Hub> {
+    async fn bare_hub() -> Arc<Profile> {
         let dir = std::env::temp_dir().join(format!("bw-agent-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         #[cfg(unix)]
@@ -963,11 +992,12 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        Hub::open(&dir, None, None).await.unwrap()
+        let hub = Hub::open(&dir, None, None).await.unwrap();
+        crate::passkey::tests::default_slot(&hub)
     }
 
     /// (requester, human)：requester 帶 `approve` 標記的 grant，任何命中都排隊。
-    fn gated_sessions(hub: &Arc<Hub>) -> (Arc<LiveSession>, Arc<LiveSession>) {
+    fn gated_sessions(hub: &Arc<Profile>) -> (Arc<LiveSession>, Arc<LiveSession>) {
         let requester = hub.new_session(
             Uuid::new_v4().to_string(),
             SessionKind::Agent,
@@ -987,7 +1017,7 @@ mod tests {
 
     /// 背景發起一個必然 NeedApproval 的 dispatch，等它進佇列後回 (任務, 核准 id)。
     async fn spawn_gated(
-        hub: &Arc<Hub>,
+        hub: &Arc<Profile>,
         requester: &Arc<LiveSession>,
     ) -> (
         tokio::task::JoinHandle<Result<Response, WtpError>>,

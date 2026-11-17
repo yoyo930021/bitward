@@ -19,12 +19,12 @@ use serde_json::{Value, json};
 use bw_proto::{AttachmentId, AttachmentOp, ItemId, Response, WtpError};
 use bw_store::{MutState, Mutation, MutationDraft};
 
-use crate::hub::Hub;
+use crate::accounts::Profile;
 
 /// 單檔上限（Contract 1；BTP 幀上限的推導見 bw-btp MAX_FRAME 註解）。
 pub const MAX_ATTACHMENT_BYTES: usize = 32 * 1024 * 1024;
 
-impl Hub {
+impl Profile {
     /// 上傳：加密（`with_keys` 閉包內）→ blob 落盤 → outbox `Awaiting` 入列
     /// （單寫路徑紀律同 cipher 寫入：本地先收、drain 推送、離線自然佇列）
     /// → 觸發 drain。回應即 `Ok`；附件鏡像列隨伺服器回包（push 端）落地。
@@ -267,7 +267,7 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    fn personal_cipher(hub: &Hub, tag: &str) -> ItemId {
+    fn personal_cipher(hub: &Profile, tag: &str) -> ItemId {
         let id = Uuid::new_v4();
         hub.store
             .put_mirror(

@@ -6,15 +6,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use tokio::sync::RwLock;
+use serde_json::Value;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use bw_keys::{
-    AccountLabel, AuthContext, BwCryptoKernel, FileKeyStore, LockReason, UnlockMachine,
-    UnlockMaterial, UnlockReceipt,
-};
+use bw_keys::{AuthContext, FileKeyStore, LockReason, UnlockMaterial, UnlockReceipt};
 // PR6-E1：`biometric_available` 走 KeyStore trait，只在 macOS 封存選擇塊需要；
 // Linux 側（dyn 物件方法免 import）留著會吃 unused 拒鎖，故 cfg 閘。
 #[cfg(target_os = "macos")]
@@ -25,7 +21,9 @@ use bw_proto::{
     TwoFactorCall, TwoFactorInput, TwoFactorProviderInfo, UseCall, VaultCall, View, WtpError,
 };
 use bw_server::{Client, PasswordLogin, ServerError, TwoFactorProviderType};
-use bw_store::{AuditFilter, AuditRecord, Store};
+use bw_store::{AuditFilter, AuditRecord};
+
+use crate::accounts::Profile;
 
 pub struct ServerHandle {
     pub client: std::sync::Arc<Client>,
@@ -52,30 +50,15 @@ pub struct AccountRecord {
 
 pub struct Hub {
     pub data_dir: PathBuf,
-    /// Arc：publish_signal 的 APNs 副發 task 需要跨 spawn 持有 store。
-    pub store: Arc<Store>,
-    pub machine: UnlockMachine,
-    pub server: RwLock<Option<ServerHandle>>,
-    account: RwLock<Option<AccountRecord>>,
-    /// 穩定裝置 id：notifications is_own_change 與 login deviceIdentifier 同源
-    pub device: String,
-    pub drain_tx: tokio::sync::mpsc::UnboundedSender<()>,
-    pub drain_rx: tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<()>>>,
-    /// drain 單飛：併發觸發只跑一轮實際推送（§3.5 trigger 去重語意）
-    pub drain_lock: tokio::sync::Mutex<()>,
-    /// BTP 事件匯流（EventTopic, payload ≤ Identity 級）
-    pub events: tokio::sync::broadcast::Sender<bw_proto::EventPayload>,
-    /// 上次全量 sync 的 unix ms；通知是 fire-and-forget，半開連線期間的事件會永久錯過，
-    /// 由 30 秒週期 sync 兜底（官方客戶端同為 notifications+定期 sync 雙軌）。
-    pub last_sync_ms: std::sync::atomic::AtomicU64,
-    /// token → 活 session（§2.3）。Enroll 與 Agent OpenSession 皆註冊於此。
+    /// E5 帳號槽表（名稱 → 槽）。per-account 狀態全在槽裡：store/machine/server
+    /// handle/token/device id 各一套。見 `accounts.rs`。
+    pub(crate) profiles: std::sync::Mutex<HashMap<String, Arc<Profile>>>,
+    /// 預設槽名（真態在 `accounts/.default`；這裡是啟動讀入的記憶體鏡）。
+    pub(crate) default_profile: std::sync::Mutex<String>,
+    /// token → 活 session（§2.3）。Enroll 與 Agent OpenSession 皆註冊於此；
+    /// 逐條 session 自帶所屬槽，故跨槽查得 token 也擋得住（撤銷只看自己槽的世代）。
     pub sessions: Arc<Mutex<HashMap<String, Arc<crate::agent::LiveSession>>>>,
-    /// 等待人工核准的請求（§2.3 Enrollment/Approval）
-    pub pending: Mutex<HashMap<bw_proto::ApprovalId, crate::agent::PendingApproval>>,
-    /// BeginAssert→FinishAssert 事務的暫存 authData/hash/counter（鍵=規範化 credentialId）。
-    /// 記憶體態：daemon 重啟即失，Swift 端須重跑 Begin（冪等）。
-    pub pending_asserts: Mutex<HashMap<String, crate::passkey::PendingAssert>>,
-    /// 未消耗的一次性配對碼（§1.2）
+    /// 未消耗的一次性配對碼（§1.2）；碼是裝置級，消耗後綁定的槽記在 spec 裡。
     pub pairings: Mutex<HashMap<String, crate::agent::PairingSpec>>,
     /// ntfy 信令 URL（None = 不發）；只傳不透明信令，明文永不上通道
     pub ntfy_url: Option<String>,
@@ -86,18 +69,11 @@ pub struct Hub {
     /// 圖示代理單飛閘（批次 B）：同 host 併發去重——雙重檢查快取，
     /// 閘內只放一發外連（語意同 bw-server refresh_gate）
     pub icon_gate: tokio::sync::Mutex<()>,
-    /// 批次 14：封存金鑰后端（Keychain biometric 或 FileKeyStore）；
-    /// status_info 報 biometric_available、Unlock 臂判可用性。
+    /// 批次 14：封存金鑰后端（Keychain biometric 或 FileKeyStore）；條目按槽名
+    /// 分開（`AccountLabel`），后端本身是全裝置共用的單一物件。
     pub keystore: std::sync::Arc<dyn bw_keys::KeyStore>,
-    /// 本機設定快取（macOS 設定面）：真態在 meta 表，這裡是啟動讀入＋
-    /// `SetSettings` 同步的記憶體鏡（政策接線見 settings.rs）。
-    pub settings: std::sync::Mutex<bw_proto::Settings>,
     /// Send 接收頁 loopback 監聽的實際 port（0＝未起；webUrl 與探測以在場與否為準）。
     pub webui_port: std::sync::atomic::AtomicU16,
-    /// PR4 C2：grantee 緊急檢視快取（ea_id →（LockEpoch，Reveal 投影））。
-    /// 明文只活記憶體（同 GUI 訊號紀律，不落盤）；epoch 一變（上鎖/解鎖）
-    /// 整批作廢——plan 的「本機上鎖則 view 快取失效」語意在此實作。
-    pub ea_view_cache: std::sync::Mutex<HashMap<String, (u64, Vec<ItemView>)>>,
 }
 
 pub type DispatchResult = Result<Response, WtpError>;
@@ -138,8 +114,11 @@ impl Hub {
             std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o700))
                 .map_err(|e| e.to_string())?;
         }
-        let store = Store::open(&data_dir.join("vault.db")).map_err(|e| e.to_string())?;
-        let account: Option<AccountRecord> = Self::read_json(&data_dir.join("account.json"));
+        // E5 遷移：舊單帳號佈局（vault.db／account.json／device.id 直接躺在
+        // data_dir 根）首啟搬入 accounts/default/，之後 per-account 狀態全由槽管。
+        if crate::accounts::migrate_legacy_layout(data_dir) {
+            tracing::info!(dir = %data_dir.display(), "單帳號庫已遷移至 accounts/default/");
+        }
         // 批次 14b：macOS 鑰封存升級 Keychain（biometric ACL）；flag 開且生物
         // 硬體可用才接替 FileKeyStore，否則（含非 macOS）維持檔案路徑。
         // 遷移：選中 keychain 時清掉舊封存檔——首波解鎖走主密碼，
@@ -165,153 +144,41 @@ impl Hub {
                 FileKeyStore::new(data_dir.join("keys")).map_err(|e| e.to_string())?,
             )
         };
-        // 固定 label：首次登入時 account.json 還不存在，若用 email 作 label
-        // 會造成封存與載入路徑不一致（A7b 實測教訓）。多帳號（P6）再拆 per-account。
-        let label = AccountLabel::new("default");
-        // D2（稽核 2026-11-16）strict 封存閘：FileKeyStore（FilePermissions 強度）
-        // 只在自動解鎖 opt-in（lock_on_sleep_restart=false）時把封存金鑰落盤；
-        // Keychain（BiometricBound，ACL 保護）不受閘——Touch ID 便利照舊。
-        // strict 態開庫即清舊版殘留封存（鎖定即毀鑰，不等第一次解鎖）。
-        let initial_settings = Self::read_settings(&store);
-        let sealing = keystore.wrap_strength() == bw_keys::WrapStrength::BiometricBound
-            || !initial_settings.lock_on_sleep_restart;
-        if !sealing {
-            let _ = keystore.clear(&label);
-        }
-        let builder = UnlockMachine::builder()
-            .label(label)
-            .kernel(Arc::new(BwCryptoKernel))
-            .keystore(keystore.clone())
-            .sealing(sealing);
-        let builder = match &account {
-            Some(_) => builder.signed_out(false),
-            None => builder.signed_out(true),
-        };
-        let machine = builder.build();
-        if let Some(a) = &account {
-            machine.set_auth_context(AuthContext {
-                email: a.email.clone(),
-                kdf: kdf_params(a),
-                protected_user_key: a.protected_user_key.clone(),
-                keys_fingerprint: a.keys_fingerprint.clone(),
-                enc_private_key: a.enc_private_key.clone(),
-            });
-        }
-        let (drain_tx, drain_rx) = tokio::sync::mpsc::unbounded_channel();
         let hub = Arc::new(Hub {
             data_dir: data_dir.to_path_buf(),
-            store: Arc::new(store),
-            machine,
-            server: RwLock::new(None),
-            account: RwLock::new(account.clone()),
-            device: Self::device_id_static(data_dir),
-            drain_tx,
-            drain_rx: tokio::sync::Mutex::new(Some(drain_rx)),
-            drain_lock: tokio::sync::Mutex::new(()),
-            events: tokio::sync::broadcast::channel(128).0,
-            last_sync_ms: std::sync::atomic::AtomicU64::new(0),
+            profiles: std::sync::Mutex::new(HashMap::new()),
+            default_profile: std::sync::Mutex::new(crate::accounts::DEFAULT_PROFILE.to_owned()),
             sessions: Arc::new(Mutex::new(HashMap::new())),
-            pending: Mutex::new(HashMap::new()),
-            pending_asserts: Mutex::new(HashMap::new()),
             pairings: Mutex::new(HashMap::new()),
             ntfy_url,
             apns,
             tls_pin: std::sync::OnceLock::new(),
             icon_gate: tokio::sync::Mutex::new(()),
             keystore,
-            settings: std::sync::Mutex::new(initial_settings),
             webui_port: std::sync::atomic::AtomicU16::new(0),
-            ea_view_cache: std::sync::Mutex::new(HashMap::new()),
         });
-        // 自動鎖定政策接線（settings.rs）：解鎖時的 idle deadline 由設定決定。
-        hub.apply_timeout_policy();
-        if let Some(a) = account {
-            let client = std::sync::Arc::new(
-                Client::with_options(&a.server, Hub::sync_options()).map_err(|e| e.to_string())?,
-            );
-            if let Some(t) = a.access_token.clone() {
-                client.set_access_token(&t).await;
-            }
-            // 4c：重啟還原也要帶續期憑證，否則 401 收口只能拋錯
-            client.set_refresh_token(a.refresh_token.as_deref()).await;
-            // 續期成功 → account.json 就地讀改寫（真態在磁碟；記憶體
-            // AccountRecord 的 token 欄僅供展示，容許短暫落後）＋解除
-            // needs_reauth。Weak 中樞引用：sink 掛在 client、client 住在 hub，
-            // 強引用會成環。
-            let weak = Arc::downgrade(&hub);
-            client.set_token_sink(std::sync::Arc::new(move |access, refresh| {
-                let Some(h) = weak.upgrade() else { return };
-                let path = h.data_dir.join("account.json");
-                if let Ok(bytes) = std::fs::read(&path)
-                    && let Ok(mut v) = serde_json::from_slice::<Value>(&bytes)
-                {
-                    v["access_token"] = json!(access);
-                    v["refresh_token"] = match refresh {
-                        Some(r) => json!(r),
-                        None => Value::Null,
-                    };
-                    if std::fs::write(&path, v.to_string()).is_ok() {
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            let _ = std::fs::set_permissions(
-                                &path,
-                                std::fs::Permissions::from_mode(0o600),
-                            );
-                        }
-                    }
-                }
-                h.machine.note_token_renewed();
-            }));
-            hub.server.write().await.replace(ServerHandle { client });
+        // 掃已存在的槽目錄；一個都沒有（新裝機）就建 `default` 空槽——不帶 profile
+        // 的 thin 連線要有落點，語意與舊單帳號形態一致。
+        let mut names = crate::accounts::list_profile_dirs(data_dir);
+        if names.is_empty() {
+            names.push(crate::accounts::DEFAULT_PROFILE.to_owned());
         }
-        // 重啟不踢已配對裝置：從持久層重建活 session（§2.3，token 即 id）
-        for row in hub.store.session_list().unwrap_or_default() {
-            if row.state != bw_store::SessionState::Active {
-                continue;
-            }
-            let kind = match row.principal.get("kind").and_then(Value::as_str) {
-                Some("agent") => crate::agent::SessionKind::Agent,
-                Some("device") => crate::agent::SessionKind::Device,
-                _ => crate::agent::SessionKind::Interactive,
-            };
-            let parsed: bw_agent::GrantSet =
-                serde_json::from_value(row.grants.clone()).unwrap_or_default();
-            let grants = if parsed.0.is_empty() && kind == crate::agent::SessionKind::Interactive {
-                bw_agent::GrantSet::default_full()
-            } else {
-                parsed
-            };
-            hub.restore_session(row, kind, grants);
+        for name in &names {
+            let p = hub.open_profile(name).await?;
+            hub.profiles.lock().unwrap().insert(name.clone(), p);
         }
+        *hub.default_profile.lock().unwrap() =
+            crate::accounts::read_default_pointer(data_dir, &names);
         Ok(hub)
     }
 
-    fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
+    pub(crate) fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
         std::fs::read(path)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
     }
 
-    async fn persist_account(&self) -> Result<(), WtpError> {
-        let acc = self
-            .account
-            .read()
-            .await
-            .clone()
-            .ok_or(WtpError::NotFound)?;
-        let bytes = serde_json::to_vec_pretty(&acc).map_err(denied)?;
-        let path = self.data_dir.join("account.json");
-        std::fs::write(&path, bytes).map_err(denied)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-        }
-        Ok(())
-    }
-
-    fn device_id_static(dir: &Path) -> String {
+    pub(crate) fn device_id_static(dir: &Path) -> String {
         let path = dir.join("device.id");
         if let Ok(s) = std::fs::read_to_string(&path) {
             let t = s.trim();
@@ -323,7 +190,12 @@ impl Hub {
         let _ = std::fs::write(&path, &id);
         id
     }
+}
 
+/// 以下全是單個帳號槽的行為：分派、登入、解鎖、同步、寫入、治理。
+/// 槽拿得到裝置級欄位（`data_dir`、`keystore`、`sessions`…）是靠
+/// `impl Deref<Target = Hub>`，故函數體與單帳號時期同形。
+impl Profile {
     /// 帳號的 server base 值（Send 分享 URL 的前綴；契約 3：base 用帳號 server 值）。
     pub(crate) async fn server_base(&self) -> Option<String> {
         self.account.read().await.as_ref().map(|a| a.server.clone())
@@ -357,7 +229,7 @@ impl Hub {
             email,
             server,
             biometric_available: self.keystore.biometric_available(),
-            profile: String::new(),
+            profile: self.name.clone(),
         }
     }
 
@@ -426,7 +298,7 @@ impl Hub {
     }
 
     async fn dispatch_inner(
-        &self,
+        self: &Arc<Self>,
         sess: &Arc<crate::agent::LiveSession>,
         call: &Call,
     ) -> DispatchResult {
@@ -438,8 +310,27 @@ impl Hub {
                 password: Some(pw),
                 api_key: None,
                 two_factor,
-                ..
-            }) => self.login(server, email, pw, two_factor.as_ref()).await,
+                profile,
+            }) => {
+                // E5：指定的槽與連線綁定不同時，只有空槽可改綁——不把已登入的
+                // 帳號寫進別人的槽，也不讓既有連線悄悄換庫。
+                let target = match profile.as_deref() {
+                    None => self.clone(),
+                    Some(name) if name == self.name => self.clone(),
+                    Some(name) => {
+                        if self.has_account().await {
+                            return Err(denied(format!(
+                                "此連線已綁定帳號槽「{}」；要登入「{name}」請帶 --profile {name} 重新連線",
+                                self.name
+                            )));
+                        }
+                        let t = self.hub.resolve_profile(Some(name)).await?;
+                        *sess.profile.write().unwrap() = t.clone();
+                        t
+                    }
+                };
+                target.login(server, email, pw, two_factor.as_ref()).await
+            }
             Call::Auth(AuthCall::Login { .. }) => Err(denied(
                 "P1: daemon-side password challenge 未実装；請由 CLI 傳入密碼",
             )),
@@ -495,7 +386,7 @@ impl Hub {
                 }
                 self.machine.sign_out();
                 *self.account.write().await = None;
-                let _ = std::fs::remove_file(self.data_dir.join("account.json"));
+                let _ = std::fs::remove_file(self.dir().join("account.json"));
                 Ok(Response::Status(self.status_info().await))
             }
             Call::Auth(AuthCall::PairStart {
@@ -785,13 +676,16 @@ impl Hub {
                 Self::require_interactive(sess)?;
                 self.store_settings(*s)
             }
-            // E5 帳號槽協議欄位在此批只上線格式；容器化在下一批接上分派。
-            Call::Auth(AuthCall::AccountList) => Err(WtpError::Unsupported {
-                feature: "多帳號（E5）尚未落地".into(),
-            }),
-            Call::Auth(AuthCall::AccountUse { .. }) => Err(WtpError::Unsupported {
-                feature: "多帳號（E5）尚未落地".into(),
-            }),
+            // E5 帳號槽治理面：槽拓撲是這台裝置的狀態，只給本機互動端看與改。
+            Call::Auth(AuthCall::AccountList) => {
+                Self::require_interactive(sess)?;
+                Ok(self.hub.account_list().await)
+            }
+            Call::Auth(AuthCall::AccountUse { profile }) => {
+                Self::require_interactive(sess)?;
+                self.hub.set_default_profile(profile)?;
+                Ok(self.hub.account_list().await)
+            }
         }
     }
 
@@ -817,8 +711,9 @@ impl Hub {
         pw: &str,
         two_factor: Option<&TwoFactorInput>,
     ) -> DispatchResult {
-        let client =
-            std::sync::Arc::new(Client::with_options(server, Hub::sync_options()).map_err(denied)?);
+        let client = std::sync::Arc::new(
+            Client::with_options(server, Profile::sync_options()).map_err(denied)?,
+        );
         let pre = client.prelogin(email).await.map_err(map_server_err)?;
         let kdf = KdfWire::from_prelogin(&pre).ok_or_else(|| drift("prelogin 缺 KDF 欄位"))?;
         let mk = bw_crypto::master_key(pw, email, kdf.to_params()).map_err(denied)?;
@@ -1874,7 +1769,7 @@ impl KdfWire {
     }
 }
 
-fn kdf_params(a: &AccountRecord) -> bw_crypto::KdfParams {
+pub(crate) fn kdf_params(a: &AccountRecord) -> bw_crypto::KdfParams {
     KdfWire {
         kind: a.kdf,
         iterations: a.kdf_iterations,
@@ -2131,11 +2026,14 @@ fn verify_org_private_key(
 mod tests {
     use super::*;
     use crate::agent::SessionKind;
+    use serde_json::json;
 
-    async fn bare_hub() -> Arc<Hub> {
+    /// 新裝機形態：無帳號的空預設槽（未登入、鎖態）。
+    async fn bare_hub() -> Arc<Profile> {
         let dir = std::env::temp_dir().join(format!("bw-hub-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        Hub::open(&dir, None, None).await.unwrap()
+        let hub = Hub::open(&dir, None, None).await.unwrap();
+        crate::passkey::tests::default_slot(&hub)
     }
 
     /// PR5 perf 死線收據器（`BW_PERF_STORE` 指鏡像庫、`--ignored` 跑）：
@@ -2319,7 +2217,8 @@ mod tests {
         );
 
         let (url, hits) = spawn_two_factor_mock();
-        let client = std::sync::Arc::new(Client::with_options(&url, Hub::sync_options()).unwrap());
+        let client =
+            std::sync::Arc::new(Client::with_options(&url, Profile::sync_options()).unwrap());
         client.set_access_token("AT").await;
         *hub.server.write().await = Some(ServerHandle { client });
         *hub.account.write().await = Some(AccountRecord {
@@ -2890,7 +2789,7 @@ mod tests {
             .unwrap();
         let mut disk = Vec::new();
         for suffix in ["vault.db", "vault.db-wal"] {
-            if let Ok(b) = std::fs::read(hub.data_dir.join(suffix)) {
+            if let Ok(b) = std::fs::read(hub.dir().join(suffix)) {
                 disk.extend_from_slice(&b);
             }
         }

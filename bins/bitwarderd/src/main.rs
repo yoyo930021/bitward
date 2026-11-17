@@ -1,6 +1,7 @@
 //! bitwarderd：每裝置唯一的中樞（契約 §1）。
 //! main = 傳輸與 session 生命週期；業務分派在 hub.rs。
 
+mod accounts;
 mod agent;
 mod apns;
 mod arena;
@@ -25,7 +26,6 @@ use clap::Parser;
 use uuid::Uuid;
 
 use bw_btp::{read_client, write_server};
-use bw_keys::UnlockEvent;
 use bw_proto::wire::{WireFormat, select_format};
 use bw_proto::{Auth, ClientMsg, PROTO_VERSION, Response, ServerMsg, WtpError};
 use hub::Hub;
@@ -369,7 +369,10 @@ async fn main() -> Result<(), String> {
     };
     let hub = Hub::open(&data_dir, args.ntfy.clone(), apns).await?;
     // 重啟行為（設定 lock_on_sleep_restart=false 時自動解鎖；預設 true 直接回）。
-    hub.auto_unlock_on_start();
+    // 逐槽判定：自動解鎖是各槽 meta 表裡的設定，A 開不等於 B 開。
+    for p in hub.profiles() {
+        p.auto_unlock_on_start();
+    }
     let held = match bind_sock(&sock, &data_dir) {
         Ok(h) => h,
         Err(e) => {
@@ -484,86 +487,9 @@ async fn main() -> Result<(), String> {
         });
     }
 
-    // drain：寫入即推（mpsc 觸發）＋ 背景自動推送常駐輪（退避、收斂發
-    // OutboxDrained，見 sync.rs auto_drain_loop）＋ 30 秒週期 sync 兜底。
-    {
-        let hub_a = hub.clone();
-        tokio::spawn(async move {
-            let mut rx = hub_a.drain_rx.lock().await.take().expect("drain rx once");
-            while rx.recv().await.is_some() {
-                hub_a.drain_until_idle().await;
-            }
-        });
-        let hub2 = hub.clone();
-        tokio::spawn(async move { hub2.auto_drain_loop().await });
-        let hub3 = hub.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                // 通知是 fire-and-forget：斷線期間的事件永久錯過，30 秒週期 sync 兜底
-                if hub3.machine.is_unlocked()
-                    && hub3.machine.egress_online()
-                    && hub3.store.now_ms()
-                        - hub3.last_sync_ms.load(std::sync::atomic::Ordering::Relaxed)
-                        > 30_000
-                {
-                    let _ = hub3.sync_now().await;
-                }
-            }
-        });
-    }
-    // notifications：多中樞收斂（§1.1 targeted pull）
-    {
-        let hub = hub.clone();
-        tokio::spawn(async move { hub.notify_loop().await });
-    }
-
-    // 級聯撤銷：鎖世代推進 ⇒ 綁舊 epoch 的 session 全滅（§2.2、A6）。
-    {
-        let hub = hub.clone();
-        let mut watch = hub.machine.watch();
-        tokio::spawn(async move {
-            while let Ok(ev) = watch.recv().await {
-                match &ev {
-                    UnlockEvent::Revoked { epoch, .. } => {
-                        // 鎖世代推進 ⇒ 事件之前存在的所有 session 撤銷；
-                        // 之後 Enroll 的（含 AuthLocked 期間）不受影響。
-                        let _ = hub.store.sessions_revoke_before(epoch.0);
-                        // D1：任何路徑的鎖定（含閒置 timeout、with_keys 惰性
-                        // 鎖）都截斷 WAL，治「舊頁留殘值」。
-                        let _ = hub.store.checkpoint_wal_truncate();
-                        for s in hub.sessions.lock().unwrap().values_mut() {
-                            if s.row.epoch < epoch.0 {
-                                s.revoked.store(true, std::sync::atomic::Ordering::Relaxed);
-                            }
-                        }
-                    }
-                    // 鎖態轉換廣播（FR 1635 thin 共享解鎖態）：GUI 訂閱
-                    // LockStateChanged 即時刷新——自動鎖定（閒置心跳）不是
-                    // 使用者按出来的，沒有這條事件界面會停在過期鎖態。
-                    UnlockEvent::State { view, epoch } => {
-                        hub.emit(bw_proto::EventPayload::LockState {
-                            state: view.clone(),
-                            epoch: epoch.0,
-                        });
-                    }
-                    _ => {}
-                }
-            }
-        });
-    }
-    // vault timeout 心跳（idle + hard 雙軌，§2.2）。
-    {
-        let hub = hub.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                if hub.machine.check_timeout() {
-                    let _ = hub.store.sessions_revoke_before(hub.machine.epoch().0);
-                }
-            }
-        });
-    }
+    // 每槽常駐迴路（drain 即推、背景自動推送、30 秒週期 sync、級聯撤銷、
+    // vault timeout 心跳）由 `Profile::spawn_tasks` 在開槽時起——槽與槽各自的
+    // 節拍與鎖世代綁，A 的佇列不會推 B 的 outbox。
 
     loop {
         let (stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
@@ -638,7 +564,7 @@ where
                 display_name,
                 pairing,
                 pair_code,
-                ..
+                profile,
             } => {
                 // 本機 UDS 的 Enroll = Interactive 全權；TLS 連線必須帶配對碼（§1.2）
                 let token = if pairing.is_empty() {
@@ -653,7 +579,12 @@ where
                                 grant_gap: "跨機連線需要配對碼".into(),
                             });
                         }
-                        hub.new_session(
+                        // E5：槽綁定在握手就做，此後這隻連線只碰這個槽。
+                        let p = match hub.resolve_profile(profile.as_deref()).await {
+                            Ok(p) => p,
+                            Err(e) => break 'auth Err(e),
+                        };
+                        p.new_session(
                         token,
                         crate::agent::SessionKind::Interactive,
                         bw_agent::GrantSet::default_full(),
@@ -663,8 +594,13 @@ where
                     }
                     Some(code) => match hub.consume_pairing(&code) {
                         Some(spec) => {
-                            let expires = hub.store.now_ms() + spec.ttl_secs * 1000;
-                            hub.new_session(
+                            // 碼由哪個槽簽的就落回哪個槽：預設槽指標後來被改也照舊。
+                            let p = match hub.resolve_profile(Some(&spec.profile)).await {
+                                Ok(p) => p,
+                                Err(e) => break 'auth Err(e),
+                            };
+                            let expires = p.store.now_ms() + spec.ttl_secs * 1000;
+                            p.new_session(
                                 token,
                                 crate::agent::SessionKind::Device,
                                 spec.grants,
@@ -720,17 +656,20 @@ where
         }
     };
 
+    // 連線的帳號槽：Welcome 的鎖態/世代/游標、事件匯流、後續所有分派都只認它。
+    let p = sess.profile_arc();
+
     write_server(
         &mut wr,
         WireFormat::Json,
         &ServerMsg::Welcome {
             proto: PROTO_VERSION,
-            epoch: hub.machine.epoch().0,
-            server: hub.server_profile().await,
-            state: hub.machine.state(),
-            events_from: hub.store.cursor().unwrap_or(0),
+            epoch: p.machine.epoch().0,
+            server: p.server_profile().await,
+            state: p.machine.state(),
+            events_from: p.store.cursor().unwrap_or(0),
             format: fmt,
-            profile: String::new(),
+            profile: p.name.clone(),
         },
     )
     .await
@@ -746,7 +685,7 @@ where
     let mut ev_rx = if wants.is_empty() {
         None
     } else {
-        Some(hub.events.subscribe())
+        Some(p.subscribe())
     };
 
     loop {
@@ -760,16 +699,16 @@ where
                 };
                 match msg {
                     ClientMsg::Invoke { rid, call } => {
-                        // 撤銷只看 lock 事件（A6）；unlock 的 epoch bump 不殺既有 session
+                        // 撤銷只看鎖事件（A6）；unlock 的 epoch bump 不殺既有 session
                         let revoked = sess.revoked.load(std::sync::atomic::Ordering::Relaxed);
-                        let now = hub.machine.epoch();
+                        let now = p.machine.epoch();
                         let outcome = if revoked {
                             Err(WtpError::StaleEpoch {
                                 seen: sess.row.epoch,
                                 now: now.0,
                             })
                         } else {
-                            hub.dispatch(&sess, &call).await
+                            p.dispatch(&sess, &call).await
                         };
                         if write_server(&mut wr, fmt, &ServerMsg::Reply { rid, outcome })
                             .await
@@ -780,8 +719,8 @@ where
                     }
                     ClientMsg::Pull { cursor } => {
                         // P2：事件歷史重播在 P3 補（目前 Pull 回游標確認）
-                        let _seq = hub.store.cursor().unwrap_or(cursor);
-                        if write_server(&mut wr, fmt, &ServerMsg::Reply { rid: 0, outcome: Ok(Response::Status(hub.status_info().await)) }).await.is_err() {
+                        let _seq = p.store.cursor().unwrap_or(cursor);
+                        if write_server(&mut wr, fmt, &ServerMsg::Reply { rid: 0, outcome: Ok(Response::Status(p.status_info().await)) }).await.is_err() {
                             return Ok(());
                         }
                     }
@@ -795,7 +734,7 @@ where
                 }
             } => {
                 if let Some(payload) = ev {
-                    let seq = hub.store.cursor().unwrap_or(0);
+                    let seq = p.store.cursor().unwrap_or(0);
                     let topic = payload.topic();
                     if write_server(
                         &mut wr,
@@ -817,7 +756,7 @@ where
     }
 }
 
-impl Hub {
+impl Profile {
     /// Welcome 用：回 cache 的 profile，不觸發網路探測。
     async fn server_profile(&self) -> bw_proto::ServerProfile {
         let g = self.server.read().await;

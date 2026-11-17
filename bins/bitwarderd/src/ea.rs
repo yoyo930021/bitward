@@ -63,7 +63,7 @@ fn localize_ea_error(status: u16, detail: &str) -> Option<String> {
     .map(|(_, msg)| format!("{msg}（HTTP {status}）"))
 }
 
-impl crate::hub::Hub {
+impl crate::accounts::Profile {
     pub(crate) async fn ea_dispatch(&self, call: &EaCall) -> DispatchResult {
         match call {
             EaCall::ListGrantees => self.ea_list(EaRole::Grantee).await,

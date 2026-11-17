@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 use bw_proto::{ItemId, PasskeyCall, PasskeyEntry, Query, Response, WtpError};
 use bw_store::MutationDraft;
 
-use crate::hub::Hub;
+use crate::accounts::Profile;
 
 fn denied(e: impl std::fmt::Display) -> WtpError {
     WtpError::Denied {
@@ -134,7 +134,7 @@ impl StoredKey {
     }
 }
 
-impl Hub {
+impl Profile {
     /// 掃描全鏡像找 credential id；回傳 (item_id, 陣列索引)。
     fn find_credential(&self, credential_id: &str) -> Result<Option<(ItemId, usize)>, WtpError> {
         let want = norm_b64url(credential_id);
@@ -786,6 +786,7 @@ impl Hub {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::hub::Hub;
     use std::sync::Arc;
 
     use bw_crypto::MIN_PBKDF2_ITERATIONS;
@@ -807,9 +808,10 @@ pub(crate) mod tests {
         d
     }
 
-    /// 合成帳號（PBKDF2 iter=1）落 account.json → Hub::open → MasterPassword 解鎖。
+    /// 合成帳號（PBKDF2 iter=1）落 `accounts/default/account.json` → Hub::open →
+    /// MasterPassword 解鎖。回預設槽（這些測試驗的是單帳號行為，槽即當時的全部）。
     /// server URL 是擺設：這些測試不碰網路（drain 無消費者）。
-    pub(crate) async fn unlocked_hub(tag: &str) -> (Arc<Hub>, std::path::PathBuf) {
+    pub(crate) async fn unlocked_hub(tag: &str) -> (Arc<Profile>, std::path::PathBuf) {
         let dir = tmp_dir(tag);
         let email = "t@example.com";
         let pw = "test-master-pw".to_string();
@@ -835,14 +837,23 @@ pub(crate) mod tests {
             "protected_user_key": puk,
             "keys_fingerprint": null,
         });
-        std::fs::write(dir.join("account.json"), account.to_string()).unwrap();
+        let slot = crate::accounts::profile_dir(&dir, crate::accounts::DEFAULT_PROFILE);
+        std::fs::create_dir_all(&slot).unwrap();
+        std::fs::write(slot.join("account.json"), account.to_string()).unwrap();
         let hub = Hub::open(&dir, None, None).await.unwrap();
+        let p = default_slot(&hub);
         assert!(
-            hub.machine
+            p.machine
                 .submit(UnlockMaterial::MasterPassword(Zeroizing::new(pw)))
                 .is_ok()
         );
-        (hub, dir)
+        (p, dir)
+    }
+
+    /// 取預設槽（單帳號形態測試的落點）。
+    pub(crate) fn default_slot(hub: &Arc<Hub>) -> Arc<Profile> {
+        hub.profile(crate::accounts::DEFAULT_PROFILE)
+            .expect("Hub::open 必建預設槽")
     }
 
     fn register_call(item_id: Option<ItemId>) -> PasskeyCall {
@@ -1080,7 +1091,7 @@ pub(crate) mod tests {
         (scalar, bw_crypto::b64url(&spki))
     }
 
-    fn decrypted(hub: &Hub, env: &str) -> String {
+    fn decrypted(hub: &Profile, env: &str) -> String {
         hub.machine
             .with_keys(|kb| bw_crypto::decrypt(kb.user_key(), &env.to_string()))
             .unwrap()
@@ -1127,7 +1138,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn mirror_entry(hub: &Hub, credential_id: &str) -> (ItemId, Value) {
+    fn mirror_entry(hub: &Profile, credential_id: &str) -> (ItemId, Value) {
         let (item, idx) = hub.find_credential(credential_id).unwrap().unwrap();
         let row = hub.store.item(item).unwrap().unwrap();
         let entry = row.enc_cipher["login"]["fido2Credentials"][idx].clone();
@@ -1565,7 +1576,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn locked_hub_rejects_passkey_calls() {
         let dir = tmp_dir("locked");
-        let hub = Hub::open(&dir, None, None).await.unwrap();
+        let hub = default_slot(&Hub::open(&dir, None, None).await.unwrap());
         assert!(matches!(hub.passkey_list(None), Err(WtpError::Locked)));
         assert!(matches!(
             hub.passkey_register("s", &register_call(None)).await,
