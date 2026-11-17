@@ -26,8 +26,8 @@
 | V5 | `List{view: Reveal}` 繞過 reveal grant | MEDIUM | 8/10 | 直接讀碼 | `bins/bitwarderd/src/agent.rs:193` | ☐ |
 | V6 | `btw://` 注入略過核准、Device 不查 scope | MEDIUM | 9/10、8/10 | 獨立驗證 | `bins/bitwarderd/src/agent.rs:683` | ☐ |
 | V7 | 核准摘要以 `Debug` 洩漏明文 | MEDIUM | 8/10 | 直接讀碼 | `bins/bitwarderd/src/agent.rs:819` | ☐ |
-| D1 | `vault.db` 持久保存明文帳密 | 設計層 | — | 直接讀碼（部分） | `crates/bw-store/src/schema.rs:82` | ☐ |
-| D2 | `FileKeyStore` 落盤未包裝的 user key | 設計層 | — | 直接讀碼（部分） | `crates/bw-keys/src/machine.rs:376` | ☐ |
+| D1 | `vault.db` 持久保存明文帳密 | 設計層 | — | 直接讀碼（部分） | `crates/bw-store/src/schema.rs:82` | ✅ `d355504`（PR7b：password_hmac＋鎖態拒值查詢＋secure_delete/checkpoint） |
+| D2 | `FileKeyStore` 落盤未包裝的 user key | 設計層 | — | 直接讀碼（部分） | `crates/bw-keys/src/machine.rs:376` | ✅ `d355504`（PR7b：strict 封存閘，僅自動解鎖 opt-in 落盤、lock 即清） |
 | B1 | `/private/tmp` socket 目錄可被搶佔 | MEDIUM | 0.75 | 未驗證 | `bins/bitwarderd/src/main.rs:220` | ☐ |
 
 ---
